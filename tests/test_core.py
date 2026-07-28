@@ -11,6 +11,7 @@ Phase 0 acceptance criteria:
 from __future__ import annotations
 
 import asyncio
+import threading
 
 import pytest
 
@@ -382,6 +383,107 @@ class TestEventBus:
             timeout=1,
         )
         assert completed == ["healthy"]
+
+    @pytest.mark.asyncio
+    async def test_cancellation_ignoring_handler_cannot_hold_publish_lock(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        delivered: list[str] = []
+        bus = EventBus("test", handler_timeout_seconds=0.01)
+
+        @bus.on("conversation.turn.started")
+        async def non_cooperative(event):
+            if event.turn_id != "blocked":
+                return
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+        @bus.on("conversation.turn.started")
+        async def healthy(event):
+            delivered.append(event.turn_id)
+
+        try:
+            first = ConversationTurnStartedEvent(
+                session_id="sess", turn_id="blocked", turn_sequence=0
+            )
+            await asyncio.wait_for(bus.publish(first), timeout=0.5)
+            await entered.wait()
+            second = ConversationTurnStartedEvent(
+                session_id="sess", turn_id="next", turn_sequence=1
+            )
+            await asyncio.wait_for(bus.publish(second), timeout=0.5)
+
+            assert delivered == ["blocked", "next"]
+
+            async def accept_replay(_event):
+                return None
+
+            assert await bus.replay(accept_replay) == 2
+        finally:
+            release.set()
+            await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_blocking_sync_handler_cannot_freeze_event_loop(self):
+        entered = threading.Event()
+        release = threading.Event()
+        calls = 0
+        bus = EventBus("test", handler_timeout_seconds=0.01)
+
+        @bus.on("conversation.turn.started")
+        def blocking(_event):
+            nonlocal calls
+            calls += 1
+            entered.set()
+            release.wait()
+
+        try:
+            event = ConversationTurnStartedEvent(
+                session_id="sess", turn_id="sync-blocked", turn_sequence=0
+            )
+            await asyncio.wait_for(bus.publish(event), timeout=0.5)
+
+            assert entered.is_set()
+            assert bus.subscriber_count == 0
+
+            second = ConversationTurnStartedEvent(
+                session_id="sess", turn_id="after-quarantine", turn_sequence=1
+            )
+            await asyncio.wait_for(bus.publish(second), timeout=0.5)
+            assert calls == 1
+
+            async def accept_replay(_event):
+                return None
+
+            assert await bus.replay(accept_replay) == 2
+        finally:
+            release.set()
+            await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_ignoring_replay_handler_is_bounded(self):
+        release = asyncio.Event()
+        bus = EventBus("test", handler_timeout_seconds=0.01)
+        event = ConversationTurnStartedEvent(
+            session_id="sess", turn_id="replay-blocked", turn_sequence=0
+        )
+        await bus.publish(event)
+
+        async def non_cooperative(_event):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+        try:
+            count = await asyncio.wait_for(bus.replay(non_cooperative), timeout=0.5)
+            assert count == 0
+        finally:
+            release.set()
+            await asyncio.sleep(0)
 
     @pytest.mark.asyncio
     async def test_cancelled_publish_finishes_commit_before_propagating(self):

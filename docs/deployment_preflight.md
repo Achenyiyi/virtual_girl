@@ -86,6 +86,15 @@ The event bus rejects new work after shutdown and drains any accepted event befo
 memory provider closes. A persistence error is fail-closed: the event is neither delivered nor
 retained for in-process replay. Treat repeated persistence or subscriber-timeout logs as a failed
 runtime, investigate the database or handler, and restart only after normal cleanup completes.
+Timed-out live subscribers are automatically quarantined for the remainder of the process. Both
+asynchronous and synchronous subscriber/replay callbacks have hard observation deadlines;
+synchronous callbacks run outside the event-loop thread and cannot prevent process exit.
+
+Each top-level component shutdown also has a hard observation deadline. If a component ignores
+coroutine cancellation, shutdown continues with the remaining components and consumes the eventual
+task result instead of waiting indefinitely. This bounds application exit but cannot forcibly free
+native resources held by defective third-party code, so timeout logs still require operator review
+before relaunch.
 
 ## Memory backup and recovery preparation
 

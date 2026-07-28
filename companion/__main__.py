@@ -377,18 +377,34 @@ class CompanionApp:
 
     @staticmethod
     async def _stop_component(name: str, operation: Any) -> None:
+        task = asyncio.ensure_future(operation)
         try:
-            await asyncio.wait_for(operation, timeout=_SHUTDOWN_STEP_TIMEOUT_SECONDS)
-        except TimeoutError:
-            logging.getLogger(__name__).error(
-                "Timed out after %.1fs while shutting down %s",
-                _SHUTDOWN_STEP_TIMEOUT_SECONDS,
-                name,
+            done, _ = await asyncio.wait(
+                [task], timeout=_SHUTDOWN_STEP_TIMEOUT_SECONDS
             )
+            if not done:
+                task.cancel()
+                task.add_done_callback(CompanionApp._consume_task_result)
+                logging.getLogger(__name__).error(
+                    "Timed out after %.1fs while shutting down %s",
+                    _SHUTDOWN_STEP_TIMEOUT_SECONDS,
+                    name,
+                )
+                return
+            await task
         except asyncio.CancelledError:
+            task.cancel()
+            task.add_done_callback(CompanionApp._consume_task_result)
             logging.getLogger(__name__).warning("Shutdown of %s was cancelled", name)
         except Exception:
             logging.getLogger(__name__).exception("Error shutting down %s", name)
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Future[Any]) -> None:
+        if task.cancelled():
+            return
+        with contextlib.suppress(Exception):
+            task.exception()
 
 
 async def async_main(args: argparse.Namespace) -> int:

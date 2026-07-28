@@ -158,6 +158,45 @@ async def test_hung_component_is_bounded_and_does_not_block_other_cleanup(monkey
 
 
 @pytest.mark.asyncio
+async def test_cancellation_ignoring_component_cannot_block_shutdown(monkeypatch) -> None:
+    app = CompanionApp(RuntimeConfig())
+    calls: list[str] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    _inject_lifecycle_components(app, calls)
+
+    class CancellationIgnoringComponent(LifecycleComponent):
+        async def stop(self) -> None:
+            self.calls.append(self.name)
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+    app._audio_output = CancellationIgnoringComponent("system_audio", calls)
+    monkeypatch.setattr("companion.__main__._SHUTDOWN_STEP_TIMEOUT_SECONDS", 0.01)
+
+    try:
+        await asyncio.wait_for(app.stop(), timeout=0.5)
+        await entered.wait()
+
+        assert sorted(calls) == sorted(
+            [
+                "system_audio",
+                "streaming_audio",
+                "voice_pipeline",
+                "event_bus",
+                "orchestrator",
+                "action_audit",
+            ]
+        )
+    finally:
+        release.set()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
 async def test_event_bus_drains_before_provider_shutdown() -> None:
     app = CompanionApp(RuntimeConfig())
     calls: list[str] = []

@@ -13,9 +13,14 @@ Key properties:
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import inspect
 import logging
+import threading
 from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Future as ConcurrentFuture
+from typing import Any
 
 from companion.events.base import BaseEvent
 
@@ -147,16 +152,29 @@ class EventBus:
 
             async def safe_call(handler: EventHandler, evt: BaseEvent) -> None:
                 try:
-                    async with asyncio.timeout(self._handler_timeout_seconds):
-                        result = handler(evt)
-                        if asyncio.iscoroutine(result):
-                            await result
-                except TimeoutError:
+                    handler_task = asyncio.create_task(self._invoke_handler(handler, evt))
+                    done, _ = await asyncio.wait(
+                        [handler_task], timeout=self._handler_timeout_seconds
+                    )
+                    if not done:
+                        handler_task.cancel()
+                        handler_task.add_done_callback(
+                            lambda task: self._consume_task_result(task)
+                        )
+                        logger.error(
+                            "EventBus[%s]: handler timed out for '%s' after %.1fs",
+                            self.name,
+                            event_type,
+                            self._handler_timeout_seconds,
+                        )
+                        self._quarantine_handler(event_type, handler)
+                        return
+                    await handler_task
+                except asyncio.CancelledError:
                     logger.error(
-                        "EventBus[%s]: handler timed out for '%s' after %.1fs",
+                        "EventBus[%s]: handler cancelled itself for '%s'",
                         self.name,
                         event_type,
-                        self._handler_timeout_seconds,
                     )
                 except Exception:
                     logger.exception(
@@ -167,6 +185,51 @@ class EventBus:
 
             await asyncio.gather(*(safe_call(h, event) for h in handlers))
 
+    @staticmethod
+    async def _invoke_handler(handler: EventHandler, event: BaseEvent) -> None:
+        result: object
+        if inspect.iscoroutinefunction(handler) or inspect.iscoroutinefunction(
+            type(handler).__call__
+        ):
+            result = handler(event)
+        else:
+            result = await EventBus._invoke_sync_handler(handler, event)
+        if inspect.isawaitable(result):
+            await result
+
+    @staticmethod
+    async def _invoke_sync_handler(handler: EventHandler, event: BaseEvent) -> object:
+        result_future: ConcurrentFuture[object] = ConcurrentFuture()
+
+        def invoke() -> None:
+            if not result_future.set_running_or_notify_cancel():
+                return
+            try:
+                result_future.set_result(handler(event))
+            except BaseException as exc:
+                result_future.set_exception(exc)
+
+        threading.Thread(
+            target=invoke,
+            name=f"event-handler-{event.event_type}",
+            daemon=True,
+        ).start()
+        return await asyncio.wrap_future(result_future)
+
+    def _quarantine_handler(self, event_type: str, handler: EventHandler) -> None:
+        subscribers = self._subscribers.get(event_type, [])
+        if handler in subscribers:
+            subscribers.remove(handler)
+        if handler in self._wildcard_subscribers:
+            self._wildcard_subscribers.remove(handler)
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Future[Any]) -> None:
+        if task.cancelled():
+            return
+        with contextlib.suppress(Exception):
+            task.exception()
+
     async def replay(self, handler: EventHandler, event_types: list[str] | None = None) -> int:
         """Replay logged events through a handler. Returns count replayed."""
         async with self._publish_lock:
@@ -175,11 +238,32 @@ class EventBus:
         count = 0
         for event in events:
             if event_types is None or event.event_type in event_types:
+                handler_task = asyncio.create_task(self._invoke_handler(handler, event))
                 try:
-                    result = handler(event)
-                    if asyncio.iscoroutine(result):
-                        await result
+                    done, _ = await asyncio.wait(
+                        [handler_task], timeout=self._handler_timeout_seconds
+                    )
+                    if not done:
+                        handler_task.cancel()
+                        handler_task.add_done_callback(
+                            lambda task: self._consume_task_result(task)
+                        )
+                        logger.error(
+                            "Replay handler timed out for %s after %.1fs",
+                            event.event_type,
+                            self._handler_timeout_seconds,
+                        )
+                        continue
+                    await handler_task
                     count += 1
+                except asyncio.CancelledError:
+                    if not handler_task.done():
+                        handler_task.cancel()
+                        handler_task.add_done_callback(
+                            lambda task: self._consume_task_result(task)
+                        )
+                        raise
+                    logger.error("Replay handler cancelled itself for %s", event.event_type)
                 except Exception:
                     logger.exception("Replay handler error for %s", event.event_type)
         return count

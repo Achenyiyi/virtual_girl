@@ -120,7 +120,10 @@ memory persistence provider.
 Event delivery status: concurrent publishes are serialized as durable commit units. Persistence
 must succeed before an event enters the bounded replay log or reaches subscribers; a cancelled
 caller waits for the accepted commit to resolve. Subscriber failures are isolated, hung handlers
-time out, shutdown drains an in-flight publish, and the closed bus rejects publishing, replay, new
+time out at a hard observation deadline even if they ignore cancellation, and timed-out live
+subscribers are quarantined. Synchronous handlers run on disposable daemon threads so they cannot
+freeze the event loop or prevent process exit; replay handlers use the same bounded invocation.
+Shutdown drains an in-flight publish, and the closed bus rejects publishing, replay, new
 subscriptions, and persistence-handler replacement.
 
 Text conversation lifecycle status: text turns are serialized so sequence numbers, prompt history,
@@ -159,7 +162,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 289 tests passed with 77.84% total
+- `pytest -q --cov=companion --cov-fail-under=70`: 293 tests passed with 77.87% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
   85%, action service 82%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version
