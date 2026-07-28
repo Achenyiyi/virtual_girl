@@ -112,6 +112,8 @@ The action and perception features must remain disabled until their correspondin
   directory; the sdist excludes tests and includes the hash-locked runtime requirements.
 - `.github/workflows/ci.yml` reproduces lint, type, coverage, vulnerability, and build gates on
   Windows; it has not yet run on a remote GitHub repository.
+- Git history now has a clean `main` baseline commit. Ignored local credentials, memory data,
+  virtual environments, and build artifacts were excluded before staging.
 - Release-source `detect-secrets` reported zero candidates. `pip-audit` reported no known
   vulnerabilities. A hash-locked isolated environment passed `pip check`; the newly built wheel
   installed there and loaded packaged configuration from an unrelated working directory.
@@ -133,3 +135,5 @@ The action and perception features must remain disabled until their correspondin
   project's isolated hash-locked release environment passes `pip check`. Azure/DeepSeek
   environment variables are not present, so hardware- and credential-backed end-to-end testing
   remains pending.
+- No Git remote is configured, so the checked-in GitHub Actions workflow cannot produce its first
+  remote green run until a repository URL and push authorization are provided.
