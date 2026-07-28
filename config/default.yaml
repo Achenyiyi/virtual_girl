@@ -66,6 +66,8 @@ providers:
       playback_timeout_seconds: 30.0
       cleanup_timeout_seconds: 2.0
       interrupt_timeout_seconds: 0.3
+      target_e2e_latency_ms: 900
+      target_interrupt_latency_ms: 300
     batch:
       provider: "faster-whisper"
       model: "base"

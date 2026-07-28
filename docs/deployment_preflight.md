@@ -33,6 +33,8 @@ python -m companion --doctor
 python -m companion --doctor --voice-input
 python -m companion --doctor-online --voice-input
 python -m companion --doctor-json --voice-input
+python -m companion --accept-voice
+python -m companion --accept-voice-json 1>voice-acceptance.json
 ```
 
 `--doctor` performs no LLM/TTS network calls. `--doctor-online` validates configured remote
@@ -56,6 +58,23 @@ silence. It doesn't persist captured audio or make cloud requests. On Windows wi
 Mode, the Hugging Face cache may warn that symlink deduplication is unavailable; this increases
 cache disk use but does not invalidate the model/inference check.
 
+`--accept-voice` is the credential-backed target-machine release gate. It first asks for one real
+microphone utterance and requires the durable event chain `ASR -> LLM -> streaming TTS -> audio
+played -> completed`. It then asks for a second utterance and, while the companion is speaking,
+asks the operator to speak again; this must stop provider work and playback, and persist exactly one
+interrupted terminal event within `target_interrupt_latency_ms` of the microphone VAD speech-start
+signal. The full barge-in utterance continues collecting for inspection without delaying the stop
+signal. Before prompting for barge-in, the gate observes a short no-speech window; a premature VAD
+edge fails as suspected speaker echo or crosstalk instead of being counted as a user interruption.
+The completed turn must reach its
+first played audio within `target_e2e_latency_ms`. Both targets are configured under
+`providers.asr.capture` and default to 900 ms and 300 ms respectively.
+
+The JSON variant writes interactive prompts to stderr and exactly one machine-readable report to
+stdout. Redirect stdout to retain release evidence. The report contains only check identifiers,
+pass/fail state, latency values, targets, event-stage failure categories, and exit code. It never
+contains microphone audio, transcripts, generated replies, credentials, or raw exception text.
+
 ## Target-machine release sequence
 
 1. Rotate any credential that was ever stored outside the environment/credential manager.
@@ -64,8 +83,8 @@ cache disk use but does not invalidate the model/inference check.
 4. Run `pip check` in that environment.
 5. Run local doctor with `--voice-input`.
 6. Inject the rotated DeepSeek and Azure credentials and run online doctor.
-7. Run a real spoken-turn test, including microphone capture, model load, streaming playback, and
-   barge-in latency measurement.
+7. Run `python -m companion --accept-voice-json 1>voice-acceptance.json`; follow the stderr prompts
+   and retain the passing JSON report with the release evidence.
 8. Enable the avatar only when its bridge extension is running and test Live2D/VRM state sync.
 9. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.
 

@@ -39,6 +39,8 @@ def test_packaged_default_config_is_cwd_independent(tmp_path, monkeypatch) -> No
     assert config.voice_pipeline_config.playback_timeout_seconds == 30.0
     assert config.voice_pipeline_config.cleanup_timeout_seconds == 2.0
     assert config.voice_pipeline_config.interrupt_timeout_seconds == 0.3
+    assert config.voice_pipeline_config.target_e2e_latency_ms == 900
+    assert config.voice_pipeline_config.target_interrupt_latency_ms == 300
     assert config.policy_config.level_4_per_hour == 1
     assert config.policy_config.level_4_cooldown_seconds == 1800
     assert config.log_max_bytes == 10 * 1024 * 1024
@@ -61,6 +63,8 @@ def test_voice_pipeline_timeouts_are_configurable(tmp_path) -> None:
       playback_timeout_seconds: 2.2
       cleanup_timeout_seconds: 3.3
       interrupt_timeout_seconds: 0.4
+      target_e2e_latency_ms: 1200
+      target_interrupt_latency_ms: 250
 """,
         encoding="utf-8",
     )
@@ -71,6 +75,23 @@ def test_voice_pipeline_timeouts_are_configurable(tmp_path) -> None:
     assert config.playback_timeout_seconds == 2.2
     assert config.cleanup_timeout_seconds == 3.3
     assert config.interrupt_timeout_seconds == 0.4
+    assert config.target_e2e_latency_ms == 1200
+    assert config.target_interrupt_latency_ms == 250
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["target_e2e_latency_ms", "target_interrupt_latency_ms"],
+)
+def test_voice_acceptance_latency_targets_must_be_positive(tmp_path, field) -> None:
+    path = tmp_path / "invalid-voice-target.yaml"
+    path.write_text(
+        f"providers:\n  asr:\n    capture:\n      {field}: 0\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=field):
+        RuntimeConfig.from_yaml(path)
 
 
 def test_memory_environment_override_is_applied_at_runtime(tmp_path, monkeypatch) -> None:

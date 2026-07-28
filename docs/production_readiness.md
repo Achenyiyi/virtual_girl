@@ -128,6 +128,15 @@ turn ID, allowing cancellation during connection setup and before the first PCM 
 active turn IDs are rejected, response streams are always released, and provider shutdown bounds
 both response and client closure even when third-party close operations ignore cancellation.
 
+Target-machine voice acceptance status: the release CLI now provides an interactive, credential-
+backed gate that separately proves one complete microphone-to-playback turn and one real-microphone
+barge-in. Runtime barge-in now fires on the VAD speech-start edge rather than waiting for the
+interrupting utterance to finish. The gate consumes the same configured providers and durable
+event ledger as production, checks
+the 900 ms voice-turn-to-first-audio and 300 ms interruption targets, returns deterministic exit
+codes, and can emit privacy-safe JSON evidence without transcripts, responses, audio, credentials,
+or raw exception messages. The gate remains unpassed until run with rotated credentials.
+
 Long-running resource status: file logs rotate at 10 MiB with five backups by default; replay,
 action, audit, proactive, latency, and audio queues are bounded. The durable SQLite event ledger is
 not truncated by these in-memory limits. Confirmation-requiring actions have a ten-item pending
@@ -185,7 +194,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 314 tests passed with 79.02%
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 324 tests passed with 79.11%
   total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice
   pipeline 85%, cloud LLM 63%, cloud TTS 81%, action service 82%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version

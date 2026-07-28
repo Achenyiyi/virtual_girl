@@ -8,7 +8,7 @@ import wave
 
 import pytest
 
-from companion.audio.microphone import MicrophoneCapture
+from companion.audio.microphone import MicrophoneCapture, VoiceChatMode
 from companion.audio.player import AudioPlayer, SoundDeviceAudioOutput, SystemAudioOutput
 
 
@@ -161,3 +161,61 @@ async def test_vad_queues_preroll_without_duplicating_trigger_frame() -> None:
     assert len(pre_roll) == 8 * len(speech)
     assert pre_roll.endswith(speech)
     assert microphone._speech_queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_voice_chat_interrupts_on_new_vad_edge_before_utterance_finishes() -> None:
+    class EdgeMicrophone:
+        def __init__(self) -> None:
+            self.speech_start_sequence = 1
+            self._second_started = asyncio.Event()
+            self._second_finished = asyncio.Event()
+            self._calls = 0
+
+        async def get_speech_audio(self, timeout: float = 15.0) -> bytes | None:
+            del timeout
+            self._calls += 1
+            if self._calls == 1:
+                return b"a" * 3200
+            self.speech_start_sequence = 2
+            self._second_started.set()
+            await self._second_finished.wait()
+            return b"b" * 3200
+
+        async def wait_for_speech_start(
+            self, after_sequence: int, timeout: float
+        ) -> int | None:
+            assert after_sequence == 1
+            await asyncio.wait_for(self._second_started.wait(), timeout=timeout)
+            return self.speech_start_sequence
+
+    class EdgePipeline:
+        def __init__(self, microphone: EdgeMicrophone) -> None:
+            self._microphone = microphone
+            self.interrupted = asyncio.Event()
+            self._released = asyncio.Event()
+
+        async def process_audio_input(self, audio: bytes) -> str:
+            assert audio
+            if not self.interrupted.is_set():
+                await self._released.wait()
+            return "response"
+
+        async def interrupt(self) -> bool:
+            assert not self._microphone._second_finished.is_set()
+            self.interrupted.set()
+            self._released.set()
+            return True
+
+    microphone = EdgeMicrophone()
+    pipeline = EdgePipeline(microphone)
+    mode = VoiceChatMode(microphone, pipeline)
+    run_task = asyncio.create_task(mode.run())
+    try:
+        await asyncio.wait_for(pipeline.interrupted.wait(), timeout=0.5)
+        assert microphone.speech_start_sequence == 2
+    finally:
+        microphone._second_finished.set()
+        run_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run_task

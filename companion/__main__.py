@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import io
 import json
 import logging
 import os
@@ -44,6 +45,11 @@ from companion.security.redaction import RedactingFormatter
 from companion.services.action_service import ActionService
 from companion.services.proactive_scheduler import ProactiveScheduler, SchedulerConfig
 from companion.services.voice_pipeline import VoicePipeline
+from companion.voice_acceptance import (
+    failed_voice_acceptance_report,
+    render_voice_acceptance_report,
+    run_voice_acceptance,
+)
 
 _SHUTDOWN_STEP_TIMEOUT_SECONDS = 5.0
 
@@ -249,6 +255,10 @@ class CompanionApp:
     def action_service(self) -> ActionService | None:
         return self._action_service
 
+    @property
+    def event_bus(self) -> EventBus:
+        return self._bus
+
     async def start(self) -> bool:
         """Start the companion. Returns True if LLM is available."""
         print(f"{Colors.BLUE}正在启动虚拟伴侣…{Colors.RESET}")
@@ -445,11 +455,96 @@ async def async_main(args: argparse.Namespace) -> int:
         backup_count=config.log_backup_count,
     )
 
-    app = CompanionApp(config)
+    accept_voice = bool(
+        getattr(args, "accept_voice", False)
+        or getattr(args, "accept_voice_json", False)
+    )
+    quiet_output = bool(getattr(args, "accept_voice_json", False))
+    if quiet_output:
+        with contextlib.redirect_stdout(io.StringIO()):
+            app = CompanionApp(config)
+    else:
+        app = CompanionApp(config)
     try:
-        ready = await app.start()
+        if quiet_output:
+            with contextlib.redirect_stdout(io.StringIO()):
+                ready = await app.start()
+        else:
+            ready = await app.start()
         if not ready:
+            if accept_voice:
+                setup_report = failed_voice_acceptance_report(
+                    "voice.runtime_ready",
+                    "Required runtime providers did not pass startup readiness.",
+                )
+                print(
+                    setup_report.to_json()
+                    if getattr(args, "accept_voice_json", False)
+                    else render_voice_acceptance_report(setup_report)
+                )
             return 1
+
+        if accept_voice:
+            if quiet_output:
+                with contextlib.redirect_stdout(io.StringIO()):
+                    voice_ready = await app.start_voice_mode()
+            else:
+                voice_ready = await app.start_voice_mode()
+            if not voice_ready:
+                provider_report = failed_voice_acceptance_report(
+                    "voice.provider_ready",
+                    "ASR or Azure TTS did not pass voice readiness.",
+                )
+                print(
+                    provider_report.to_json()
+                    if quiet_output
+                    else render_voice_acceptance_report(provider_report)
+                )
+                return 1
+            microphone = MicrophoneCapture(config.microphone_config)
+            if not await microphone.start():
+                microphone_report = failed_voice_acceptance_report(
+                    "voice.microphone_ready",
+                    "Voice acceptance could not open the microphone.",
+                )
+                print(
+                    microphone_report.to_json()
+                    if quiet_output
+                    else render_voice_acceptance_report(microphone_report)
+                )
+                return 1
+            try:
+                acceptance_report = await run_voice_acceptance(
+                    microphone=microphone,
+                    pipeline=app.voice_pipeline,
+                    event_bus=app.event_bus,
+                    sample_rate=config.voice_pipeline_config.sample_rate,
+                    utterance_timeout_seconds=(
+                        config.microphone_config.max_speech_duration_ms / 1000 + 10.0
+                    ),
+                    turn_timeout_seconds=(
+                        config.voice_pipeline_config.max_turn_duration_ms / 1000 + 5.0
+                    ),
+                    target_e2e_latency_ms=(
+                        config.voice_pipeline_config.target_e2e_latency_ms
+                    ),
+                    target_interrupt_latency_ms=(
+                        config.voice_pipeline_config.target_interrupt_latency_ms
+                    ),
+                    announce=(
+                        (lambda message: print(message, file=sys.stderr))
+                        if quiet_output
+                        else print
+                    ),
+                )
+            finally:
+                await microphone.stop()
+            print(
+                acceptance_report.to_json()
+                if getattr(args, "accept_voice_json", False)
+                else render_voice_acceptance_report(acceptance_report)
+            )
+            return acceptance_report.exit_code
 
         companion_name = app.state.identity.name
 
@@ -637,6 +732,16 @@ def main() -> None:
         help="深度检查 Whisper 模型与真实音频流（可能下载模型并短暂占用设备）",
     )
     parser.add_argument(
+        "--accept-voice",
+        action="store_true",
+        help="交互验收真实语音全链路和打断延迟",
+    )
+    parser.add_argument(
+        "--accept-voice-json",
+        action="store_true",
+        help="交互验收真实语音链路并仅输出结构化 JSON 结果",
+    )
+    parser.add_argument(
         "--backup-memory",
         type=Path,
         default=None,
@@ -677,12 +782,17 @@ def main() -> None:
                     args.doctor_voice_hardware,
                 )
             ),
+            bool(args.accept_voice or args.accept_voice_json),
             bool(args.backup_memory),
             bool(args.verify_memory_backup),
         )
     )
     if maintenance_modes > 1:
-        parser.error("doctor、backup-memory 和 verify-memory-backup 模式不能组合使用")
+        parser.error(
+            "doctor、accept-voice、backup-memory 和 verify-memory-backup 模式不能组合使用"
+        )
+    if args.accept_voice and args.accept_voice_json:
+        parser.error("--accept-voice 和 --accept-voice-json 只能选择一个")
     if args.overwrite_backup and not args.backup_memory:
         parser.error("--overwrite-backup 只能与 --backup-memory 一起使用")
     if args.doctor_voice_hardware:

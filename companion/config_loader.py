@@ -198,6 +198,10 @@ class RuntimeConfig:
             interrupt_timeout_seconds=float(
                 capture_raw.get("interrupt_timeout_seconds", 0.3)
             ),
+            target_e2e_latency_ms=int(capture_raw.get("target_e2e_latency_ms", 900)),
+            target_interrupt_latency_ms=int(
+                capture_raw.get("target_interrupt_latency_ms", 300)
+            ),
         )
 
         # ── Memory ────────────────────────────────────────────────────

@@ -12,7 +12,10 @@ from companion.core.orchestrator import CompanionOrchestrator
 from companion.core.policy_gate import PolicyGate, PolicyGateConfig
 from companion.core.state_manager import StateManager
 from companion.events.base import BaseEvent
-from companion.events.conversation import ConversationTurnFailedEvent
+from companion.events.conversation import (
+    ConversationTurnCompletedEvent,
+    ConversationTurnFailedEvent,
+)
 from companion.memory.memory_service import MemoryService, MemoryServiceConfig
 from companion.providers.asr import ASRBatchRequest, ASRBatchResult
 from companion.providers.model import LLMRequest, LLMResponse
@@ -107,6 +110,20 @@ class TestVoicePipelineIntegration:
         response = await pipeline.process_text_input("你好")
         assert response is not None
         assert len(response) > 0
+
+    @pytest.mark.asyncio
+    async def test_completed_event_uses_first_audio_latency(self, pipeline):
+        pipeline._audio_output = FakeAudioOutput()
+        await pipeline.process_text_input("hello", speak=True)
+        events = await captured_events(pipeline._bus)
+        completed = next(
+            event for event in events if isinstance(event, ConversationTurnCompletedEvent)
+        )
+        turn = pipeline._turn_mgr.get_current_turn()
+
+        assert turn is not None
+        assert turn.first_audio_played_at_ms > 0
+        assert completed.total_latency_ms == turn.total_latency_ms
 
     @pytest.mark.asyncio
     async def test_configured_asr_language_reaches_provider(self):

@@ -89,6 +89,8 @@ class MicrophoneCapture:
         self._running: bool = False
         self._capture_task: asyncio.Task[None] | None = None
         self._ready_event = asyncio.Event()
+        self._speech_started_event = asyncio.Event()
+        self._speech_start_sequence = 0
         self._startup_error: BaseException | None = None
 
     @property
@@ -188,6 +190,25 @@ class MicrophoneCapture:
                 if speech_active:
                     # Speech ended (no more audio after silence threshold)
                     return b"".join(audio_chunks)
+
+    @property
+    def speech_start_sequence(self) -> int:
+        """Monotonic sequence for VAD speech-start edges."""
+        return self._speech_start_sequence
+
+    async def wait_for_speech_start(self, after_sequence: int, timeout: float) -> int | None:
+        """Wait for a VAD rising edge newer than ``after_sequence``."""
+        if self._speech_start_sequence > after_sequence:
+            return self._speech_start_sequence
+        try:
+            await asyncio.wait_for(self._speech_started_event.wait(), timeout=timeout)
+        except TimeoutError:
+            return None
+        return (
+            self._speech_start_sequence
+            if self._speech_start_sequence > after_sequence
+            else None
+        )
 
     async def _capture_loop(self) -> None:
         """Background loop: captures audio, runs VAD, and queues speech chunks.
@@ -297,6 +318,9 @@ class MicrophoneCapture:
             self._state.total_speech_frames += 1
             if result.speech_started:
                 self._state.speech_started_at = asyncio.get_event_loop().time()
+                self._speech_start_sequence += 1
+                self._speech_started_event.set()
+                self._speech_started_event = asyncio.Event()
                 # The detector's pre-roll already ends with this frame, so do
                 # not enqueue the current frame a second time.
                 await self._speech_queue.put(self._vad.get_pre_roll_audio())
@@ -336,7 +360,9 @@ class VoiceChatMode:
         speech_task: asyncio.Task[bytes | None] | None = asyncio.create_task(
             self._mic.get_speech_audio(timeout=30.0)
         )
+        speech_start_sequence = self._mic.speech_start_sequence
         response_task: asyncio.Task[str] | None = None
+        speech_start_task: asyncio.Task[int | None] | None = None
         try:
             while self._running:
                 print("👂 正在听…", end="\r")
@@ -346,14 +372,18 @@ class VoiceChatMode:
                 speech_task = asyncio.create_task(self._mic.get_speech_audio(timeout=30.0))
                 if not audio or len(audio) < 1600:  # < 100ms
                     continue
+                speech_start_sequence = self._mic.speech_start_sequence
                 print("🎤 正在转录…", end="\r")
                 response_task = asyncio.create_task(self._pipeline.process_audio_input(audio))
+                speech_start_task = asyncio.create_task(
+                    self._mic.wait_for_speech_start(speech_start_sequence, timeout=30.0)
+                )
 
                 # Keep listening during synthesis/playback. New user speech
                 # cancels the current response and immediately becomes the next turn.
                 while self._running:
                     done, _ = await asyncio.wait(
-                        {response_task, speech_task},
+                        {response_task, speech_task, speech_start_task},
                         return_when=asyncio.FIRST_COMPLETED,
                     )
                     if response_task in done:
@@ -364,23 +394,46 @@ class VoiceChatMode:
                         elif response:
                             print(f"⚠ {response}")
                         response_task = None
+                        speech_start_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await speech_start_task
+                        speech_start_task = None
                         break
+
+                    if speech_start_task in done:
+                        detected_sequence = speech_start_task.result()
+                        if detected_sequence is not None:
+                            speech_start_sequence = detected_sequence
+                            await self._pipeline.interrupt()
+                        speech_start_task = asyncio.create_task(
+                            self._mic.wait_for_speech_start(
+                                speech_start_sequence, timeout=30.0
+                            )
+                        )
+                        continue
 
                     next_audio = speech_task.result()
                     speech_task = asyncio.create_task(self._mic.get_speech_audio(timeout=30.0))
                     if not next_audio or len(next_audio) < 1600:
                         continue
-                    await self._pipeline.interrupt()
                     await response_task
                     response_task = asyncio.create_task(
                         self._pipeline.process_audio_input(next_audio)
+                    )
+                    speech_start_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await speech_start_task
+                    speech_start_task = asyncio.create_task(
+                        self._mic.wait_for_speech_start(
+                            speech_start_sequence, timeout=30.0
+                        )
                     )
 
         except KeyboardInterrupt:
             print("\n👋 语音模式结束")
         finally:
             self._running = False
-            for task in (speech_task, response_task):
+            for task in (speech_task, response_task, speech_start_task):
                 if task and not task.done():
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):

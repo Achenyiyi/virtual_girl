@@ -121,6 +121,10 @@ class VoicePipelineConfig:
             raise ValueError("voice pre_roll_ms must be between 0 and 2000")
         if self.max_turn_duration_ms <= 0:
             raise ValueError("max_turn_duration_ms must be positive")
+        if self.target_e2e_latency_ms <= 0:
+            raise ValueError("target_e2e_latency_ms must be positive")
+        if self.target_interrupt_latency_ms <= 0:
+            raise ValueError("target_interrupt_latency_ms must be positive")
         for name, value in (
             ("tts_chunk_timeout_seconds", self.tts_chunk_timeout_seconds),
             ("playback_timeout_seconds", self.playback_timeout_seconds),
@@ -503,7 +507,7 @@ class VoicePipeline:
             user_text=text,
             companion_text=communicated_text,
             companion_full_text=response.text,
-            total_latency_ms=int((time.time() - t0) * 1000),
+            total_latency_ms=turn.total_latency_ms,
             model_id=response.model_id,
         )
         if not self._turn_mgr.transition(turn.turn_id, TurnState.COMPLETED):
