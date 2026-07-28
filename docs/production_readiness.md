@@ -98,9 +98,9 @@ The action and perception features must remain disabled until their correspondin
 
 ## Verification evidence (2026-07-29)
 
-- `ruff check companion tests`: passed.
-- `mypy companion`: passed in strict mode for 65 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 202 tests passed with 75.23% total
+- `ruff check companion tests scripts`: passed.
+- `mypy companion scripts`: passed in strict mode for 66 source files.
+- `pytest -q --cov=companion --cov-fail-under=70`: 207 tests passed with 75.23% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
   84%, action service 80%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version
@@ -119,17 +119,23 @@ The action and perception features must remain disabled until their correspondin
   completed a real CTranslate2 in-memory silence inference in 0.2 seconds, captured 15 microphone
   frames through the production stream, and opened the production playback stream with 20 ms of
   silence. Credential-backed Azure synthesis remains pending.
-- `python -m build`: wheel and sdist built successfully; the wheel contains the MIT license and
-  contains no database, test credential, or key-named file.
-- `pip-audit -r requirements.lock`: no known vulnerabilities in the locked runtime and voice
-  dependency tree.
+- The single hash lock now covers runtime, voice, development, and release tooling. CI installs
+  only that lock plus the project with `--no-deps`; `requirements.txt` delegates to the lock
+  instead of maintaining a second dependency definition.
+- `python -m build --no-isolation`: wheel and sdist built successfully. Automated archive checks
+  require the packaged YAML, metadata, and license; reject databases, tests, key-named files,
+  bytecode, unsafe archive paths, and runtime data; and emit `SHA256SUMS`.
+- `pip-audit -r requirements.lock`: no known vulnerabilities in the complete locked dependency
+  tree.
 - A fresh Python 3.12 virtual environment installed `requirements.lock` with `--require-hashes`,
   installed the wheel with `--no-deps`, passed `pip check`, imported `companion`,
   `faster_whisper`, `sounddevice`, and `numpy`, and completed a CLI help smoke test.
 - A wheel-only installation loaded its packaged default YAML from an unrelated empty working
   directory; the sdist excludes tests and includes the hash-locked runtime requirements.
-- `.github/workflows/ci.yml` reproduces lint, type, coverage, vulnerability, and build gates on
-  Windows; it has not yet run on a remote GitHub repository.
+- `.github/workflows/ci.yml` reproduces lint, type, coverage, secret, vulnerability, artifact,
+  checksum, and isolated-wheel-install gates on Windows. Third-party Actions are pinned to full
+  immutable commit SHAs and the job has read-only repository permissions. It has not yet run on a
+  remote GitHub repository.
 - Git history now has a clean `main` baseline commit. Ignored local credentials, memory data,
   virtual environments, and build artifacts were excluded before staging.
 - Release-source `detect-secrets` reported zero candidates. `pip-audit` reported no known
@@ -156,3 +162,5 @@ The action and perception features must remain disabled until their correspondin
   remains pending.
 - No Git remote is configured, so the checked-in GitHub Actions workflow cannot produce its first
   remote green run until a repository URL and push authorization are provided.
+- Dependency hashes were generated and verified on Windows/Python 3.12. Cross-platform releases
+  are not claimed; regenerate and verify the lock on every newly supported OS/Python target.

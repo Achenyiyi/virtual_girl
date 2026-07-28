@@ -58,10 +58,11 @@ cache disk use but does not invalidate the model/inference check.
 
 1. Rotate any credential that was ever stored outside the environment/credential manager.
 2. Install `requirements.lock` with hashes and install the wheel with `--no-deps`.
-3. Run `pip check` in that environment.
-4. Run local doctor with `--voice-input`.
-5. Inject the rotated DeepSeek and Azure credentials and run online doctor.
-6. Run a real spoken-turn test, including microphone capture, model load, streaming playback, and
+3. Verify the published wheel and sdist against the accompanying `SHA256SUMS` before installation.
+4. Run `pip check` in that environment.
+5. Run local doctor with `--voice-input`.
+6. Inject the rotated DeepSeek and Azure credentials and run online doctor.
+7. Run a real spoken-turn test, including microphone capture, model load, streaming playback, and
    barge-in latency measurement.
-7. Enable the avatar only when its bridge extension is running and test Live2D/VRM state sync.
-8. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.
+8. Enable the avatar only when its bridge extension is running and test Live2D/VRM state sync.
+9. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.

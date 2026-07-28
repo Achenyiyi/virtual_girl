@@ -60,10 +60,9 @@ python -m venv .venv
 # 安装依赖
 pip install --require-hashes -r requirements.lock
 pip install --no-deps -e .
-pip install -e ".[dev]"
 
 # 需要本地语音输入/流式播放时
-# requirements.lock 已包含 Windows 语音运行时依赖
+# requirements.lock 已包含 Windows 语音、开发和发布工具依赖
 
 # 运行测试
 pytest tests/ -v
@@ -73,7 +72,8 @@ pytest tests/ -v
 
 ```bash
 pip install -e ".[release]"
-pip-compile --extra voice --strip-extras --generate-hashes --allow-unsafe \
+pip-compile --extra voice --extra dev --extra release --strip-extras \
+  --generate-hashes --allow-unsafe \
   --no-emit-index-url --output-file requirements.lock pyproject.toml
 ```
 
