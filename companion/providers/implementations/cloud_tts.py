@@ -9,11 +9,14 @@ Supports:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Any, TypeVar
 
 import httpx
 
@@ -26,6 +29,11 @@ from companion.providers.tts import (
 )
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
+
+
+class CloudTTSError(RuntimeError):
+    """Sanitized cloud synthesis failure safe for logs and user-facing errors."""
 
 
 @dataclass
@@ -65,6 +73,7 @@ class CloudTTSProvider(TTSProvider):
         self._client: httpx.AsyncClient | None = None
         self._cancelled_syntheses: set[str] = set()
         self._active_streams: dict[str, httpx.Response] = {}
+        self._active_tasks: dict[str, asyncio.Task[Any]] = {}
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -78,9 +87,16 @@ class CloudTTSProvider(TTSProvider):
         import time
 
         t0 = time.time()
-
-        ssml = self._build_ssml(request)
-        audio_bytes = await self._azure_tts(ssml, request.turn_id)
+        owner_task = self._claim_turn(request.turn_id)
+        try:
+            ssml = self._build_ssml(request)
+            audio_bytes: bytes = await self._await_bounded(
+                self._azure_tts(ssml), operation_name="synthesis"
+            )
+            if not audio_bytes:
+                raise CloudTTSError("Azure TTS returned empty audio")
+        finally:
+            self._release_turn(request.turn_id, owner_task)
 
         duration_ms = 0
         if audio_bytes:
@@ -105,11 +121,9 @@ class CloudTTSProvider(TTSProvider):
         import time
 
         t0 = time.time()
+        owner_task = self._claim_turn(request.turn_id)
         ssml = self._build_ssml(request)
-        self._cancelled_syntheses.discard(request.turn_id)
         url, headers = self._azure_request()
-        if not headers:
-            return
         chunk_size_bytes = int(self._config.sample_rate * 2 * 0.1)
         segment_idx = 0
         pending: bytes | None = None
@@ -129,11 +143,21 @@ class CloudTTSProvider(TTSProvider):
                     pending = chunk_data
                 if pending is not None and request.turn_id not in self._cancelled_syntheses:
                     yield self._make_stream_chunk(request, pending, segment_idx, t0, is_final=True)
+                elif request.turn_id not in self._cancelled_syntheses:
+                    raise CloudTTSError("Azure streaming TTS returned empty audio")
+        except asyncio.CancelledError:
+            raise
+        except httpx.HTTPStatusError as exc:
+            logger.error("Azure streaming TTS returned HTTP %d", exc.response.status_code)
+            raise CloudTTSError(
+                f"Azure streaming TTS returned HTTP {exc.response.status_code}"
+            ) from None
         except httpx.HTTPError:
-            logger.exception("Azure streaming TTS request failed")
+            logger.error("Azure streaming TTS transport failed")
+            raise CloudTTSError("Azure streaming TTS transport failed") from None
         finally:
             self._active_streams.pop(request.turn_id, None)
-            self._cancelled_syntheses.discard(request.turn_id)
+            self._release_turn(request.turn_id, owner_task)
 
     def _make_stream_chunk(
         self,
@@ -161,11 +185,23 @@ class CloudTTSProvider(TTSProvider):
 
     async def cancel(self, turn_id: str) -> bool:
         response = self._active_streams.get(turn_id)
-        active = response is not None
+        task = self._active_tasks.get(turn_id)
+        active = response is not None or (task is not None and not task.done())
+        if not active:
+            return False
         self._cancelled_syntheses.add(turn_id)
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            task.add_done_callback(self._consume_task_result)
         if response is not None:
-            await response.aclose()
-        return active
+            close_task = asyncio.create_task(response.aclose())
+            done, _ = await asyncio.wait(
+                [close_task], timeout=min(1.0, self._config.timeout_seconds)
+            )
+            if not done:
+                close_task.cancel()
+                close_task.add_done_callback(self._consume_task_result)
+        return True
 
     # ── Voice management ──────────────────────────────────────────────
 
@@ -246,29 +282,25 @@ class CloudTTSProvider(TTSProvider):
             return "excited"
         return "general"
 
-    async def _azure_tts(self, ssml: str, turn_id: str) -> bytes:
+    async def _azure_tts(self, ssml: str) -> bytes:
         """Call Azure TTS REST API."""
         url, headers = self._azure_request()
-        if not headers:
-            return b""
-
         try:
             client = await self._get_client()
             resp = await client.post(url, content=ssml, headers=headers)
             resp.raise_for_status()
             return resp.content
         except httpx.HTTPStatusError as e:
-            logger.error("Azure TTS HTTP error: %s", e)
-            return b""
-        except Exception as e:
-            logger.error("Azure TTS error: %s", e)
-            return b""
+            logger.error("Azure TTS returned HTTP %d", e.response.status_code)
+            raise CloudTTSError(f"Azure TTS returned HTTP {e.response.status_code}") from None
+        except httpx.HTTPError:
+            logger.error("Azure TTS transport failed")
+            raise CloudTTSError("Azure TTS transport failed") from None
 
     def _azure_request(self) -> tuple[str, dict[str, str]]:
         api_key = self._config.get_api_key()
         if not api_key:
-            logger.warning("Azure TTS: no API key configured")
-            return "", {}
+            raise CloudTTSError("Azure TTS credential is not configured")
         url = f"https://{self._config.region}.tts.speech.microsoft.com/cognitiveservices/v1"
         return url, {
             "Ocp-Apim-Subscription-Key": api_key,
@@ -276,6 +308,44 @@ class CloudTTSProvider(TTSProvider):
             "X-Microsoft-OutputFormat": "raw-24khz-16bit-mono-pcm",
             "User-Agent": "virtual-companion/0.1.0",
         }
+
+    def _claim_turn(self, turn_id: str) -> asyncio.Task[Any]:
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("cloud TTS requires an asyncio task")
+        if turn_id:
+            existing = self._active_tasks.get(turn_id)
+            if existing is not None and not existing.done() and existing is not task:
+                raise CloudTTSError("Azure TTS turn is already active")
+            self._active_tasks[turn_id] = task
+            self._cancelled_syntheses.discard(turn_id)
+        return task
+
+    def _release_turn(self, turn_id: str, task: asyncio.Task[Any]) -> None:
+        if turn_id and self._active_tasks.get(turn_id) is task:
+            self._active_tasks.pop(turn_id, None)
+        self._cancelled_syntheses.discard(turn_id)
+
+    async def _await_bounded(self, operation: Any, *, operation_name: str) -> T:
+        task: asyncio.Future[T] = asyncio.ensure_future(operation)
+        try:
+            done, _ = await asyncio.wait([task], timeout=self._config.timeout_seconds)
+        except asyncio.CancelledError:
+            task.cancel()
+            task.add_done_callback(self._consume_task_result)
+            raise
+        if not done:
+            task.cancel()
+            task.add_done_callback(self._consume_task_result)
+            raise CloudTTSError(f"Azure TTS {operation_name} timed out")
+        return await task
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Future[Any]) -> None:
+        if task.cancelled():
+            return
+        with contextlib.suppress(Exception):
+            task.exception()
 
     # ── Provider lifecycle ────────────────────────────────────────────
 
@@ -320,8 +390,33 @@ class CloudTTSProvider(TTSProvider):
             return ProviderHealth.UNHEALTHY
 
     async def shutdown(self) -> None:
-        if self._client:
-            await self._client.aclose()
-            self._client = None
+        active_tasks = tuple(self._active_tasks.values())
+        self._active_tasks.clear()
+        for task in active_tasks:
+            if task is not asyncio.current_task() and not task.done():
+                task.cancel()
+                task.add_done_callback(self._consume_task_result)
+        active_streams = tuple(self._active_streams.values())
         self._active_streams.clear()
+        if active_streams:
+            close_tasks = [asyncio.create_task(response.aclose()) for response in active_streams]
+            done, pending = await asyncio.wait(
+                close_tasks,
+                timeout=min(1.0, self._config.timeout_seconds),
+            )
+            for task in done:
+                self._consume_task_result(task)
+            for task in pending:
+                task.cancel()
+                task.add_done_callback(self._consume_task_result)
+        if self._client:
+            client = self._client
+            self._client = None
+            close_task = asyncio.create_task(client.aclose())
+            done, _ = await asyncio.wait(
+                [close_task], timeout=min(1.0, self._config.timeout_seconds)
+            )
+            if not done:
+                close_task.cancel()
+                close_task.add_done_callback(self._consume_task_result)
         self._cancelled_syntheses.clear()

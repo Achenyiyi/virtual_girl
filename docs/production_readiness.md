@@ -121,6 +121,13 @@ tracked by turn ID, so barge-in cancels the actual HTTP operation even before th
 Streaming remains incremental rather than buffering the entire response. Custom endpoints reject
 URL user information, queries, and fragments so credentials cannot be embedded in routable URLs.
 
+Cloud TTS status: missing credentials, HTTP failures, transport failures, hard timeouts, and
+successful responses with empty audio all propagate as sanitized synthesis failures instead of
+silently completing an inaudible turn. Active non-streaming and streaming synthesis is tracked by
+turn ID, allowing cancellation during connection setup and before the first PCM chunk. Duplicate
+active turn IDs are rejected, response streams are always released, and provider shutdown bounds
+both response and client closure even when third-party close operations ignore cancellation.
+
 Long-running resource status: file logs rotate at 10 MiB with five backups by default; replay,
 action, audit, proactive, latency, and audio queues are bounded. The durable SQLite event ledger is
 not truncated by these in-memory limits. Confirmation-requiring actions have a ten-item pending
@@ -178,9 +185,9 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 307 tests passed with 78.71% total
-  coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
-  85%, cloud LLM 63%, action service 82%, and the action audit store 94%.
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 314 tests passed with 79.02%
+  total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice
+  pipeline 85%, cloud LLM 63%, cloud TTS 81%, action service 82%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version
   negotiation, health, model list/validate/load, full state mapping, timeout, disconnect,
   reconnect, and shutdown all passed. Orchestrator readiness fails for an unhealthy configured

@@ -97,6 +97,13 @@ Cancellation targets the active HTTP generation by turn ID, including the period
 streamed token. Custom endpoints must be HTTPS URLs without embedded credentials, query strings, or
 fragments.
 
+Azure TTS treats an absent credential, non-success HTTP response, transport failure, timeout, or
+empty successful response as a failed voice stage; none may be accepted as a silent successful
+turn. Cancellation is effective from connection setup onward, not only after response headers have
+arrived. A duplicate active turn ID is rejected to prevent one synthesis from overwriting another's
+cancellation handle. Repeated TTS transport or empty-audio failures indicate an unhealthy endpoint
+and must fail the target-machine spoken-turn gate.
+
 The event bus rejects new work after shutdown and drains any accepted event before the SQLite
 memory provider closes. A persistence error is fail-closed: the event is neither delivered nor
 retained for in-process replay. Treat repeated persistence or subscriber-timeout logs as a failed
