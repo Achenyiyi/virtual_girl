@@ -78,6 +78,21 @@ use a separate `providers.memory.db_path`; sharing only a different config filen
 The mutex name contains only a hash of the resolved path and does not disclose the Windows username
 or database location. Windows abandons the mutex automatically after a process crash.
 
+## Runtime storage boundary
+
+Before constructing providers or opening the rotating log, the runtime checks the resolved memory,
+log, and durable action-audit locations. Each location must resolve to a local Windows volume, its
+nearest existing parent must accept an exclusive create/write/flush/delete probe, an existing file
+must be openable for read/write, and the volume must have at least 512 MiB free. The same memory
+check appears in doctor output.
+
+Do not place live SQLite/WAL files on UNC paths, mapped network drives, or cloud-sync directories.
+UNC and Windows remote volumes are rejected automatically; a sync directory may appear as local,
+so avoiding it remains an operator requirement. Their locking and rename semantics are not a
+supported durability boundary. Keep the live profile under local application data and publish
+verified online backups to a separate disk or controlled sync destination. Low-space and
+permission failures are startup blockers, not warnings.
+
 Exit codes:
 
 - `0`: every required requested check passed; warnings and disabled optional providers are allowed;

@@ -52,6 +52,7 @@ from companion.security.single_instance import (
     InstanceAlreadyRunningError,
     SingleInstanceGuard,
 )
+from companion.security.storage_readiness import check_runtime_storage
 from companion.security.windows_credentials import configured_secret_sources
 from companion.services.action_service import ActionService
 from companion.services.proactive_scheduler import ProactiveScheduler, SchedulerConfig
@@ -522,6 +523,26 @@ async def async_main(args: argparse.Namespace) -> int:
     )
     quiet_output = bool(getattr(args, "accept_voice_json", False))
     memory_path = config.effective_memory_config().db_path
+    try:
+        check_runtime_storage(memory_path)
+        if config.log_file:
+            check_runtime_storage(config.log_file)
+        if config.action_audit_db_path:
+            check_runtime_storage(config.action_audit_db_path)
+    except OSError as exc:
+        if accept_voice:
+            storage_report = failed_voice_acceptance_report(
+                "voice.runtime_storage",
+                f"Runtime storage is not ready: {type(exc).__name__}.",
+            )
+            print(
+                storage_report.to_json()
+                if quiet_output
+                else render_voice_acceptance_report(storage_report)
+            )
+            return 1
+        print(f"Runtime storage unavailable: {type(exc).__name__}", file=sys.stderr)
+        return 1
     instance_guard = SingleInstanceGuard.for_memory_path(memory_path)
     try:
         instance_guard.acquire()

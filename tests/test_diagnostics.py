@@ -50,6 +50,28 @@ async def test_doctor_fails_for_missing_required_llm_credential(tmp_path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_doctor_fails_closed_when_runtime_storage_is_not_ready(
+    tmp_path, monkeypatch
+) -> None:
+    config = RuntimeConfig(
+        llm_config=CloudLLMConfig(api_key="configured-llm-credential"),
+        memory_config=MemoryServiceConfig(db_path=str(tmp_path / "memory.db")),
+    )
+
+    def fail_storage(_path):
+        raise OSError("insufficient free space")
+
+    monkeypatch.setattr("companion.diagnostics.check_runtime_storage", fail_storage)
+
+    report = await run_diagnostics(config)
+
+    check = next(item for item in report.checks if item.code == "memory.sqlite")
+    assert report.exit_code == 1
+    assert check.status == DiagnosticStatus.FAIL
+    assert check.message == "Memory database check failed: OSError"
+
+
+@pytest.mark.asyncio
 async def test_doctor_rejects_unrelated_or_future_memory_database(tmp_path) -> None:
     for name, initializer in (
         ("unrelated.db", "CREATE TABLE unrelated (value TEXT)"),

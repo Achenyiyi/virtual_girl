@@ -62,6 +62,8 @@ experience, and fails closed when a required dependency is unavailable.
 - [x] Runtime logs and diagnostic histories have explicit memory/disk bounds and rotation.
 - [x] A Windows session-scoped single-instance boundary prevents duplicate runtimes from sharing
       one profile, microphone, playback device, or avatar stage.
+- [x] Runtime databases and logs require a genuinely writable local Windows volume with at least
+      512 MiB free before providers start.
 - [ ] Unit, integration, recovery, security, and end-to-end suites pass in CI.
 - [x] Ruff and mypy pass for production code; critical production paths meet agreed coverage.
 
@@ -172,6 +174,13 @@ providers. A duplicate profile exits deterministically without opening user data
 mutex is released on normal and exceptional exits and is abandoned automatically by Windows after
 a crash. Doctor and consistent online backup are intentionally not blocked.
 
+Storage readiness status: memory, rotating logs, and durable action audit paths pass one shared
+fail-closed boundary before provider construction. It rejects UNC and Windows remote volumes,
+performs a real exclusive create/write/fsync/delete probe, verifies existing files can be opened
+read/write, and requires 512 MiB free. Doctor uses the same memory-path check. Live SQLite/WAL data
+is therefore not claimed safe on mapped/network storage; verified online backups are the supported
+transfer mechanism.
+
 Event delivery status: concurrent publishes are serialized as durable commit units. Persistence
 must succeed before an event enters the bounded replay log or reaches subscribers; a cancelled
 caller waits for the accepted commit to resolve. Subscriber failures are isolated, hung handlers
@@ -216,8 +225,8 @@ The action and perception features must remain disabled until their correspondin
 ## Verification evidence (2026-07-29)
 
 - `ruff check companion tests scripts`: passed.
-- `mypy companion scripts`: passed in strict mode for 70 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 346 tests passed with 79.38%
+- `mypy companion scripts`: passed in strict mode for 71 source files.
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 353 tests passed with 79.48%
   total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 83%, voice
   pipeline 85%, cloud LLM 63%, cloud TTS 81%, avatar acceptance 77%, action service 82%, and the
   action audit store 94%.
@@ -227,6 +236,9 @@ The action and perception features must remain disabled until their correspondin
 - The Windows single-instance boundary passed same-process and real child-process contention tests,
   profile-path normalization, independent-profile, idempotent release, and pre-provider CLI exit
   cases. The named mutex discloses only a truncated SHA-256 digest.
+- Runtime storage readiness passed real default-path write/flush/delete probing with 5,802 MiB free,
+  plus low-space, remote-volume, existing-file permission, no-residue, doctor, and pre-provider CLI
+  failure tests.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version
   negotiation, health, model list/validate/load, full state mapping, timeout, disconnect,
   reconnect, and shutdown all passed. Orchestrator readiness fails for an unhealthy configured

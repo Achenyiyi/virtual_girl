@@ -95,6 +95,10 @@ python -m companion --voice-input
 验收进程会在打开 Provider、麦克风和舞台前退出；并行开发实例必须使用独立的
 `providers.memory.db_path` 和运行目录。
 
+正式运行要求记忆库、日志和行动审计库位于本地 Windows 卷、目标可真实写入且所在卷至少
+保留 512 MiB 可用空间。不要把实时 SQLite/WAL 数据库直接放到 UNC、网络映射盘或同步盘；
+需要异地保存时使用在线备份文件。
+
 ### 备份记忆
 
 运行中数据库使用 SQLite 在线备份 API 创建一致性快照；默认拒绝覆盖已有备份：

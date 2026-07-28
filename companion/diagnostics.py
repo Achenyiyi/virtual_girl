@@ -6,7 +6,6 @@ import asyncio
 import importlib
 import importlib.util
 import json
-import os
 import sqlite3
 import sys
 import time
@@ -29,6 +28,7 @@ from companion.providers.implementations.websocket_avatar import WebSocketAvatar
 from companion.providers.implementations.windows_readonly_action import (
     WindowsReadOnlyActionProvider,
 )
+from companion.security.storage_readiness import check_runtime_storage
 from companion.security.windows_credentials import configured_secret_sources
 
 
@@ -206,6 +206,7 @@ def _packaged_config_check() -> DiagnosticCheck:
 def _memory_check(config: RuntimeConfig) -> DiagnosticCheck:
     path = Path(config.effective_memory_config().db_path).expanduser().resolve()
     try:
+        storage = check_runtime_storage(path)
         if path.exists():
             uri = path.as_uri() + "?mode=ro"
             with closing(sqlite3.connect(uri, uri=True, timeout=2.0)) as connection:
@@ -220,19 +221,19 @@ def _memory_check(config: RuntimeConfig) -> DiagnosticCheck:
                 DiagnosticStatus.PASS,
                 (
                     f"Memory database integrity is valid; legacy schema will be registered "
-                    f"as v{MEMORY_SCHEMA_VERSION} on startup: {path}"
+                    f"as v{MEMORY_SCHEMA_VERSION} on startup; local writable storage has "
+                    f"{storage.free_bytes // (1024 * 1024)} MiB free: {path}"
                     if legacy
-                    else f"Memory database schema v{schema_version} is valid: {path}"
+                    else f"Memory database schema v{schema_version} is valid; local writable "
+                    f"storage has {storage.free_bytes // (1024 * 1024)} MiB free: {path}"
                 ),
             )
-        parent = _nearest_existing_parent(path.parent)
-        if os.access(parent, os.W_OK):
-            return DiagnosticCheck(
-                "memory.sqlite",
-                DiagnosticStatus.PASS,
-                f"Memory database can be created under: {path.parent}",
-            )
-        raise PermissionError(f"directory is not writable: {parent}")
+        return DiagnosticCheck(
+            "memory.sqlite",
+            DiagnosticStatus.PASS,
+            f"Memory database can be created on local storage with "
+            f"{storage.free_bytes // (1024 * 1024)} MiB free: {path.parent}",
+        )
     except (OSError, sqlite3.DatabaseError) as exc:
         return DiagnosticCheck(
             "memory.sqlite",
@@ -543,10 +544,3 @@ def _health_check(code: str, label: str, health: ProviderHealth) -> DiagnosticCh
         if health != ProviderHealth.HEALTHY
         else "",
     )
-
-
-def _nearest_existing_parent(path: Path) -> Path:
-    current = path
-    while not current.exists() and current != current.parent:
-        current = current.parent
-    return current
