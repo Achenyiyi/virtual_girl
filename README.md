@@ -100,6 +100,10 @@ python -m companion --backup-memory D:\CompanionBackups\latest.db --overwrite-ba
 备份完成前使用随机临时文件，校验 SQLite 完整性和必要表后再原子发布。备份目录应位于
 独立磁盘或受控同步位置，不要只保存在运行数据库旁边。
 
+记忆库使用 SQLite `application_id` 和 `user_version` 标识所有权与结构版本。首次启动会
+无损登记完整的旧版无标记记忆库；不相关、结构残缺或高于当前程序版本的数据库会在
+启动和 `--doctor` 阶段拒绝，避免误写或静默降级。旧版无标记备份仍可独立校验。
+
 首次启用 `--voice-input` 时，faster-whisper 会加载配置中的本地模型。
 
 启动前建议先运行不会输出凭据内容的结构化自检：

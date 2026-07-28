@@ -80,7 +80,7 @@ def test_verify_backup_rejects_corrupt_or_unrelated_sqlite(tmp_path) -> None:
     unrelated = tmp_path / "unrelated.db"
     with sqlite3.connect(unrelated) as connection:
         connection.execute("CREATE TABLE unrelated (value TEXT)")
-    with pytest.raises(sqlite3.DatabaseError, match="missing required tables"):
+    with pytest.raises(sqlite3.DatabaseError, match="ownership marker"):
         MemoryService.verify_backup(unrelated)
 
 

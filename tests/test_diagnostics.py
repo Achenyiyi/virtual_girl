@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -45,6 +47,27 @@ async def test_doctor_fails_for_missing_required_llm_credential(tmp_path) -> Non
     assert report.exit_code == 1
     assert check.status == DiagnosticStatus.FAIL
     assert "DOCTOR_MISSING_LLM_KEY" in check.message
+
+
+@pytest.mark.asyncio
+async def test_doctor_rejects_unrelated_or_future_memory_database(tmp_path) -> None:
+    for name, initializer in (
+        ("unrelated.db", "CREATE TABLE unrelated (value TEXT)"),
+        ("future.db", "PRAGMA application_id = 1447251280; PRAGMA user_version = 999"),
+    ):
+        path = tmp_path / name
+        with closing(sqlite3.connect(path)) as connection:
+            connection.executescript(initializer)
+        config = RuntimeConfig(
+            llm_config=CloudLLMConfig(api_key="configured-llm-credential"),
+            memory_config=MemoryServiceConfig(db_path=str(path)),
+        )
+
+        report = await run_diagnostics(config)
+        check = next(item for item in report.checks if item.code == "memory.sqlite")
+
+        assert report.exit_code == 1
+        assert check.status == DiagnosticStatus.FAIL
 
 
 @pytest.mark.asyncio

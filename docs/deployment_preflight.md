@@ -79,6 +79,14 @@ python -m companion --verify-memory-backup D:\CompanionBackups\memory-before-upg
 
 The backup uses SQLite's online backup API, so WAL state is included consistently without copying
 live `.db-wal` files. It is written to a random temporary file, checked with `PRAGMA quick_check`,
-checked for the required memory tables, and atomically moved into place. Existing targets are
-protected unless `--overwrite-backup` is explicitly supplied. Store at least one copy outside the
-runtime directory and test verification from the installed wheel before relying on it.
+checked for the supported ownership marker, schema version, tables, and runtime columns, and
+atomically moved into place. Existing targets are protected unless `--overwrite-backup` is
+explicitly supplied. Store at least one copy outside the runtime directory and test verification
+from the installed wheel before relying on it.
+
+Current databases use SQLite `application_id` and `user_version` markers. A complete legacy
+companion database with both markers at zero is adopted in place on first startup without deleting
+data, and legacy markerless backups remain verifiable. The doctor and runtime reject foreign,
+structurally incomplete, or future-version databases before changing their schema or journal mode.
+Treat a future-version rejection as a binary rollback problem: restore the matching application
+version or a verified compatible backup; never lower `user_version` manually.

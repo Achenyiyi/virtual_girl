@@ -106,7 +106,10 @@ limit and a two-minute TTL by default, with expired requests revoked and audited
 Memory operations status: the SQLite service creates its own configured parent directory and
 provides CLI-level online backup and independent verification. Backup publication is atomic,
 existing targets are protected by default, WAL-backed live state is captured through SQLite's
-backup API, and corrupt or structurally incomplete snapshots are rejected.
+backup API, and corrupt or structurally incomplete snapshots are rejected. SQLite ownership and
+schema-version markers now prevent foreign files and future schemas from being opened or silently
+downgraded. Complete legacy markerless databases are adopted without data loss, and old verified
+backups remain readable.
 
 The action and perception features must remain disabled until their corresponding gates pass.
 
@@ -114,7 +117,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 229 tests passed with 75.70% total
+- `pytest -q --cov=companion --cov-fail-under=70`: 238 tests passed with 76.13% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
   84%, action service 80%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version

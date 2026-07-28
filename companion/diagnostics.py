@@ -19,6 +19,7 @@ from typing import Any
 from companion.audio.microphone import MicrophoneCapture
 from companion.audio.player import SoundDeviceAudioOutput
 from companion.config_loader import DEFAULT_CONFIG_PATH, RuntimeConfig
+from companion.memory.memory_service import MEMORY_SCHEMA_VERSION, MemoryService
 from companion.providers.asr import ASRBatchRequest
 from companion.providers.base import ProviderHealth
 from companion.providers.implementations.cloud_llm import CloudLLMProvider
@@ -204,12 +205,20 @@ def _memory_check(config: RuntimeConfig) -> DiagnosticCheck:
             uri = path.as_uri() + "?mode=ro"
             with closing(sqlite3.connect(uri, uri=True, timeout=2.0)) as connection:
                 row = connection.execute("PRAGMA quick_check").fetchone()
-            if not row or row[0] != "ok":
-                raise sqlite3.DatabaseError("SQLite quick_check did not return ok")
+                if not row or row[0] != "ok":
+                    raise sqlite3.DatabaseError("SQLite quick_check did not return ok")
+                schema_version, legacy = MemoryService.validate_connection_schema(
+                    connection, allow_legacy=True
+                )
             return DiagnosticCheck(
                 "memory.sqlite",
                 DiagnosticStatus.PASS,
-                f"Memory database integrity is valid: {path}",
+                (
+                    f"Memory database integrity is valid; legacy schema will be registered "
+                    f"as v{MEMORY_SCHEMA_VERSION} on startup: {path}"
+                    if legacy
+                    else f"Memory database schema v{schema_version} is valid: {path}"
+                ),
             )
         parent = _nearest_existing_parent(path.parent)
         if os.access(parent, os.W_OK):

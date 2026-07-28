@@ -353,8 +353,12 @@ class CompanionApp:
 async def async_main(args: argparse.Namespace) -> int:
     """Async main entry point."""
     if args.verify_memory_backup:
-        MemoryService.verify_backup(args.verify_memory_backup)
-        print(f"Memory backup is valid: {args.verify_memory_backup.resolve()}")
+        version, legacy = MemoryService.verify_backup(args.verify_memory_backup)
+        suffix = " (legacy v0; it will be registered on first startup)" if legacy else ""
+        print(
+            f"Memory backup schema v{version} is valid: "
+            f"{args.verify_memory_backup.resolve()}{suffix}"
+        )
         return 0
     # Load config for every operation that uses runtime settings.
     config = RuntimeConfig.from_yaml(args.config)

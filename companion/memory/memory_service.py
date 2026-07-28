@@ -11,6 +11,7 @@ Architecture:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -36,6 +37,58 @@ from companion.providers.memory import (
 )
 
 logger = logging.getLogger(__name__)
+
+MEMORY_APPLICATION_ID = int.from_bytes(b"VCMP", "big")
+MEMORY_SCHEMA_VERSION = 1
+_REQUIRED_SCHEMA: dict[str, set[str]] = {
+    "events": {
+        "event_id",
+        "event_type",
+        "occurred_at",
+        "recorded_at",
+        "actors",
+        "privacy",
+        "severity",
+        "source_turn_ids",
+        "source_prior_event_ids",
+        "payload_json",
+        "content_hash",
+        "schema_version",
+    },
+    "facts": {
+        "fact_id",
+        "key",
+        "value",
+        "category",
+        "confidence",
+        "valid_from",
+        "valid_to",
+        "source_event_ids",
+        "extraction_method",
+        "created_at",
+    },
+    "episodes": {
+        "episode_id",
+        "title",
+        "summary",
+        "participants",
+        "emotional_salience",
+        "turn_ids",
+        "tags",
+        "occurred_at",
+        "created_at",
+    },
+    "reflections": {
+        "reflection_id",
+        "content",
+        "category",
+        "source_event_ids",
+        "source_episode_ids",
+        "confidence",
+        "generated_plan",
+        "created_at",
+    },
+}
 
 
 @dataclass
@@ -158,6 +211,7 @@ class MemoryService(MemoryProvider):
         self._conn: aiosqlite.Connection | None = None
         self._initialized = False
         self._defer_commits = False
+        self._backup_lock = asyncio.Lock()
 
     async def _commit(self, conn: aiosqlite.Connection) -> None:
         if not self._defer_commits:
@@ -170,20 +224,93 @@ class MemoryService(MemoryProvider):
                     parents=True, exist_ok=True
                 )
             self._conn = await aiosqlite.connect(self._config.db_path)
-            if self._config.wal_mode:
-                await self._conn.execute("PRAGMA journal_mode=WAL")
-            await self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.row_factory = aiosqlite.Row
-            await self._init_schema()
+            try:
+                await self._conn.execute("PRAGMA foreign_keys=ON")
+                await self._init_schema()
+                if self._config.wal_mode:
+                    async with self._conn.execute("PRAGMA journal_mode=WAL") as cursor:
+                        await cursor.fetchone()
+            except Exception:
+                await self._conn.close()
+                self._conn = None
+                self._initialized = False
+                raise
+        return self._conn
+
+    async def _connection(self) -> aiosqlite.Connection:
+        """Return the initialized connection without re-entering schema setup."""
+        if self._conn is None:
+            await self._ensure_db()
+        if self._conn is None:
+            raise RuntimeError("memory database connection is unavailable")
         return self._conn
 
     async def _init_schema(self) -> None:
         if self._initialized:
             return
-        conn = await self._ensure_db()
+        conn = await self._connection()
+        application_row = await (await conn.execute("PRAGMA application_id")).fetchone()
+        version_row = await (await conn.execute("PRAGMA user_version")).fetchone()
+        if application_row is None or version_row is None:
+            raise RuntimeError("SQLite schema metadata is unavailable")
+        application_id = int(application_row[0])
+        schema_version = int(version_row[0])
+        table_names = await self._table_names(conn)
+        user_tables = {name for name in table_names if not name.startswith("sqlite_")}
+
+        if application_id not in {0, MEMORY_APPLICATION_ID}:
+            raise RuntimeError("SQLite file belongs to a different application")
+        if schema_version > MEMORY_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"memory schema v{schema_version} is newer than supported v{MEMORY_SCHEMA_VERSION}"
+            )
+
+        is_empty = not user_tables
+        is_legacy = (
+            application_id == 0
+            and schema_version == 0
+            and self._required_tables_present(table_names)
+        )
+        if application_id == 0 and not is_empty and not is_legacy:
+            raise RuntimeError("unrecognized SQLite file; refusing to add companion tables")
+        if not is_empty:
+            await self._validate_required_columns_async(conn)
+
         await conn.executescript(_SCHEMA_SQL)
+        await conn.execute(f"PRAGMA application_id = {MEMORY_APPLICATION_ID}")
+        await conn.execute(f"PRAGMA user_version = {MEMORY_SCHEMA_VERSION}")
+        await conn.commit()
         self._initialized = True
-        logger.info("Memory service schema initialized at %s", self._config.db_path)
+        logger.info(
+            "Memory service schema v%d initialized at %s",
+            MEMORY_SCHEMA_VERSION,
+            self._config.db_path,
+        )
+
+    @staticmethod
+    async def _table_names(conn: aiosqlite.Connection) -> set[str]:
+        cursor = await conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        return {str(row[0]) for row in await cursor.fetchall()}
+
+    @staticmethod
+    def _required_tables_present(table_names: set[str]) -> bool:
+        return _REQUIRED_SCHEMA.keys() <= table_names
+
+    @staticmethod
+    async def _validate_required_columns_async(conn: aiosqlite.Connection) -> None:
+        table_names = await MemoryService._table_names(conn)
+        missing_tables = _REQUIRED_SCHEMA.keys() - table_names
+        if missing_tables:
+            raise RuntimeError(f"memory database is missing tables: {sorted(missing_tables)}")
+        for table, required_columns in _REQUIRED_SCHEMA.items():
+            cursor = await conn.execute(f"PRAGMA table_info({table})")
+            columns = {str(row[1]) for row in await cursor.fetchall()}
+            missing_columns = required_columns - columns
+            if missing_columns:
+                raise RuntimeError(
+                    f"memory table {table} is missing columns: {sorted(missing_columns)}"
+                )
 
     # ── Event Log (Layer 1) ───────────────────────────────────────────
 
@@ -755,33 +882,40 @@ class MemoryService(MemoryProvider):
         if target.exists() and not overwrite:
             raise FileExistsError(f"backup destination already exists: {target}")
 
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temporary = target.with_name(
-            f".{target.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
-        )
+        async with self._backup_lock:
+            if target.exists() and not overwrite:
+                raise FileExistsError(f"backup destination already exists: {target}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = target.with_name(
+                f".{target.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+            )
 
-        conn = await self._ensure_db()
-        destination_conn: aiosqlite.Connection | None = None
-        try:
-            destination_conn = await aiosqlite.connect(temporary)
-            await conn.backup(destination_conn)
-            await destination_conn.close()
-            destination_conn = None
-            self.verify_backup(temporary)
-            if overwrite:
-                os.replace(temporary, target)
-            else:
-                os.link(temporary, target)
-                temporary.unlink()
-            return target
-        except Exception:
-            if destination_conn is not None:
-                await destination_conn.close()
-            temporary.unlink(missing_ok=True)
-            raise
+            await self._ensure_db()
+            try:
+                await asyncio.to_thread(self._backup_sqlite_file, source, temporary)
+                self.verify_backup(temporary)
+                if overwrite:
+                    os.replace(temporary, target)
+                else:
+                    os.link(temporary, target)
+                    temporary.unlink()
+                return target
+            except Exception:
+                temporary.unlink(missing_ok=True)
+                raise
 
     @staticmethod
-    def verify_backup(path: str | Path) -> None:
+    def _backup_sqlite_file(source: Path, destination: Path) -> None:
+        """Run SQLite's online backup on isolated synchronous connections."""
+        source_uri = source.as_uri() + "?mode=ro"
+        with (
+            closing(sqlite3.connect(source_uri, uri=True, timeout=5.0)) as source_conn,
+            closing(sqlite3.connect(destination, timeout=5.0)) as destination_conn,
+        ):
+            source_conn.backup(destination_conn)
+
+    @staticmethod
+    def verify_backup(path: str | Path) -> tuple[int, bool]:
         """Reject a missing, corrupt, or structurally incomplete memory backup."""
         backup_path = Path(path).expanduser().resolve()
         if not backup_path.is_file():
@@ -791,16 +925,47 @@ class MemoryService(MemoryProvider):
             quick_check = connection.execute("PRAGMA quick_check").fetchone()
             if not quick_check or quick_check[0] != "ok":
                 raise sqlite3.DatabaseError("memory backup integrity check failed")
-            rows = connection.execute(
-                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
-            ).fetchall()
-        names = {str(row[0]) for row in rows}
-        required = {"events", "facts", "episodes", "reflections"}
-        missing = required - names
-        if missing:
+            return MemoryService.validate_connection_schema(connection, allow_legacy=True)
+
+    @staticmethod
+    def validate_connection_schema(
+        connection: sqlite3.Connection, *, allow_legacy: bool
+    ) -> tuple[int, bool]:
+        """Validate ownership/version/shape and return (version, is_legacy)."""
+        application_id = int(connection.execute("PRAGMA application_id").fetchone()[0])
+        schema_version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+        rows = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+        table_names = {str(row[0]) for row in rows}
+        if application_id not in {0, MEMORY_APPLICATION_ID}:
+            raise sqlite3.DatabaseError("SQLite file belongs to a different application")
+        if schema_version > MEMORY_SCHEMA_VERSION:
             raise sqlite3.DatabaseError(
-                f"memory backup is missing required tables: {sorted(missing)}"
+                f"memory schema v{schema_version} is newer than supported v{MEMORY_SCHEMA_VERSION}"
             )
+        is_legacy = (
+            application_id == 0
+            and schema_version == 0
+            and MemoryService._required_tables_present(table_names)
+        )
+        if application_id == 0 and not (allow_legacy and is_legacy):
+            raise sqlite3.DatabaseError("memory database ownership marker is missing")
+        missing_tables = _REQUIRED_SCHEMA.keys() - table_names
+        if missing_tables:
+            raise sqlite3.DatabaseError(
+                f"memory database is missing tables: {sorted(missing_tables)}"
+            )
+        for table, required_columns in _REQUIRED_SCHEMA.items():
+            columns = {
+                str(row[1]) for row in connection.execute(f"PRAGMA table_info({table})")
+            }
+            missing_columns = required_columns - columns
+            if missing_columns:
+                raise sqlite3.DatabaseError(
+                    f"memory table {table} is missing columns: {sorted(missing_columns)}"
+                )
+        return schema_version, is_legacy
 
     # ── Provider Lifecycle ────────────────────────────────────────────
 
