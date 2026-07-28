@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+import threading
 from argparse import Namespace
 
 import pytest
@@ -46,6 +48,77 @@ async def test_backup_refuses_overwrite_without_explicit_opt_in(tmp_path) -> Non
         assert connection.execute(
             "SELECT COUNT(*) FROM events WHERE event_id = 'evt_new'"
         ).fetchone() == (1,)
+
+
+@pytest.mark.asyncio
+async def test_backup_and_write_are_serialized(tmp_path, monkeypatch) -> None:
+    memory = MemoryService(MemoryServiceConfig(db_path=str(tmp_path / "memory.db")))
+    backup = tmp_path / "backup.db"
+    entered_backup = threading.Event()
+    release_backup = threading.Event()
+    original_backup = memory._backup_sqlite_file
+
+    def blocked_backup(source, destination) -> None:
+        entered_backup.set()
+        assert release_backup.wait(timeout=10)
+        original_backup(source, destination)
+
+    monkeypatch.setattr(memory, "_backup_sqlite_file", blocked_backup)
+    try:
+        backup_task = asyncio.create_task(memory.backup_to(backup))
+        assert await asyncio.to_thread(entered_backup.wait, 10)
+        write_task = asyncio.create_task(
+            memory.append_event({"event_id": "evt_after_snapshot", "event_type": "test.event"})
+        )
+        await asyncio.sleep(0)
+        assert not write_task.done()
+
+        release_backup.set()
+        await backup_task
+        await write_task
+    finally:
+        await memory.shutdown()
+
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM events WHERE event_id = 'evt_after_snapshot'"
+        ).fetchone() == (0,)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_backup_finishes_worker_before_releasing_database(tmp_path, monkeypatch):
+    memory = MemoryService(MemoryServiceConfig(db_path=str(tmp_path / "memory.db")))
+    backup = tmp_path / "cancelled.db"
+    entered_backup = threading.Event()
+    release_backup = threading.Event()
+    original_backup = memory._backup_sqlite_file
+
+    def blocked_backup(source, destination) -> None:
+        entered_backup.set()
+        assert release_backup.wait(timeout=10)
+        original_backup(source, destination)
+
+    monkeypatch.setattr(memory, "_backup_sqlite_file", blocked_backup)
+    try:
+        backup_task = asyncio.create_task(memory.backup_to(backup))
+        assert await asyncio.to_thread(entered_backup.wait, 10)
+        backup_task.cancel()
+        write_task = asyncio.create_task(
+            memory.append_event({"event_id": "evt_after_cancel", "event_type": "test.event"})
+        )
+        await asyncio.sleep(0)
+        assert not backup_task.done()
+        assert not write_task.done()
+
+        release_backup.set()
+        with pytest.raises(asyncio.CancelledError):
+            await backup_task
+        assert await write_task == "evt_after_cancel"
+    finally:
+        await memory.shutdown()
+
+    assert not backup.exists()
+    assert not list(tmp_path.glob(".*.tmp"))
 
 
 @pytest.mark.asyncio

@@ -18,9 +18,11 @@ import os
 import secrets
 import sqlite3
 import time
-from contextlib import closing
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager, closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +39,16 @@ from companion.providers.memory import (
 )
 
 logger = logging.getLogger(__name__)
+
+def _serialized_operation(method: Callable[..., Any]) -> Callable[..., Any]:
+    """Keep each public memory operation atomic on the shared connection."""
+
+    @wraps(method)
+    async def wrapper(self: MemoryService, *args: Any, **kwargs: Any) -> Any:
+        async with self._database_operation():
+            return await method(self, *args, **kwargs)
+
+    return wrapper
 
 MEMORY_APPLICATION_ID = int.from_bytes(b"VCMP", "big")
 MEMORY_SCHEMA_VERSION = 1
@@ -210,15 +222,48 @@ class MemoryService(MemoryProvider):
         self._config = config or MemoryServiceConfig()
         self._conn: aiosqlite.Connection | None = None
         self._initialized = False
-        self._defer_commits = False
+        self._init_lock = asyncio.Lock()
+        self._operation_lock = asyncio.Lock()
+        self._operation_owner: asyncio.Task[Any] | None = None
+        self._operation_depth = 0
+        self._transaction_owner: asyncio.Task[Any] | None = None
         self._backup_lock = asyncio.Lock()
 
     async def _commit(self, conn: aiosqlite.Connection) -> None:
-        if not self._defer_commits:
+        if self._transaction_owner is not asyncio.current_task():
             await conn.commit()
 
+    @asynccontextmanager
+    async def _database_operation(self) -> AsyncIterator[None]:
+        """Serialize access to the shared connection, with same-task re-entry."""
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("memory operation requires an asyncio task")
+        if self._operation_owner is task:
+            self._operation_depth += 1
+            try:
+                yield
+            finally:
+                self._operation_depth -= 1
+            return
+
+        await self._operation_lock.acquire()
+        self._operation_owner = task
+        self._operation_depth = 1
+        try:
+            yield
+        finally:
+            self._operation_depth = 0
+            self._operation_owner = None
+            self._operation_lock.release()
+
     async def _ensure_db(self) -> aiosqlite.Connection:
-        if self._conn is None:
+        if self._conn is not None:
+            return self._conn
+        async with self._init_lock:
+            existing: aiosqlite.Connection | None = self.__dict__["_conn"]
+            if existing is not None:
+                return existing
             if self._config.db_path != ":memory:":
                 Path(self._config.db_path).expanduser().resolve().parent.mkdir(
                     parents=True, exist_ok=True
@@ -231,12 +276,12 @@ class MemoryService(MemoryProvider):
                 if self._config.wal_mode:
                     async with self._conn.execute("PRAGMA journal_mode=WAL") as cursor:
                         await cursor.fetchone()
-            except Exception:
+            except BaseException:
                 await self._conn.close()
                 self._conn = None
                 self._initialized = False
                 raise
-        return self._conn
+            return self._conn
 
     async def _connection(self) -> aiosqlite.Connection:
         """Return the initialized connection without re-entering schema setup."""
@@ -314,9 +359,10 @@ class MemoryService(MemoryProvider):
 
     # ── Event Log (Layer 1) ───────────────────────────────────────────
 
+    @_serialized_operation
     async def append_domain_event(self, event: BaseEvent) -> str:
         """Persist a typed domain event without losing header metadata."""
-        return await self.append_event(
+        event_id: str = await self.append_event(
             {
                 "event_id": event.event_id,
                 "event_type": event.event_type,
@@ -324,7 +370,9 @@ class MemoryService(MemoryProvider):
                 "payload": event.model_dump(mode="json", exclude={"header"}),
             }
         )
+        return event_id
 
+    @_serialized_operation
     async def append_event(self, event_data: dict[str, Any]) -> str:
         conn = await self._ensure_db()
         event_id = event_data.get("event_id", "")
@@ -367,6 +415,7 @@ class MemoryService(MemoryProvider):
         await self._commit(conn)
         return str(event_id)
 
+    @_serialized_operation
     async def query_events(self, query: EventQuery) -> list[dict[str, Any]]:
         conn = await self._ensure_db()
         conditions = ["1=1"]
@@ -393,6 +442,7 @@ class MemoryService(MemoryProvider):
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
 
+    @_serialized_operation
     async def get_event(self, event_id: str) -> dict[str, Any] | None:
         conn = await self._ensure_db()
         cursor = await conn.execute("SELECT * FROM events WHERE event_id = ?", (event_id,))
@@ -401,6 +451,7 @@ class MemoryService(MemoryProvider):
 
     # ── Semantic Facts (Layer 3) ──────────────────────────────────────
 
+    @_serialized_operation
     async def upsert_fact(self, fact: SemanticFact) -> str:
         conn = await self._ensure_db()
         now = datetime.now(UTC).isoformat()
@@ -427,6 +478,7 @@ class MemoryService(MemoryProvider):
         await self._commit(conn)
         return fact.fact_id
 
+    @_serialized_operation
     async def get_fact(self, key: str) -> SemanticFact | None:
         conn = await self._ensure_db()
         cursor = await conn.execute(
@@ -449,6 +501,7 @@ class MemoryService(MemoryProvider):
             extraction_method=row["extraction_method"],
         )
 
+    @_serialized_operation
     async def search_facts(
         self, query: str, category: str | None = None, limit: int = 10
     ) -> list[SemanticFact]:
@@ -511,6 +564,7 @@ class MemoryService(MemoryProvider):
         cursor = await conn.execute(sql, params)
         return list(await cursor.fetchall())
 
+    @_serialized_operation
     async def list_fact_updates(self, key: str) -> list[dict[str, Any]]:
         conn = await self._ensure_db()
         cursor = await conn.execute(
@@ -521,6 +575,7 @@ class MemoryService(MemoryProvider):
 
     # ── Episodic Memory (Layer 4) ─────────────────────────────────────
 
+    @_serialized_operation
     async def create_episode(self, episode: Episode) -> str:
         conn = await self._ensure_db()
         await conn.execute(
@@ -542,6 +597,7 @@ class MemoryService(MemoryProvider):
         await self._commit(conn)
         return episode.episode_id
 
+    @_serialized_operation
     async def search_episodes(
         self, query: str, limit: int = 10, min_salience: float = 0.0
     ) -> list[Episode]:
@@ -592,6 +648,7 @@ class MemoryService(MemoryProvider):
             for r in rows
         ]
 
+    @_serialized_operation
     async def get_episode(self, episode_id: str) -> Episode | None:
         conn = await self._ensure_db()
         cursor = await conn.execute("SELECT * FROM episodes WHERE episode_id = ?", (episode_id,))
@@ -611,6 +668,7 @@ class MemoryService(MemoryProvider):
 
     # ── Reflections (Layer 5) ─────────────────────────────────────────
 
+    @_serialized_operation
     async def create_reflection(self, reflection: Reflection) -> str:
         conn = await self._ensure_db()
         await conn.execute(
@@ -631,6 +689,7 @@ class MemoryService(MemoryProvider):
         await self._commit(conn)
         return reflection.reflection_id
 
+    @_serialized_operation
     async def get_recent_reflections(self, limit: int = 10) -> list[Reflection]:
         conn = await self._ensure_db()
         cursor = await conn.execute(
@@ -653,6 +712,7 @@ class MemoryService(MemoryProvider):
 
     # ── Memory Management ─────────────────────────────────────────────
 
+    @_serialized_operation
     async def forget(self, event_ids: list[str], reason: str = "user_request") -> int:
         conn = await self._ensure_db()
         cascade_count = 0
@@ -686,6 +746,7 @@ class MemoryService(MemoryProvider):
         )
         return cascade_count
 
+    @_serialized_operation
     async def rebuild_from_log(self) -> dict[str, Any]:
         """Rebuild derived memory from the event log.
 
@@ -702,12 +763,19 @@ class MemoryService(MemoryProvider):
         event_count = row[0] if row else 0
 
         await conn.execute("BEGIN IMMEDIATE")
-        self._defer_commits = True
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("memory rebuild requires an asyncio task")
+        self._transaction_owner = task
         try:
             result = await self._rebuild_derived_layers(conn, event_count, t0)
             await conn.commit()
             logger.info("Memory rebuild completed: %s", result)
             return result
+        except asyncio.CancelledError:
+            await conn.rollback()
+            logger.warning("Memory rebuild cancelled; previous memory remains intact")
+            raise
         except Exception as exc:
             await conn.rollback()
             logger.exception("Memory rebuild rolled back; previous memory remains intact")
@@ -715,7 +783,7 @@ class MemoryService(MemoryProvider):
                 "Memory rebuild failed; previous derived memory was restored"
             ) from exc
         finally:
-            self._defer_commits = False
+            self._transaction_owner = None
 
     async def _rebuild_derived_layers(
         self,
@@ -848,6 +916,7 @@ class MemoryService(MemoryProvider):
         }
         return rebuild_result
 
+    @_serialized_operation
     async def verify_consistency(self) -> dict[str, Any]:
         conn = await self._ensure_db()
         errors: list[str] = []
@@ -890,9 +959,19 @@ class MemoryService(MemoryProvider):
                 f".{target.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
             )
 
-            await self._ensure_db()
             try:
-                await asyncio.to_thread(self._backup_sqlite_file, source, temporary)
+                async with self._database_operation():
+                    conn = await self._ensure_db()
+                    if conn.in_transaction:
+                        raise RuntimeError("cannot back up memory during an active transaction")
+                    backup_task = asyncio.create_task(
+                        asyncio.to_thread(self._backup_sqlite_file, source, temporary)
+                    )
+                    try:
+                        await asyncio.shield(backup_task)
+                    except asyncio.CancelledError:
+                        await backup_task
+                        raise
                 self.verify_backup(temporary)
                 if overwrite:
                     os.replace(temporary, target)
@@ -900,7 +979,7 @@ class MemoryService(MemoryProvider):
                     os.link(temporary, target)
                     temporary.unlink()
                 return target
-            except Exception:
+            except BaseException:
                 temporary.unlink(missing_ok=True)
                 raise
 
@@ -976,6 +1055,7 @@ class MemoryService(MemoryProvider):
             capabilities=[ProviderCapability.OFFLINE, ProviderCapability.BATCH],
         )
 
+    @_serialized_operation
     async def health_check(self) -> ProviderHealth:
         try:
             conn = await self._ensure_db()
@@ -985,6 +1065,7 @@ class MemoryService(MemoryProvider):
             logger.exception("Memory health check failed")
             return ProviderHealth.UNHEALTHY
 
+    @_serialized_operation
     async def shutdown(self) -> None:
         if self._conn:
             await self._conn.close()

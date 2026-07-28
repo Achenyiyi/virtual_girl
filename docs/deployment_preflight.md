@@ -90,3 +90,8 @@ data, and legacy markerless backups remain verifiable. The doctor and runtime re
 structurally incomplete, or future-version databases before changing their schema or journal mode.
 Treat a future-version rejection as a binary rollback problem: restore the matching application
 version or a verified compatible backup; never lower `user_version` manually.
+
+Maintenance operations are isolated from live memory traffic. A rebuild holds the shared database
+operation boundary until commit or rollback, including cancellation; queued dialogue writes run
+only afterward. Online backup likewise waits for its SQLite worker to finish before releasing live
+writes, and a cancelled backup removes its unpublished temporary snapshot.

@@ -109,7 +109,10 @@ existing targets are protected by default, WAL-backed live state is captured thr
 backup API, and corrupt or structurally incomplete snapshots are rejected. SQLite ownership and
 schema-version markers now prevent foreign files and future schemas from being opened or silently
 downgraded. Complete legacy markerless databases are adopted without data loss, and old verified
-backups remain readable.
+backups remain readable. Shared-connection access is serialized with same-task transaction
+re-entry: concurrent first use creates one connection, rebuilds exclude ordinary reads/writes,
+failed or cancelled rebuilds roll back before queued work proceeds, and online backups hold the
+database boundary until their worker has finished even if the caller is cancelled.
 
 The action and perception features must remain disabled until their corresponding gates pass.
 
@@ -117,7 +120,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 238 tests passed with 76.13% total
+- `pytest -q --cov=companion --cov-fail-under=70`: 243 tests passed with 76.34% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
   84%, action service 80%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version

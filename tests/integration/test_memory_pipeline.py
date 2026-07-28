@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -14,7 +15,7 @@ from companion.memory.episode_segmenter import EpisodeSegmenter
 from companion.memory.fact_extractor import FactExtractor
 from companion.memory.memory_service import MemoryService, MemoryServiceConfig
 from companion.memory.reflection_engine import ReflectionConfig, ReflectionEngine
-from companion.providers.memory import SemanticFact
+from companion.providers.memory import EventQuery, SemanticFact
 from tests.test_providers import MockLLMProvider
 
 
@@ -102,6 +103,31 @@ class TestMemoryPipeline:
             assert consistency["is_consistent"] is True
         finally:
             await reopened.shutdown()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_first_use_initializes_one_connection(self, tmp_path, monkeypatch):
+        service = MemoryService(MemoryServiceConfig(db_path=str(tmp_path / "concurrent.db")))
+        original_connect = __import__("aiosqlite").connect
+        created_connections = []
+
+        async def delayed_connect(*args, **kwargs):
+            connection = await original_connect(*args, **kwargs)
+            created_connections.append(connection)
+            await asyncio.sleep(0.02)
+            return connection
+
+        monkeypatch.setattr("companion.memory.memory_service.aiosqlite.connect", delayed_connect)
+        try:
+            await asyncio.gather(
+                *(service.append_event({"event_id": f"evt_{i}", "event_type": "test.event"})
+                  for i in range(12))
+            )
+            events = await service.query_events(EventQuery(limit=20))
+        finally:
+            await service.shutdown()
+
+        assert len(created_connections) == 1
+        assert {event["event_id"] for event in events} == {f"evt_{i}" for i in range(12)}
 
     @pytest.mark.asyncio
     async def test_fact_upsert_and_retrieve(self, memory_service):
@@ -269,6 +295,84 @@ class TestMemoryPipeline:
         restored = await memory_service.get_fact("keep_me")
         assert restored is not None
         assert restored.value == "survives failed rebuild"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_write_waits_for_failed_rebuild_rollback(
+        self, memory_service, monkeypatch
+    ):
+        await memory_service.upsert_fact(
+            SemanticFact(
+                fact_id="fact_keep",
+                key="keep_me",
+                value="survives failed rebuild",
+                source_event_ids=[],
+            )
+        )
+        await memory_service.append_event(
+            {"event_id": "evt_trigger_rebuild", "event_type": "test.event"}
+        )
+        entered_rebuild = asyncio.Event()
+        release_rebuild = asyncio.Event()
+
+        async def blocked_failure(_reflection):
+            entered_rebuild.set()
+            await release_rebuild.wait()
+            raise RuntimeError("injected rebuild failure")
+
+        monkeypatch.setattr(memory_service, "create_reflection", blocked_failure)
+        rebuild_task = asyncio.create_task(memory_service.rebuild_from_log())
+        await entered_rebuild.wait()
+        write_task = asyncio.create_task(
+            memory_service.append_event(
+                {"event_id": "evt_after_rebuild", "event_type": "test.event"}
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert not write_task.done()
+        release_rebuild.set()
+        with pytest.raises(RuntimeError, match="previous derived memory was restored"):
+            await rebuild_task
+        assert await write_task == "evt_after_rebuild"
+        assert await memory_service.get_event("evt_after_rebuild") is not None
+        restored = await memory_service.get_fact("keep_me")
+        assert restored is not None
+        assert restored.value == "survives failed rebuild"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_rebuild_rolls_back_before_next_write(
+        self, memory_service, monkeypatch
+    ):
+        await memory_service.upsert_fact(
+            SemanticFact(
+                fact_id="fact_keep_cancel",
+                key="keep_after_cancel",
+                value="survives cancellation",
+                source_event_ids=[],
+            )
+        )
+        await memory_service.append_event(
+            {"event_id": "evt_trigger_cancel", "event_type": "test.event"}
+        )
+        entered_rebuild = asyncio.Event()
+
+        async def never_finishes(_reflection):
+            entered_rebuild.set()
+            await asyncio.Future()
+
+        monkeypatch.setattr(memory_service, "create_reflection", never_finishes)
+        rebuild_task = asyncio.create_task(memory_service.rebuild_from_log())
+        await entered_rebuild.wait()
+        rebuild_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await rebuild_task
+
+        assert await memory_service.append_event(
+            {"event_id": "evt_after_cancel", "event_type": "test.event"}
+        ) == "evt_after_cancel"
+        restored = await memory_service.get_fact("keep_after_cancel")
+        assert restored is not None
+        assert restored.value == "survives cancellation"
 
     @pytest.mark.asyncio
     async def test_consistency_check(self, memory_service):
