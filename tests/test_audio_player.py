@@ -68,6 +68,43 @@ async def test_microphone_start_reports_missing_backend(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_microphone_start_waits_for_stream_readiness(monkeypatch) -> None:
+    microphone = MicrophoneCapture()
+
+    async def ready_capture() -> None:
+        microphone._ready_event.set()
+        while microphone._running:
+            await asyncio.sleep(0)
+
+    monkeypatch.setattr(microphone, "_capture_sounddevice", ready_capture)
+    monkeypatch.setattr(
+        "companion.audio.microphone.importlib.util.find_spec",
+        lambda name: object() if name == "sounddevice" else None,
+    )
+
+    assert await microphone.start()
+    assert microphone.state.is_capturing
+    await microphone.stop()
+
+
+@pytest.mark.asyncio
+async def test_microphone_start_reports_stream_open_failure(monkeypatch) -> None:
+    microphone = MicrophoneCapture()
+
+    async def failed_capture() -> None:
+        raise OSError("device unavailable")
+
+    monkeypatch.setattr(microphone, "_capture_sounddevice", failed_capture)
+    monkeypatch.setattr(
+        "companion.audio.microphone.importlib.util.find_spec",
+        lambda name: object() if name == "sounddevice" else None,
+    )
+
+    assert not await microphone.start()
+    assert not microphone.state.is_capturing
+
+
+@pytest.mark.asyncio
 async def test_sounddevice_output_reuses_stream_for_gapless_chunks(monkeypatch) -> None:
     class FakeStream:
         def __init__(self) -> None:

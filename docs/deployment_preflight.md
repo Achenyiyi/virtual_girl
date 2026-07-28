@@ -45,8 +45,14 @@ Exit codes:
 
 When `--voice-input` is included, doctor requires faster-whisper, NumPy, sounddevice, a usable
 default input device, a usable default output device, and the Azure Speech credential. It does not
-download or load the configured Whisper model; run the real voice acceptance procedure after
-local/online doctor passes.
+download or load the configured Whisper model.
+
+`--doctor-voice-hardware` is an explicit deeper check. It may download/load the configured model,
+runs one in-memory silence inference, opens the production microphone stream long enough to
+capture several in-memory frames, and opens the production playback stream with about 20 ms of
+silence. It doesn't persist captured audio or make cloud requests. On Windows without Developer
+Mode, the Hugging Face cache may warn that symlink deduplication is unavailable; this increases
+cache disk use but does not invalidate the model/inference check.
 
 ## Target-machine release sequence
 

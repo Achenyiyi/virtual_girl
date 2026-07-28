@@ -341,6 +341,7 @@ async def async_main(args: argparse.Namespace) -> int:
             config,
             require_voice=args.voice_input or args.voice,
             online=args.doctor_online,
+            voice_hardware=args.doctor_voice_hardware,
         )
         print(report.to_json() if args.doctor_json else render_diagnostic_report(report))
         return report.exit_code
@@ -540,6 +541,11 @@ def main() -> None:
         help="以 JSON 输出 doctor 结果，便于自动化验收",
     )
     parser.add_argument(
+        "--doctor-voice-hardware",
+        action="store_true",
+        help="深度检查 Whisper 模型与真实音频流（可能下载模型并短暂占用设备）",
+    )
+    parser.add_argument(
         "--voice",
         action="store_true",
         default=False,
@@ -553,6 +559,9 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if args.doctor_voice_hardware:
+        args.doctor = True
+        args.voice_input = True
     try:
         exit_code = asyncio.run(async_main(args))
     except (OSError, ValueError) as exc:

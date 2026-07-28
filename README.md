@@ -96,6 +96,9 @@ python -m companion --doctor
 # 包含语音依赖、默认麦克风和播放设备
 python -m companion --doctor --voice-input
 
+# 显式深度检查：加载/推理 Whisper，打开真实麦克风与静音播放流
+python -m companion --doctor-voice-hardware
+
 # 凭据注入后验证远程 LLM/TTS；健康探针不会生成收费语音
 python -m companion --doctor-online --voice-input
 

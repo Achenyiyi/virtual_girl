@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import importlib.util
 import json
 import os
 import sqlite3
 import sys
+import time
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from companion.audio.microphone import MicrophoneCapture
+from companion.audio.player import SoundDeviceAudioOutput
 from companion.config_loader import DEFAULT_CONFIG_PATH, RuntimeConfig
+from companion.providers.asr import ASRBatchRequest
 from companion.providers.base import ProviderHealth
 from companion.providers.implementations.cloud_llm import CloudLLMProvider
 from companion.providers.implementations.cloud_tts import CloudTTSProvider
+from companion.providers.implementations.faster_whisper_asr import FasterWhisperASRProvider
 from companion.providers.implementations.websocket_avatar import WebSocketAvatarProvider
 from companion.providers.implementations.windows_readonly_action import (
     WindowsReadOnlyActionProvider,
@@ -43,6 +49,7 @@ class DiagnosticReport:
     checks: list[DiagnosticCheck]
     online: bool
     voice_required: bool
+    voice_hardware: bool = False
 
     @property
     def exit_code(self) -> int:
@@ -60,6 +67,7 @@ class DiagnosticReport:
             {
                 "online": self.online,
                 "voice_required": self.voice_required,
+                "voice_hardware": self.voice_hardware,
                 "exit_code": self.exit_code,
                 "summary": self.summary,
                 "checks": [asdict(check) for check in self.checks],
@@ -70,7 +78,11 @@ class DiagnosticReport:
 
 
 async def run_diagnostics(
-    config: RuntimeConfig, *, require_voice: bool = False, online: bool = False
+    config: RuntimeConfig,
+    *,
+    require_voice: bool = False,
+    online: bool = False,
+    voice_hardware: bool = False,
 ) -> DiagnosticReport:
     """Inspect configuration and local capabilities without exposing secret values."""
     checks = [_runtime_check(), _packaged_config_check(), _memory_check(config)]
@@ -104,6 +116,8 @@ async def run_diagnostics(
         )
 
     checks.extend(_voice_checks(config, require_voice=require_voice))
+    if voice_hardware:
+        checks.extend(await _voice_hardware_checks(config))
     checks.extend(await _optional_provider_checks(config, online=online))
 
     if online and config.llm_config and llm_key_available:
@@ -122,7 +136,12 @@ async def run_diagnostics(
         finally:
             await provider_tts.shutdown()
 
-    return DiagnosticReport(checks=checks, online=online, voice_required=require_voice)
+    return DiagnosticReport(
+        checks=checks,
+        online=online,
+        voice_required=require_voice,
+        voice_hardware=voice_hardware,
+    )
 
 
 def render_diagnostic_report(report: DiagnosticReport) -> str:
@@ -296,6 +315,130 @@ def _audio_device_checks() -> list[DiagnosticCheck]:
             else "Default playback device has no usable output channel.",
         ),
     ]
+
+
+async def _voice_hardware_checks(config: RuntimeConfig) -> list[DiagnosticCheck]:
+    """Open production model/device paths only after explicit user opt-in."""
+    required = ("faster_whisper", "numpy", "sounddevice")
+    if any(importlib.util.find_spec(name) is None for name in required):
+        return [
+            DiagnosticCheck(
+                "voice.hardware",
+                DiagnosticStatus.FAIL,
+                "Deep voice check cannot run because voice modules are missing.",
+                "Install the hash-locked voice requirements and retry.",
+            )
+        ]
+
+    checks: list[DiagnosticCheck] = []
+    if not config.asr_config:
+        checks.append(
+            DiagnosticCheck(
+                "voice.model",
+                DiagnosticStatus.FAIL,
+                "Deep voice check requires faster-whisper configuration.",
+            )
+        )
+    else:
+        asr = FasterWhisperASRProvider(config.asr_config)
+        started = time.perf_counter()
+        try:
+            await asyncio.wait_for(asr.preload(), timeout=300.0)
+            load_elapsed = time.perf_counter() - started
+            checks.append(
+                DiagnosticCheck(
+                    "voice.model",
+                    DiagnosticStatus.PASS,
+                    f"faster-whisper model loaded successfully in {load_elapsed:.1f}s.",
+                )
+            )
+            inference_started = time.perf_counter()
+            silent_pcm = b"\x00\x00" * (config.voice_pipeline_config.sample_rate // 2)
+            result = await asyncio.wait_for(
+                asr.transcribe_batch(
+                    ASRBatchRequest(
+                        audio_bytes=silent_pcm,
+                        sample_rate=config.voice_pipeline_config.sample_rate,
+                        language=config.voice_pipeline_config.language,
+                        turn_id="doctor-silence",
+                    )
+                ),
+                timeout=60.0,
+            )
+            inference_elapsed = time.perf_counter() - inference_started
+            checks.append(
+                DiagnosticCheck(
+                    "voice.inference",
+                    DiagnosticStatus.PASS,
+                    "faster-whisper completed an in-memory silence inference "
+                    f"in {inference_elapsed:.1f}s ({len(result.text)} text characters).",
+                )
+            )
+        except Exception as exc:
+            model_loaded = any(item.code == "voice.model" for item in checks)
+            code = "voice.inference" if model_loaded else "voice.model"
+            checks.append(
+                DiagnosticCheck(
+                    code,
+                    DiagnosticStatus.FAIL,
+                    f"faster-whisper model/inference check failed: {type(exc).__name__}",
+                    "Verify model availability, device/compute settings, disk space, and network.",
+                )
+            )
+        finally:
+            await asr.shutdown()
+
+    microphone = MicrophoneCapture(config.microphone_config)
+    try:
+        if not await microphone.start():
+            raise RuntimeError("microphone stream did not become ready")
+        await asyncio.sleep(0.35)
+        frame_count = microphone.state.total_frames_captured
+        if frame_count < 1:
+            raise RuntimeError("microphone stream produced no frames")
+        checks.append(
+            DiagnosticCheck(
+                "voice.microphone_stream",
+                DiagnosticStatus.PASS,
+                f"Microphone stream opened and captured {frame_count} in-memory frames.",
+            )
+        )
+    except Exception as exc:
+        checks.append(
+            DiagnosticCheck(
+                "voice.microphone_stream",
+                DiagnosticStatus.FAIL,
+                f"Microphone stream check failed: {type(exc).__name__}",
+                "Close competing audio applications or select a working default microphone.",
+            )
+        )
+    finally:
+        await microphone.stop()
+
+    output = SoundDeviceAudioOutput()
+    try:
+        sample_rate = config.tts_config.sample_rate if config.tts_config else 24_000
+        silent_pcm = b"\x00\x00" * max(1, sample_rate // 50)
+        playback = await asyncio.wait_for(output.play(silent_pcm, sample_rate), timeout=5.0)
+        checks.append(
+            DiagnosticCheck(
+                "voice.playback_stream",
+                DiagnosticStatus.PASS,
+                f"Playback stream opened and accepted {playback.played_duration_ms}ms of silence.",
+            )
+        )
+    except Exception as exc:
+        checks.append(
+            DiagnosticCheck(
+                "voice.playback_stream",
+                DiagnosticStatus.FAIL,
+                f"Playback stream check failed: {type(exc).__name__}",
+                "Select a working default playback device and retry.",
+            )
+        )
+    finally:
+        await output.stop()
+    return checks
 
 
 async def _optional_provider_checks(

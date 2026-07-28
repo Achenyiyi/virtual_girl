@@ -33,6 +33,7 @@ class MicConfig:
     pre_roll_buffer_ms: int = 400  # Buffer before VAD trigger
     max_speech_duration_ms: int = 30_000  # Auto-stop after 30s
     silence_duration_ms: int = 800  # Silence before auto-end of speech
+    startup_timeout_seconds: float = 5.0
 
     def __post_init__(self) -> None:
         if self.sample_rate not in {8000, 16000, 24000, 48000}:
@@ -45,6 +46,8 @@ class MicConfig:
             raise ValueError("pre_roll_buffer_ms must be between 0 and 2000")
         if self.max_speech_duration_ms <= 0 or self.silence_duration_ms <= 0:
             raise ValueError("microphone duration limits must be positive")
+        if self.startup_timeout_seconds <= 0:
+            raise ValueError("microphone startup_timeout_seconds must be positive")
 
 
 @dataclass
@@ -85,6 +88,8 @@ class MicrophoneCapture:
         self._speech_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=500)
         self._running: bool = False
         self._capture_task: asyncio.Task[None] | None = None
+        self._ready_event = asyncio.Event()
+        self._startup_error: BaseException | None = None
 
     @property
     def state(self) -> MicState:
@@ -103,14 +108,31 @@ class MicrophoneCapture:
             logger.error("No microphone backend installed; install virtual-companion[voice]")
             return False
         try:
+            self._ready_event.clear()
+            self._startup_error = None
             self._running = True
             self._state.is_capturing = True
             self._capture_task = asyncio.create_task(self._capture_loop_guarded())
+            await asyncio.wait_for(
+                self._ready_event.wait(), timeout=self._config.startup_timeout_seconds
+            )
+            if self._startup_error is not None or not self._running:
+                error_name = (
+                    type(self._startup_error).__name__ if self._startup_error else "unknown error"
+                )
+                logger.error("Microphone stream failed to start: %s", error_name)
+                await self.stop()
+                return False
             logger.info("Microphone capture started")
             return True
+        except TimeoutError:
+            logger.error("Microphone stream startup timed out")
+            await self.stop()
+            return False
         except Exception:
             logger.exception("Failed to start microphone capture")
             self._running = False
+            await self.stop()
             return False
 
     async def stop(self) -> None:
@@ -130,11 +152,13 @@ class MicrophoneCapture:
             await self._capture_loop()
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            self._startup_error = exc
             logger.exception("Microphone capture stopped unexpectedly")
         finally:
             self._running = False
             self._state.is_capturing = False
+            self._ready_event.set()
 
     async def get_speech_audio(self, timeout: float = 15.0) -> bytes | None:
         """Wait for and collect a speech utterance.
@@ -183,6 +207,8 @@ class MicrophoneCapture:
             )
             self._running = False
             self._state.is_capturing = False
+            self._startup_error = RuntimeError("No microphone backend installed")
+            self._ready_event.set()
 
     async def _capture_pyaudio(self) -> None:
         """Capture using PyAudio (cross-platform, most common)."""
@@ -200,6 +226,7 @@ class MicrophoneCapture:
                 input_device_index=self._config.device_index,
                 frames_per_buffer=chunk_size,
             )
+            self._ready_event.set()
 
             while self._running:
                 try:
@@ -243,6 +270,7 @@ class MicrophoneCapture:
             callback=callback,
             device=self._config.device_index,
         ):
+            self._ready_event.set()
             while self._running:
                 try:
                     audio_bytes = await asyncio.wait_for(self._audio_queue.get(), timeout=0.5)

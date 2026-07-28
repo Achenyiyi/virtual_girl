@@ -100,7 +100,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests`: passed.
 - `mypy companion`: passed in strict mode for 65 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 199 tests passed with 74.69% total
+- `pytest -q --cov=companion --cov-fail-under=70`: 202 tests passed with 75.23% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
   84%, action service 80%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version
@@ -114,6 +114,11 @@ The action and perception features must remain disabled until their correspondin
   sounddevice, a usable default microphone, and a usable default output device. It currently fails
   only the required DeepSeek and Azure credential checks, as expected before rotated credentials
   are injected.
+- The explicit hardware doctor first downloaded/loaded the configured faster-whisper `base` model
+  in 34.3 seconds. With the cached model, the final implementation loaded it in 2.9 seconds,
+  completed a real CTranslate2 in-memory silence inference in 0.2 seconds, captured 15 microphone
+  frames through the production stream, and opened the production playback stream with 20 ms of
+  silence. Credential-backed Azure synthesis remains pending.
 - `python -m build`: wheel and sdist built successfully; the wheel contains the MIT license and
   contains no database, test credential, or key-named file.
 - `pip-audit -r requirements.lock`: no known vulnerabilities in the locked runtime and voice
