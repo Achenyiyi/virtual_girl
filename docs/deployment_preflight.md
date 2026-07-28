@@ -66,3 +66,18 @@ cache disk use but does not invalidate the model/inference check.
    barge-in latency measurement.
 8. Enable the avatar only when its bridge extension is running and test Live2D/VRM state sync.
 9. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.
+
+## Memory backup and recovery preparation
+
+Create a verified backup before upgrades, configuration migrations, or any repair operation:
+
+```powershell
+python -m companion --backup-memory D:\CompanionBackups\memory-before-upgrade.db
+python -m companion --verify-memory-backup D:\CompanionBackups\memory-before-upgrade.db
+```
+
+The backup uses SQLite's online backup API, so WAL state is included consistently without copying
+live `.db-wal` files. It is written to a random temporary file, checked with `PRAGMA quick_check`,
+checked for the required memory tables, and atomically moved into place. Existing targets are
+protected unless `--overwrite-backup` is explicitly supplied. Store at least one copy outside the
+runtime directory and test verification from the installed wheel before relying on it.

@@ -23,6 +23,8 @@ experience, and fails closed when a required dependency is unavailable.
 - [x] Completed conversation turns are persisted and extracted facts reference real event IDs.
 - [x] Memory consistency checks pass after normal conversation, restart, forget, and rebuild.
 - [x] Rebuild is atomic: failure leaves the previous derived memory intact.
+- [x] Live memory can be backed up consistently, verified independently, and protected from
+      accidental overwrite before upgrade or repair.
 
 ### Computer actions
 
@@ -94,13 +96,18 @@ from the default YAML and unsafe or unimplemented configuration fails closed. Th
 family provides human and JSON preflight reports without exposing credential values; online Azure
 health uses the read-only voices-list endpoint. See `docs/deployment_preflight.md`.
 
+Memory operations status: the SQLite service creates its own configured parent directory and
+provides CLI-level online backup and independent verification. Backup publication is atomic,
+existing targets are protected by default, WAL-backed live state is captured through SQLite's
+backup API, and corrupt or structurally incomplete snapshots are rejected.
+
 The action and perception features must remain disabled until their corresponding gates pass.
 
 ## Verification evidence (2026-07-29)
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 207 tests passed with 75.23% total
+- `pytest -q --cov=companion --cov-fail-under=70`: 214 tests passed with at least 75% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
   84%, action service 80%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version
@@ -132,6 +139,10 @@ The action and perception features must remain disabled until their correspondin
   `faster_whisper`, `sounddevice`, and `numpy`, and completed a CLI help smoke test.
 - A wheel-only installation loaded its packaged default YAML from an unrelated empty working
   directory; the sdist excludes tests and includes the hash-locked runtime requirements.
+- A wheel-only installation created a live WAL-backed memory database in a previously missing
+  directory, produced and verified an online backup from an unrelated working directory, and then
+  verified the backup again after its source YAML was removed. Corrupt, incomplete, same-path,
+  in-memory, and accidental-overwrite cases are rejected by tests.
 - `.github/workflows/ci.yml` reproduces lint, type, coverage, secret, vulnerability, artifact,
   checksum, and isolated-wheel-install gates on Windows. Third-party Actions are pinned to full
   immutable commit SHAs and the job has read-only repository permissions. It has not yet run on a

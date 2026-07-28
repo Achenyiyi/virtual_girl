@@ -10,6 +10,7 @@ import os
 import sqlite3
 import sys
 import time
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -201,7 +202,7 @@ def _memory_check(config: RuntimeConfig) -> DiagnosticCheck:
     try:
         if path.exists():
             uri = path.as_uri() + "?mode=ro"
-            with sqlite3.connect(uri, uri=True, timeout=2.0) as connection:
+            with closing(sqlite3.connect(uri, uri=True, timeout=2.0)) as connection:
                 row = connection.execute("PRAGMA quick_check").fetchone()
             if not row or row[0] != "ok":
                 raise sqlite3.DatabaseError("SQLite quick_check did not return ok")

@@ -334,7 +334,11 @@ class CompanionApp:
 
 async def async_main(args: argparse.Namespace) -> int:
     """Async main entry point."""
-    # Load config
+    if args.verify_memory_backup:
+        MemoryService.verify_backup(args.verify_memory_backup)
+        print(f"Memory backup is valid: {args.verify_memory_backup.resolve()}")
+        return 0
+    # Load config for every operation that uses runtime settings.
     config = RuntimeConfig.from_yaml(args.config)
     if args.doctor or args.doctor_online or args.doctor_json:
         report = await run_diagnostics(
@@ -345,6 +349,15 @@ async def async_main(args: argparse.Namespace) -> int:
         )
         print(report.to_json() if args.doctor_json else render_diagnostic_report(report))
         return report.exit_code
+
+    if args.backup_memory:
+        memory = MemoryService(config.effective_memory_config())
+        try:
+            backup = await memory.backup_to(args.backup_memory, overwrite=args.overwrite_backup)
+        finally:
+            await memory.shutdown()
+        print(f"Memory backup created and verified: {backup}")
+        return 0
 
     setup_logging(args.log_level or config.log_level, config.log_file)
 
@@ -546,6 +559,23 @@ def main() -> None:
         help="深度检查 Whisper 模型与真实音频流（可能下载模型并短暂占用设备）",
     )
     parser.add_argument(
+        "--backup-memory",
+        type=Path,
+        default=None,
+        help="创建经过完整性校验的在线 SQLite 记忆备份后退出",
+    )
+    parser.add_argument(
+        "--verify-memory-backup",
+        type=Path,
+        default=None,
+        help="只读校验记忆备份的完整性和结构后退出",
+    )
+    parser.add_argument(
+        "--overwrite-backup",
+        action="store_true",
+        help="允许 --backup-memory 原子替换已有目标文件",
+    )
+    parser.add_argument(
         "--voice",
         action="store_true",
         default=False,
@@ -559,6 +589,24 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    maintenance_modes = sum(
+        (
+            any(
+                (
+                    args.doctor,
+                    args.doctor_online,
+                    args.doctor_json,
+                    args.doctor_voice_hardware,
+                )
+            ),
+            bool(args.backup_memory),
+            bool(args.verify_memory_backup),
+        )
+    )
+    if maintenance_modes > 1:
+        parser.error("doctor、backup-memory 和 verify-memory-backup 模式不能组合使用")
+    if args.overwrite_backup and not args.backup_memory:
+        parser.error("--overwrite-backup 只能与 --backup-memory 一起使用")
     if args.doctor_voice_hardware:
         args.doctor = True
         args.voice_input = True

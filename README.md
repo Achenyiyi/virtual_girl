@@ -85,6 +85,21 @@ $env:AZURE_SPEECH_KEY = "..."
 python -m companion --voice-input
 ```
 
+### 备份记忆
+
+运行中数据库使用 SQLite 在线备份 API 创建一致性快照；默认拒绝覆盖已有备份：
+
+```powershell
+python -m companion --backup-memory D:\CompanionBackups\memory-2026-07-29.db
+python -m companion --verify-memory-backup D:\CompanionBackups\memory-2026-07-29.db
+
+# 仅在明确需要替换同名备份时
+python -m companion --backup-memory D:\CompanionBackups\latest.db --overwrite-backup
+```
+
+备份完成前使用随机临时文件，校验 SQLite 完整性和必要表后再原子发布。备份目录应位于
+独立磁盘或受控同步位置，不要只保存在运行数据库旁边。
+
 首次启用 `--voice-input` 时，faster-whisper 会加载配置中的本地模型。
 
 启动前建议先运行不会输出凭据内容的结构化自检：

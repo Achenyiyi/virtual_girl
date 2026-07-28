@@ -13,9 +13,14 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import secrets
+import sqlite3
 import time
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import aiosqlite
@@ -160,6 +165,10 @@ class MemoryService(MemoryProvider):
 
     async def _ensure_db(self) -> aiosqlite.Connection:
         if self._conn is None:
+            if self._config.db_path != ":memory:":
+                Path(self._config.db_path).expanduser().resolve().parent.mkdir(
+                    parents=True, exist_ok=True
+                )
             self._conn = await aiosqlite.connect(self._config.db_path)
             if self._config.wal_mode:
                 await self._conn.execute("PRAGMA journal_mode=WAL")
@@ -733,6 +742,65 @@ class MemoryService(MemoryProvider):
             "error_count": len(errors),
             "error_details": errors,
         }
+
+    async def backup_to(self, destination: str | Path, *, overwrite: bool = False) -> Path:
+        """Create and verify a consistent SQLite backup without stopping the runtime."""
+        if self._config.db_path == ":memory:":
+            raise ValueError("in-memory databases cannot be backed up to a release file")
+
+        target = Path(destination).expanduser().resolve()
+        source = Path(self._config.db_path).expanduser().resolve()
+        if target == source:
+            raise ValueError("backup destination must differ from the live database")
+        if target.exists() and not overwrite:
+            raise FileExistsError(f"backup destination already exists: {target}")
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temporary = target.with_name(
+            f".{target.name}.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        )
+
+        conn = await self._ensure_db()
+        destination_conn: aiosqlite.Connection | None = None
+        try:
+            destination_conn = await aiosqlite.connect(temporary)
+            await conn.backup(destination_conn)
+            await destination_conn.close()
+            destination_conn = None
+            self.verify_backup(temporary)
+            if overwrite:
+                os.replace(temporary, target)
+            else:
+                os.link(temporary, target)
+                temporary.unlink()
+            return target
+        except Exception:
+            if destination_conn is not None:
+                await destination_conn.close()
+            temporary.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def verify_backup(path: str | Path) -> None:
+        """Reject a missing, corrupt, or structurally incomplete memory backup."""
+        backup_path = Path(path).expanduser().resolve()
+        if not backup_path.is_file():
+            raise FileNotFoundError(f"memory backup does not exist: {backup_path}")
+        uri = backup_path.as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True, timeout=5.0)) as connection:
+            quick_check = connection.execute("PRAGMA quick_check").fetchone()
+            if not quick_check or quick_check[0] != "ok":
+                raise sqlite3.DatabaseError("memory backup integrity check failed")
+            rows = connection.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+            ).fetchall()
+        names = {str(row[0]) for row in rows}
+        required = {"events", "facts", "episodes", "reflections"}
+        missing = required - names
+        if missing:
+            raise sqlite3.DatabaseError(
+                f"memory backup is missing required tables: {sorted(missing)}"
+            )
 
     # ── Provider Lifecycle ────────────────────────────────────────────
 
