@@ -62,6 +62,10 @@ providers:
       max_speech_duration_ms: 30000
       silence_duration_ms: 800
       max_turn_duration_ms: 30000
+      tts_chunk_timeout_seconds: 15.0
+      playback_timeout_seconds: 30.0
+      cleanup_timeout_seconds: 2.0
+      interrupt_timeout_seconds: 0.3
     batch:
       provider: "faster-whisper"
       model: "base"

@@ -12,7 +12,8 @@ The following settings are now authoritative at runtime:
 - `COMPANION_DB_PATH` as the explicit memory-path environment override;
 - LLM retries, retry delay, timeout, model, endpoint, and credential environment name;
 - Azure TTS region, voice, timeout, credential environment name, and 24 kHz PCM format;
-- microphone/ASR sample rate, language, pre-roll, speech/silence limits, and turn timeout;
+- microphone/ASR sample rate, language, pre-roll, speech/silence limits, whole-turn timeout, TTS
+  chunk timeout, playback timeout, cleanup timeout, and provider-interruption timeout;
 - quiet hours, hourly proactive budgets, and per-level cooldowns;
 - rotating file-log size/count, bounded in-memory event retention, avatar bridge, and Windows
   read-only action settings including pending-confirmation capacity and TTL.
@@ -72,6 +73,14 @@ Normal shutdown, startup failure, single-turn failure, and voice-loop failure al
 bounded cleanup path. If logs report a component shutdown timeout or failure, do not restart in a
 tight loop: confirm the prior process has exited and that microphone, audio, database, and avatar
 resources are no longer held before relaunching.
+
+Voice work uses one cumulative whole-turn deadline across ASR, LLM generation, TTS, and playback.
+The shorter TTS-chunk, playback, cleanup, and interruption limits prevent any single provider or
+audio-driver operation from consuming that budget indefinitely. A provider that ignores coroutine
+cancellation is detached after the observation deadline and its eventual result is consumed; this
+guarantees that the application operation returns, but it does not claim to terminate a native
+thread or driver owned by that provider. Treat repeated timeout logs as an unhealthy provider or
+device and recycle the process only after the normal bounded shutdown path completes.
 
 The event bus rejects new work after shutdown and drains any accepted event before the SQLite
 memory provider closes. A persistence error is fail-closed: the event is neither delivered nor

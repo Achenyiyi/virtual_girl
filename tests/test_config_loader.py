@@ -35,6 +35,10 @@ def test_packaged_default_config_is_cwd_independent(tmp_path, monkeypatch) -> No
     assert config.microphone_config.sample_rate == 16000
     assert config.microphone_config.pre_roll_buffer_ms == 400
     assert config.voice_pipeline_config.language == "zh"
+    assert config.voice_pipeline_config.tts_chunk_timeout_seconds == 15.0
+    assert config.voice_pipeline_config.playback_timeout_seconds == 30.0
+    assert config.voice_pipeline_config.cleanup_timeout_seconds == 2.0
+    assert config.voice_pipeline_config.interrupt_timeout_seconds == 0.3
     assert config.policy_config.level_4_per_hour == 1
     assert config.policy_config.level_4_cooldown_seconds == 1800
     assert config.log_max_bytes == 10 * 1024 * 1024
@@ -45,6 +49,28 @@ def test_packaged_default_config_is_cwd_independent(tmp_path, monkeypatch) -> No
 def test_missing_explicit_config_fails_closed(tmp_path) -> None:
     with pytest.raises(FileNotFoundError):
         RuntimeConfig.from_yaml(tmp_path / "missing.yaml")
+
+
+def test_voice_pipeline_timeouts_are_configurable(tmp_path) -> None:
+    path = tmp_path / "voice-timeouts.yaml"
+    path.write_text(
+        """providers:
+  asr:
+    capture:
+      tts_chunk_timeout_seconds: 1.1
+      playback_timeout_seconds: 2.2
+      cleanup_timeout_seconds: 3.3
+      interrupt_timeout_seconds: 0.4
+""",
+        encoding="utf-8",
+    )
+
+    config = RuntimeConfig.from_yaml(path).voice_pipeline_config
+
+    assert config.tts_chunk_timeout_seconds == 1.1
+    assert config.playback_timeout_seconds == 2.2
+    assert config.cleanup_timeout_seconds == 3.3
+    assert config.interrupt_timeout_seconds == 0.4
 
 
 def test_memory_environment_override_is_applied_at_runtime(tmp_path, monkeypatch) -> None:

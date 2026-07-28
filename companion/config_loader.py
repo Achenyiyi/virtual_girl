@@ -188,6 +188,16 @@ class RuntimeConfig:
             language=voice_language,
             pre_roll_ms=pre_roll_ms,
             max_turn_duration_ms=int(capture_raw.get("max_turn_duration_ms", 30_000)),
+            tts_chunk_timeout_seconds=float(
+                capture_raw.get("tts_chunk_timeout_seconds", 15.0)
+            ),
+            playback_timeout_seconds=float(
+                capture_raw.get("playback_timeout_seconds", 30.0)
+            ),
+            cleanup_timeout_seconds=float(capture_raw.get("cleanup_timeout_seconds", 2.0)),
+            interrupt_timeout_seconds=float(
+                capture_raw.get("interrupt_timeout_seconds", 0.3)
+            ),
         )
 
         # ── Memory ────────────────────────────────────────────────────

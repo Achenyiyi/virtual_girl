@@ -221,6 +221,102 @@ class TestVoicePipelineIntegration:
         assert voice._turn_mgr.get_current_turn().state == "error"
 
     @pytest.mark.asyncio
+    async def test_hung_provider_cancellation_cannot_block_interrupt(self):
+        class HangingCancelLLM(MockLLMProvider):
+            async def cancel(self, turn_id: str) -> bool:
+                await asyncio.Event().wait()
+                return False
+
+        output = FakeAudioOutput(blocking=True)
+        bus = EventBus("hung-cancel")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=HangingCancelLLM(),
+            tts=MockTTSProvider(),
+            audio_output=output,
+            config=VoicePipelineConfig(interrupt_timeout_seconds=0.02),
+        )
+        response_task = asyncio.create_task(voice.process_text_input("hello", speak=True))
+        await output.started.wait()
+
+        assert await asyncio.wait_for(voice.interrupt(), timeout=0.5)
+        assert await response_task == "mock response"
+        terminal = terminal_events(await captured_events(bus))
+
+        assert [event.event_type for event in terminal] == ["conversation.turn.interrupted"]
+
+    @pytest.mark.asyncio
+    async def test_cancellation_ignoring_provider_cannot_block_interrupt(self):
+        release = asyncio.Event()
+
+        class CancellationIgnoringLLM(MockLLMProvider):
+            async def cancel(self, turn_id: str) -> bool:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    await release.wait()
+                return False
+
+        output = FakeAudioOutput(blocking=True)
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=EventBus("cancel-resistant-provider"),
+            policy=PolicyGate(),
+            llm=CancellationIgnoringLLM(),
+            tts=MockTTSProvider(),
+            audio_output=output,
+            config=VoicePipelineConfig(interrupt_timeout_seconds=0.02),
+        )
+        response_task = asyncio.create_task(voice.process_text_input("hello", speak=True))
+        await output.started.wait()
+
+        try:
+            assert await asyncio.wait_for(voice.interrupt(), timeout=0.5)
+            assert await response_task == "mock response"
+        finally:
+            release.set()
+            await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_shutdown_interrupts_active_turn_and_rejects_new_work(self):
+        class HangingASR(MockASRProvider):
+            def __init__(self) -> None:
+                self.entered = asyncio.Event()
+
+            async def transcribe_batch(self, request: ASRBatchRequest) -> ASRBatchResult:
+                self.entered.set()
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+        bus = EventBus("voice-shutdown")
+        asr = HangingASR()
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            asr=asr,
+            llm=MockLLMProvider(),
+            config=VoicePipelineConfig(
+                interrupt_timeout_seconds=0.02,
+                cleanup_timeout_seconds=0.05,
+            ),
+        )
+        turn_task = asyncio.create_task(voice.process_audio_input(b"audio"))
+        await asr.entered.wait()
+
+        await asyncio.wait_for(voice.shutdown(), timeout=0.5)
+        with pytest.raises(asyncio.CancelledError):
+            await turn_task
+        terminal = terminal_events(await captured_events(bus))
+
+        assert [event.event_type for event in terminal] == ["conversation.turn.interrupted"]
+        with pytest.raises(RuntimeError, match="shut down"):
+            await voice.process_text_input("after shutdown")
+        await voice.shutdown()
+
+    @pytest.mark.asyncio
     async def test_audio_input_completes_full_spoken_event_chain(self, pipeline):
         output = FakeAudioOutput()
         pipeline._audio_output = output
@@ -332,6 +428,188 @@ class TestVoicePipelineIntegration:
         assert isinstance(failed, ConversationTurnFailedEvent)
         assert failed.stage == "tts"
         assert failed.error_type == "TimeoutError"
+
+    @pytest.mark.asyncio
+    async def test_hung_tts_chunk_hits_hard_timeout(self):
+        class HangingTTS(MockTTSProvider):
+            async def synthesize_stream(self, request: TTSRequest):
+                await asyncio.Event().wait()
+                yield  # pragma: no cover
+
+        bus = EventBus("hung-tts")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+            tts=HangingTTS(),
+            audio_output=FakeAudioOutput(),
+            config=VoicePipelineConfig(tts_chunk_timeout_seconds=0.02),
+        )
+
+        response = await asyncio.wait_for(
+            voice.process_text_input("hello", speak=True), timeout=0.5
+        )
+        failed = terminal_events(await captured_events(bus))[0]
+
+        assert response == "[Audio playback failed]"
+        assert isinstance(failed, ConversationTurnFailedEvent)
+        assert failed.stage == "tts"
+        assert failed.error_type == "tts_chunk_timeout"
+
+    @pytest.mark.asyncio
+    async def test_cancellation_ignoring_tts_cannot_defeat_hard_timeout(self):
+        release = asyncio.Event()
+
+        class CancellationIgnoringTTS(MockTTSProvider):
+            async def synthesize_stream(self, request: TTSRequest):
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    await release.wait()
+                return
+                yield  # pragma: no cover
+
+        bus = EventBus("cancel-resistant-tts")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+            tts=CancellationIgnoringTTS(),
+            audio_output=FakeAudioOutput(),
+            config=VoicePipelineConfig(tts_chunk_timeout_seconds=0.02),
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                voice.process_text_input("hello", speak=True), timeout=0.5
+            )
+            failed = terminal_events(await captured_events(bus))[0]
+
+            assert response == "[Audio playback failed]"
+            assert isinstance(failed, ConversationTurnFailedEvent)
+            assert failed.stage == "tts"
+            assert failed.error_type == "tts_chunk_timeout"
+        finally:
+            release.set()
+            await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_cancellation_ignoring_llm_cannot_defeat_turn_timeout(self):
+        release = asyncio.Event()
+
+        class CancellationIgnoringLLM(MockLLMProvider):
+            async def generate(self, request: LLMRequest) -> LLMResponse:
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    await release.wait()
+                return await super().generate(request)
+
+        bus = EventBus("cancel-resistant-llm")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=CancellationIgnoringLLM(),
+            config=VoicePipelineConfig(max_turn_duration_ms=20),
+        )
+
+        try:
+            response = await asyncio.wait_for(
+                voice.process_text_input("hello"), timeout=0.5
+            )
+            failed = terminal_events(await captured_events(bus))[0]
+
+            assert response == "[Voice turn timed out]"
+            assert isinstance(failed, ConversationTurnFailedEvent)
+            assert failed.stage == "generation"
+            assert failed.error_type == "turn_timeout"
+        finally:
+            release.set()
+            await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_hung_playback_hits_hard_timeout(self):
+        class HangingOutput(FakeAudioOutput):
+            async def play(self, pcm_data: bytes, sample_rate: int) -> PlaybackResult:
+                self.started.set()
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+        bus = EventBus("hung-playback")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+            tts=MockTTSProvider(),
+            audio_output=HangingOutput(),
+            config=VoicePipelineConfig(playback_timeout_seconds=0.02),
+        )
+
+        response = await asyncio.wait_for(
+            voice.process_text_input("hello", speak=True), timeout=0.5
+        )
+        failed = terminal_events(await captured_events(bus))[0]
+
+        assert response == "[Audio playback failed]"
+        assert isinstance(failed, ConversationTurnFailedEvent)
+        assert failed.stage == "playback"
+        assert failed.error_type == "playback_timeout"
+
+    @pytest.mark.asyncio
+    async def test_hung_playback_finish_hits_cleanup_timeout(self):
+        class HangingFinishOutput(FakeAudioOutput):
+            async def finish(self) -> None:
+                await asyncio.Event().wait()
+
+        bus = EventBus("hung-playback-finish")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+            tts=MockTTSProvider(),
+            audio_output=HangingFinishOutput(),
+            config=VoicePipelineConfig(cleanup_timeout_seconds=0.02),
+        )
+
+        response = await asyncio.wait_for(
+            voice.process_text_input("hello", speak=True), timeout=0.5
+        )
+        failed = terminal_events(await captured_events(bus))[0]
+
+        assert response == "[Audio playback failed]"
+        assert isinstance(failed, ConversationTurnFailedEvent)
+        assert failed.stage == "playback"
+        assert failed.error_type == "playback_cleanup_timeout"
+
+    @pytest.mark.asyncio
+    async def test_whole_turn_budget_bounds_hung_asr(self):
+        class HangingASR(MockASRProvider):
+            async def transcribe_batch(self, request: ASRBatchRequest) -> ASRBatchResult:
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+        bus = EventBus("whole-turn-timeout")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            asr=HangingASR(),
+            llm=MockLLMProvider(),
+            config=VoicePipelineConfig(max_turn_duration_ms=20),
+        )
+
+        response = await asyncio.wait_for(voice.process_audio_input(b"audio"), timeout=0.5)
+        failed = terminal_events(await captured_events(bus))[0]
+
+        assert response == "[Voice turn timed out]"
+        assert isinstance(failed, ConversationTurnFailedEvent)
+        assert failed.stage == "asr"
+        assert failed.error_type == "turn_timeout"
 
     @pytest.mark.asyncio
     async def test_task_cancellation_records_terminal_failure(self):

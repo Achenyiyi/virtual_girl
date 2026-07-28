@@ -20,12 +20,13 @@ Key features:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Awaitable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, TypeVar
 
 from companion.audio.player import PlaybackResult
 from companion.core.event_bus import EventBus
@@ -47,9 +48,10 @@ from companion.protocols.audio import AudioConfirmationProtocol
 from companion.protocols.turn import TurnManager, TurnRecord, TurnState
 from companion.providers.asr import ASRBatchRequest, ASRProvider
 from companion.providers.model import LLMProvider, LLMRequest
-from companion.providers.tts import TTSProvider, TTSRequest
+from companion.providers.tts import TTSChunk, TTSProvider, TTSRequest
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 VoiceFailureStage = Literal[
     "configuration",
     "asr",
@@ -95,6 +97,10 @@ class VoicePipelineConfig:
     language: str = "zh"
     pre_roll_ms: int = 400  # Pre-roll buffer before VAD trigger
     max_turn_duration_ms: int = 30_000  # Max turn before timeout
+    tts_chunk_timeout_seconds: float = 15.0
+    playback_timeout_seconds: float = 30.0
+    cleanup_timeout_seconds: float = 2.0
+    interrupt_timeout_seconds: float = 0.3
     echo_cancellation: bool = True
     noise_suppression: bool = True
     auto_gain_control: bool = True
@@ -115,6 +121,14 @@ class VoicePipelineConfig:
             raise ValueError("voice pre_roll_ms must be between 0 and 2000")
         if self.max_turn_duration_ms <= 0:
             raise ValueError("max_turn_duration_ms must be positive")
+        for name, value in (
+            ("tts_chunk_timeout_seconds", self.tts_chunk_timeout_seconds),
+            ("playback_timeout_seconds", self.playback_timeout_seconds),
+            ("cleanup_timeout_seconds", self.cleanup_timeout_seconds),
+            ("interrupt_timeout_seconds", self.interrupt_timeout_seconds),
+        ):
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
 
 
 @dataclass
@@ -174,6 +188,8 @@ class VoicePipeline:
         self._current_session_id: str = ""
         self._turn_sequence = 0
         self._turn_lock = asyncio.Lock()
+        self._active_turn_task: asyncio.Task[Any] | None = None
+        self._closed = False
 
         # Audio input queue (filled by microphone, consumed by pipeline)
         self._audio_input: asyncio.Queue[bytes] = asyncio.Queue(maxsize=100)
@@ -185,6 +201,8 @@ class VoicePipeline:
 
     async def start_session(self, session_id: str | None = None) -> str:
         """Start a new conversation session."""
+        if self._closed:
+            raise RuntimeError("Voice pipeline is shut down")
         self._current_session_id = session_id or f"sess_{generate_ulid()}"
         self._is_running = True
         self._pipeline_state = PipelineState.IDLE
@@ -194,6 +212,7 @@ class VoicePipeline:
     async def stop_session(self) -> None:
         """Stop the current session."""
         self._is_running = False
+        await self._stop_active_turn()
         self._pipeline_state = PipelineState.IDLE
         logger.info("Voice pipeline session stopped: %s", self._current_session_id)
 
@@ -219,23 +238,32 @@ class VoicePipeline:
         This bypasses ASR and goes directly to LLM → TTS path.
         """
         async with self._turn_lock:
+            self._ensure_accepting_turns()
+            self._active_turn_task = asyncio.current_task()
             if not self._is_running:
                 await self.start_session()
 
             turn = await self._begin_turn("text")
             self._turn_mgr.record_user_text(turn.turn_id, text)
+            deadline = time.monotonic() + self._config.max_turn_duration_ms / 1000
             try:
-                return await self._respond(turn, text, speak=speak)
+                return await self._respond(turn, text, speak=speak, deadline=deadline)
             except asyncio.CancelledError:
                 await self._cancel_started_turn(turn)
                 raise
+            finally:
+                if self._active_turn_task is asyncio.current_task():
+                    self._active_turn_task = None
 
     async def process_audio_input(self, audio_bytes: bytes) -> str:
         """Transcribe a completed utterance and run a spoken response turn."""
         async with self._turn_lock:
+            self._ensure_accepting_turns()
+            self._active_turn_task = asyncio.current_task()
             if not self._is_running:
                 await self.start_session()
             turn = await self._begin_turn("voice")
+            deadline = time.monotonic() + self._config.max_turn_duration_ms / 1000
             try:
                 if not self._asr:
                     await self._fail_turn(
@@ -249,7 +277,7 @@ class VoicePipeline:
                 self._turn_mgr.transition(turn.turn_id, TurnState.ASR_PROCESSING)
                 started_at = time.monotonic()
                 try:
-                    transcript = await asyncio.wait_for(
+                    transcript = await self._await_bounded(
                         self._asr.transcribe_batch(
                             ASRBatchRequest(
                                 audio_bytes=audio_bytes,
@@ -258,10 +286,20 @@ class VoicePipeline:
                                 turn_id=turn.turn_id,
                             )
                         ),
-                        timeout=self._config.max_turn_duration_ms / 1000,
+                        self._remaining_turn_seconds(deadline),
+                        stage="asr",
+                        timeout_error="turn_timeout",
                     )
                 except asyncio.CancelledError:
                     raise
+                except VoiceStageError as exc:
+                    await self._fail_turn(
+                        turn,
+                        stage=exc.stage,
+                        error_type=exc.error_type,
+                        retryable=exc.retryable,
+                    )
+                    return "[Voice turn timed out]"
                 except Exception as exc:
                     logger.exception("ASR transcription failed")
                     await self._fail_turn(
@@ -306,10 +344,15 @@ class VoicePipeline:
                         retryable=True,
                     )
                     return "[Conversation persistence failed]"
-                return await self._respond(turn, transcript.text, speak=True)
+                return await self._respond(
+                    turn, transcript.text, speak=True, deadline=deadline
+                )
             except asyncio.CancelledError:
                 await self._cancel_started_turn(turn)
                 raise
+            finally:
+                if self._active_turn_task is asyncio.current_task():
+                    self._active_turn_task = None
 
     async def _begin_turn(self, modality: str) -> TurnRecord:
         self._turn_sequence += 1
@@ -329,7 +372,14 @@ class VoicePipeline:
             raise
         return turn
 
-    async def _respond(self, turn: TurnRecord, text: str, *, speak: bool) -> str:
+    async def _respond(
+        self,
+        turn: TurnRecord,
+        text: str,
+        *,
+        speak: bool,
+        deadline: float,
+    ) -> str:
         """Generate and optionally speak one already-started turn."""
 
         if not self._llm and not self._runtime:
@@ -358,11 +408,22 @@ class VoicePipeline:
                 if llm is None:
                     raise RuntimeError("LLM provider not configured")
                 response_task = llm.generate(llm_request)
-            response = await asyncio.wait_for(
-                response_task, timeout=self._config.max_turn_duration_ms / 1000
+            response = await self._await_bounded(
+                response_task,
+                self._remaining_turn_seconds(deadline),
+                stage="generation",
+                timeout_error="turn_timeout",
             )
         except asyncio.CancelledError:
             raise
+        except VoiceStageError as exc:
+            await self._fail_turn(
+                turn,
+                stage=exc.stage,
+                error_type=exc.error_type,
+                retryable=exc.retryable,
+            )
+            return "[Voice turn timed out]"
         except Exception as exc:
             logger.exception("LLM generation failed")
             await self._fail_turn(
@@ -410,7 +471,9 @@ class VoicePipeline:
         communicated_text = response.text
         if speak:
             try:
-                communicated_text = await self._speak_response(turn, response.text)
+                communicated_text = await self._speak_response(
+                    turn, response.text, deadline=deadline
+                )
             except VoiceStageError as exc:
                 logger.exception("TTS or audio playback failed")
                 await self._fail_turn(
@@ -479,7 +542,7 @@ class VoicePipeline:
 
         return response.text
 
-    async def _speak_response(self, turn: TurnRecord, text: str) -> str:
+    async def _speak_response(self, turn: TurnRecord, text: str, *, deadline: float) -> str:
         if not self._tts or not self._audio_output:
             logger.error("Spoken turn requires both TTS and audio output")
             return ""
@@ -493,7 +556,32 @@ class VoicePipeline:
         try:
             try:
                 stream = self._tts.synthesize_stream(request)
-                async for chunk in stream:
+                iterator = stream.__aiter__()
+                while True:
+                    next_chunk_task: asyncio.Future[TTSChunk] = asyncio.ensure_future(
+                        anext(iterator)
+                    )
+                    try:
+                        done_chunk, _ = await asyncio.wait(
+                            [next_chunk_task],
+                            timeout=min(
+                                self._config.tts_chunk_timeout_seconds,
+                                self._remaining_turn_seconds(deadline),
+                            ),
+                        )
+                        if not done_chunk:
+                            next_chunk_task.cancel()
+                            next_chunk_task.add_done_callback(self._consume_future_result)
+                            raise VoiceStageError(
+                                "tts", "tts_chunk_timeout", retryable=True
+                            )
+                        chunk = await next_chunk_task
+                    except asyncio.CancelledError:
+                        next_chunk_task.cancel()
+                        next_chunk_task.add_done_callback(self._consume_future_result)
+                        raise
+                    except StopAsyncIteration:
+                        break
                     if not turn.is_active:
                         break
                     if not chunk.audio_bytes:
@@ -534,11 +622,29 @@ class VoicePipeline:
                             break
                         self._pipeline_state = PipelineState.SPEAKING
                         first_chunk = False
+                    playback_task: asyncio.Future[PlaybackResult] = asyncio.ensure_future(
+                        self._audio_output.play(chunk.audio_bytes, chunk.sample_rate)
+                    )
                     try:
-                        playback = await self._audio_output.play(
-                            chunk.audio_bytes, chunk.sample_rate
+                        done_playback, _ = await asyncio.wait(
+                            [playback_task],
+                            timeout=min(
+                                self._config.playback_timeout_seconds,
+                                self._remaining_turn_seconds(deadline),
+                            ),
                         )
+                        if not done_playback:
+                            playback_task.cancel()
+                            playback_task.add_done_callback(self._consume_future_result)
+                            raise VoiceStageError(
+                                "playback", "playback_timeout", retryable=True
+                            )
+                        playback = await playback_task
                     except asyncio.CancelledError:
+                        playback_task.cancel()
+                        playback_task.add_done_callback(self._consume_future_result)
+                        raise
+                    except VoiceStageError:
                         raise
                     except Exception as exc:
                         raise VoiceStageError(
@@ -574,11 +680,25 @@ class VoicePipeline:
             except Exception as exc:
                 raise VoiceStageError("tts", type(exc).__name__, retryable=True) from exc
         finally:
+            finish_task: asyncio.Future[None] = asyncio.ensure_future(self._audio_output.finish())
             try:
-                await self._audio_output.finish()
+                done_finish, _ = await asyncio.wait(
+                    [finish_task], timeout=self._config.cleanup_timeout_seconds
+                )
+                if not done_finish:
+                    finish_task.cancel()
+                    finish_task.add_done_callback(self._consume_future_result)
+                    raise VoiceStageError(
+                        "playback", "playback_cleanup_timeout", retryable=True
+                    )
+                await finish_task
             except asyncio.CancelledError:
+                finish_task.cancel()
+                finish_task.add_done_callback(self._consume_future_result)
                 raise
             except Exception as exc:
+                if isinstance(exc, VoiceStageError):
+                    raise
                 raise VoiceStageError("playback", type(exc).__name__, retryable=True) from exc
         return self._audio_proto.get_played_text(turn.turn_id)
 
@@ -689,7 +809,22 @@ class VoicePipeline:
         if self._audio_output:
             cancellation_tasks.append(self._audio_output.stop())
         if cancellation_tasks:
-            await asyncio.gather(*cancellation_tasks, return_exceptions=True)
+            futures = [asyncio.ensure_future(item) for item in cancellation_tasks]
+            done, pending = await asyncio.wait(
+                futures,
+                timeout=self._config.interrupt_timeout_seconds,
+            )
+            for future in done:
+                self._consume_future_result(future)
+            if pending:
+                for future in pending:
+                    future.cancel()
+                    future.add_done_callback(self._consume_future_result)
+                logger.error(
+                    "Turn %s provider cancellation exceeded %.3fs",
+                    current.turn_id,
+                    self._config.interrupt_timeout_seconds,
+                )
 
         self._pipeline_state = PipelineState.INTERRUPTED
 
@@ -748,10 +883,69 @@ class VoicePipeline:
     def get_current_state(self) -> PipelineState:
         return self._pipeline_state
 
+    def _ensure_accepting_turns(self) -> None:
+        if self._closed:
+            raise RuntimeError("Voice pipeline is shut down")
+
+    @staticmethod
+    def _remaining_turn_seconds(deadline: float) -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    @staticmethod
+    def _consume_future_result(future: asyncio.Future[Any]) -> None:
+        if future.cancelled():
+            return
+        with contextlib.suppress(Exception):
+            future.exception()
+
+    async def _await_bounded(
+        self,
+        operation: Awaitable[T],
+        timeout_seconds: float,
+        *,
+        stage: VoiceFailureStage,
+        timeout_error: str,
+    ) -> T:
+        future: asyncio.Future[T] = asyncio.ensure_future(operation)
+        try:
+            done, _ = await asyncio.wait([future], timeout=timeout_seconds)
+        except asyncio.CancelledError:
+            future.cancel()
+            future.add_done_callback(self._consume_future_result)
+            raise
+        if not done:
+            future.cancel()
+            future.add_done_callback(self._consume_future_result)
+            raise VoiceStageError(stage, timeout_error, retryable=True)
+        return await future
+
+    async def _stop_active_turn(self) -> None:
+        task = self._active_turn_task
+        if task is None or task is asyncio.current_task() or task.done():
+            return
+        current = self._turn_mgr.get_current_turn()
+        if current and current.is_active:
+            await self.interrupt()
+        if not task.done():
+            task.cancel()
+        done, _ = await asyncio.wait([task], timeout=self._config.cleanup_timeout_seconds)
+        if not done:
+            task.add_done_callback(self._consume_future_result)
+            logger.error(
+                "Active voice turn did not stop within %.3fs",
+                self._config.cleanup_timeout_seconds,
+            )
+            return
+        self._consume_future_result(task)
+
     # ── Cleanup ───────────────────────────────────────────────────────
 
     async def shutdown(self) -> None:
         """Stop the pipeline and release resources."""
+        if self._closed:
+            return
+        self._closed = True
         self._is_running = False
+        await self._stop_active_turn()
         self._pipeline_state = PipelineState.IDLE
         logger.info("Voice pipeline shut down")

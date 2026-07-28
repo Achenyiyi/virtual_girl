@@ -136,6 +136,11 @@ replacing the active turn. Barge-in also cancels active ASR and re-checks owners
 TTS-event, and playback boundaries. A completion claim is made before its durable publish so an
 accepted completion cannot race an interrupt into two terminal events. Post-completion derived
 history failures are logged as degradation rather than creating a contradictory failed terminal.
+ASR and LLM share a cumulative whole-turn deadline with TTS and playback. Separate TTS-chunk,
+playback, cleanup, and interruption limits keep stalled providers and drivers from blocking public
+operations or shutdown indefinitely. Non-cooperative coroutines are cancelled and detached at the
+observation deadline with eventual exceptions consumed; this bounds the application operation but
+does not forcibly terminate third-party native threads.
 
 Memory operations status: the SQLite service creates its own configured parent directory and
 provides CLI-level online backup and independent verification. Backup publication is atomic,
@@ -154,9 +159,9 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 279 tests passed with 77.52% total
+- `pytest -q --cov=companion --cov-fail-under=70`: 289 tests passed with 77.84% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
-  84%, action service 80%, and the action audit store 94%.
+  85%, action service 82%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version
   negotiation, health, model list/validate/load, full state mapping, timeout, disconnect,
   reconnect, and shutdown all passed. Orchestrator readiness fails for an unhealthy configured
