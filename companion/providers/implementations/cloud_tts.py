@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -27,6 +26,7 @@ from companion.providers.tts import (
     TTSRequest,
     TTSVoice,
 )
+from companion.security.windows_credentials import configured_secret_sources, resolve_secret
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -44,12 +44,16 @@ class CloudTTSConfig:
     voice: str = "zh-CN-XiaoxiaoNeural"
     api_key: str = ""
     api_key_env: str = "AZURE_SPEECH_KEY"
+    credential_target: str = ""
     region: str = "eastasia"
     sample_rate: int = 24000
     timeout_seconds: float = 15.0
     default_style: str = "general"  # SSML style
 
     def __post_init__(self) -> None:
+        configured_secret_sources(
+            env_name=self.api_key_env, credential_target=self.credential_target
+        )
         if self.provider != "azure":
             raise ValueError("only Azure cloud TTS is currently implemented")
         if not re.fullmatch(r"[A-Za-z0-9-]+", self.voice):
@@ -62,7 +66,11 @@ class CloudTTSConfig:
             raise ValueError("TTS timeout_seconds must be positive")
 
     def get_api_key(self) -> str:
-        return self.api_key or os.environ.get(self.api_key_env, "")
+        if self.api_key:
+            return self.api_key
+        return resolve_secret(
+            env_name=self.api_key_env, credential_target=self.credential_target
+        ).value
 
 
 class CloudTTSProvider(TTSProvider):

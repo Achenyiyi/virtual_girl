@@ -43,6 +43,28 @@ python -m companion --config production.yaml --accept-avatar-json 1>avatar-accep
 providers. The Azure check uses the read-only voices-list endpoint and doesn't synthesize audio.
 No diagnostic message or JSON field includes credential values.
 
+## Windows credential setup
+
+For an installed desktop release, store each rotated secret as a Windows **Generic Credential**
+for the same Windows account that runs the companion. Open **Credential Manager > Windows
+Credentials > Add a generic credential** and use these default Internet or network addresses:
+
+| Secret | Default target | Temporary environment override |
+| --- | --- | --- |
+| DeepSeek | `VirtualCompanion/DeepSeek` | `DEEPSEEK_API_KEY` |
+| Azure Speech | `VirtualCompanion/AzureSpeech` | `AZURE_SPEECH_KEY` |
+| Avatar bridge | `VirtualCompanion/AvatarBridge` | `COMPANION_AVATAR_TOKEN` |
+
+The username field is unused; put the secret in the password field. A custom target can be set
+with `credential_target` beside the corresponding `api_key_env` or `auth_token_env`. Environment
+variables take precedence for CI and one-off acceptance runs. Remove temporary variables after the
+run.
+
+Never put a secret in YAML, `.env`, a command argument, a key file, or a credential target name.
+After rotation, delete the superseded Generic Credential and create its replacement before running
+`--doctor-online`. The runtime reads only the configured Generic Credential; it does not enumerate
+the user's credential vault.
+
 Exit codes:
 
 - `0`: every required requested check passed; warnings and disabled optional providers are allowed;
@@ -78,7 +100,7 @@ pass/fail state, latency values, targets, event-stage failure categories, and ex
 contains microphone audio, transcripts, generated replies, credentials, or raw exception text.
 
 `--accept-avatar` is independent of LLM and voice readiness. It requires an explicitly enabled
-avatar bridge, a non-empty `identity.avatar_model_id`, the configured token environment variable,
+avatar bridge, a non-empty `identity.avatar_model_id`, the configured token credential source,
 and a real stage implementing the optional `stage.inspect` release-gate extension documented in
 `docs/avatar_bridge_protocol.md`. The command proves authenticated health, Live2D/VRM model
 enumeration/validation/load, full-state application, expression and gesture commands, proactive
@@ -95,17 +117,19 @@ not close the AIRI/Live2D/VRM release gate.
 
 ## Target-machine release sequence
 
-1. Rotate any credential that was ever stored outside the environment/credential manager.
-2. Install `requirements.lock` with hashes and install the wheel with `--no-deps`.
-3. Verify the published wheel and sdist against the accompanying `SHA256SUMS` before installation.
-4. Run `pip check` in that environment.
-5. Run local doctor with `--voice-input`.
-6. Inject the rotated DeepSeek and Azure credentials and run online doctor.
-7. Run `python -m companion --accept-voice-json 1>voice-acceptance.json`; follow the stderr prompts
+1. Revoke any credential that was ever stored outside an environment secret or Credential Manager.
+2. Store only the rotated replacements using the Generic Credential targets above.
+3. Install `requirements.lock` with hashes and install the wheel with `--no-deps`.
+4. Verify the published wheel and sdist against the accompanying `SHA256SUMS` before installation.
+5. Run `pip check` in that environment.
+6. Run local doctor with `--voice-input`.
+7. Run online doctor with the rotated DeepSeek and Azure credentials available from Credential
+   Manager or temporary environment overrides.
+8. Run `python -m companion --accept-voice-json 1>voice-acceptance.json`; follow the stderr prompts
    and retain the passing JSON report with the release evidence.
-8. Start the pinned AIRI stage extension, run `--accept-avatar-json`, retain its passing report, and
+9. Start the pinned AIRI stage extension, run `--accept-avatar-json`, retain its passing report, and
    record the visual sign-off described above.
-9. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.
+10. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.
 
 An action provider timeout is a process-lifetime quarantine, not a retry signal. For execution and
 undo, the external outcome is explicitly unknown because the provider may complete after the

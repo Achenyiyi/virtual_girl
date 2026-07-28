@@ -77,13 +77,19 @@ pip-compile --extra voice --extra dev --extra release --strip-extras \
   --no-emit-index-url --output-file requirements.lock pyproject.toml
 ```
 
-运行前通过环境变量注入云端凭据；不要把 Key 写入项目文件：
+开发或一次性验收可通过环境变量临时注入云端凭据：
 
 ```powershell
 $env:DEEPSEEK_API_KEY = "..."
 $env:AZURE_SPEECH_KEY = "..."
 python -m companion --voice-input
 ```
+
+生产桌面环境建议改用 Windows“通用凭据”，默认目标为
+`VirtualCompanion/DeepSeek`、`VirtualCompanion/AzureSpeech` 和
+`VirtualCompanion/AvatarBridge`。环境变量会优先覆盖已保存凭据；不要把 Key 写入 YAML、
+`.env`、key 文件、命令参数或启动脚本。设置与轮换步骤见
+[`docs/deployment_preflight.md`](docs/deployment_preflight.md)。
 
 ### 备份记忆
 

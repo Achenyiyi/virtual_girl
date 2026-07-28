@@ -17,9 +17,10 @@ protocol and does not claim compatibility with an unfinished AIRI remote-plugin 
 - URLs containing embedded credentials, query strings, or fragments are rejected so secrets
   cannot leak through endpoint logs.
 - The configured maximum applies to both incoming and outgoing messages (default 1 MiB).
-- The bearer token is read from `COMPANION_AVATAR_TOKEN` or another configured environment
-  variable. It is sent only in the handshake and must never appear in logs. A missing or empty
-  token fails closed before connecting.
+- The bearer token is read from `COMPANION_AVATAR_TOKEN` or the configured Windows Generic
+  Credential. The environment variable is a higher-priority temporary override. It is sent only
+  in the handshake and must never appear in logs. A missing or empty token fails closed before
+  connecting.
 - The stage must reject commands until a successful handshake.
 
 Enable the bridge explicitly in YAML:
@@ -31,10 +32,13 @@ providers:
     type: websocket_bridge
     url: ws://127.0.0.1:6121/ws
     auth_token_env: COMPANION_AVATAR_TOKEN
+    credential_target: VirtualCompanion/AvatarBridge
     connect_timeout_seconds: 3.0
     request_timeout_seconds: 3.0
     max_message_bytes: 1048576
 ```
+
+Do not embed the token in the target name, URL, YAML, or extension configuration.
 
 When enabled, an unreachable or unhealthy stage, a failed model validation/load, or an
 initial state-sync failure prevents companion startup. Headless mode remains available by

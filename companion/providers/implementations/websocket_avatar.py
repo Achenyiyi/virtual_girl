@@ -11,7 +11,6 @@ import contextlib
 import ipaddress
 import json
 import logging
-import os
 import time
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -25,6 +24,7 @@ from companion.providers.base import (
     ProviderHealth,
     ProviderInfo,
 )
+from companion.security.windows_credentials import configured_secret_sources, resolve_secret
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +42,15 @@ class WebSocketAvatarConfig:
 
     url: str = "ws://127.0.0.1:6121/ws"
     auth_token_env: str = "COMPANION_AVATAR_TOKEN"
+    credential_target: str = ""
     connect_timeout_seconds: float = 3.0
     request_timeout_seconds: float = 3.0
     max_message_bytes: int = 1_048_576
 
     def __post_init__(self) -> None:
+        configured_secret_sources(
+            env_name=self.auth_token_env, credential_target=self.credential_target
+        )
         parsed = urlparse(self.url)
         if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
             raise ValueError("avatar bridge URL must use ws:// or wss:// and include a host")
@@ -61,7 +65,9 @@ class WebSocketAvatarConfig:
 
     def get_auth_token(self) -> str:
         """Read the bearer secret at use time without storing it in config or logs."""
-        return os.environ.get(self.auth_token_env, "") if self.auth_token_env else ""
+        return resolve_secret(
+            env_name=self.auth_token_env, credential_target=self.credential_target
+        ).value
 
 
 @dataclass(frozen=True)

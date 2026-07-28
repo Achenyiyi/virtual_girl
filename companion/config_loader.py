@@ -132,13 +132,16 @@ class RuntimeConfig:
             raise ValueError("only the cloud LLM provider is currently implemented")
         llm_cloud = _section(llm_raw, "cloud")
         if llm_cloud.get("api_key") or llm_cloud.get("api_key_file"):
-            raise ValueError("YAML credentials are forbidden; configure api_key_env instead")
+            raise ValueError(
+                "YAML and file credentials are forbidden; configure api_key_env or "
+                "credential_target instead"
+            )
         cfg.llm_config = CloudLLMConfig(
             provider=llm_cloud.get("provider", "anthropic"),
             model=llm_cloud.get("model", "claude-sonnet-5"),
             api_key=llm_cloud.get("api_key", ""),
             api_key_env=llm_cloud.get("api_key_env", ""),
-            api_key_file=llm_cloud.get("api_key_file", ""),
+            credential_target=llm_cloud.get("credential_target", ""),
             base_url=llm_cloud.get("base_url", ""),
             max_retries=int(llm_cloud.get("max_retries", 3)),
             retry_delay_seconds=float(llm_cloud.get("retry_delay_seconds", 1.0)),
@@ -156,6 +159,7 @@ class RuntimeConfig:
                 provider=tts_cloud.get("provider", "azure"),
                 voice=tts_cloud.get("voice", "zh-CN-XiaoxiaoNeural"),
                 api_key_env=tts_cloud.get("api_key_env", "AZURE_SPEECH_KEY"),
+                credential_target=tts_cloud.get("credential_target", ""),
                 region=tts_cloud.get("region", "eastasia"),
                 sample_rate=int(tts_raw.get("sample_rate", 24000)),
                 timeout_seconds=float(tts_cloud.get("timeout_seconds", 15.0)),
@@ -226,6 +230,7 @@ class RuntimeConfig:
             cfg.avatar_config = WebSocketAvatarConfig(
                 url=avatar_raw.get("url", "ws://127.0.0.1:6121/ws"),
                 auth_token_env=avatar_raw.get("auth_token_env", "COMPANION_AVATAR_TOKEN"),
+                credential_target=avatar_raw.get("credential_target", ""),
                 connect_timeout_seconds=float(
                     avatar_raw.get("connect_timeout_seconds", 3.0)
                 ),

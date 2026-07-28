@@ -13,7 +13,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import os
 import time
 from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
@@ -30,6 +29,7 @@ from companion.providers.model import (
     LLMStreamChunk,
 )
 from companion.security.redaction import redact_text
+from companion.security.windows_credentials import configured_secret_sources, resolve_secret
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +42,16 @@ class CloudLLMConfig:
     model: str = "claude-sonnet-5"
     api_key: str = ""
     api_key_env: str = "ANTHROPIC_API_KEY"
-    api_key_file: str = ""  # Path to a file containing the API key
+    credential_target: str = ""
     base_url: str = ""
     max_retries: int = 3
     retry_delay_seconds: float = 1.0
     timeout_seconds: float = 30.0
 
     def __post_init__(self) -> None:
+        configured_secret_sources(
+            env_name=self.api_key_env, credential_target=self.credential_target
+        )
         if self.provider not in {"anthropic", "openai", "openai_compatible"}:
             raise ValueError("unsupported cloud LLM provider")
         if not self.model.strip():
@@ -69,19 +72,22 @@ class CloudLLMConfig:
             raise ValueError("cloud LLM endpoint must use https://")
 
     def get_api_key(self) -> str:
-        """Resolve API key: explicit > env var > file."""
+        """Resolve a test-injected key, environment override, or Windows credential."""
         if self.api_key:
             return self.api_key
-        env_val = os.environ.get(self.api_key_env, "")
-        if env_val:
-            return env_val
-        if self.api_key_file and os.path.isfile(self.api_key_file):
-            try:
-                with open(self.api_key_file, encoding="utf-8") as f:
-                    return f.read().strip()
-            except OSError:
-                pass
-        return ""
+        return resolve_secret(
+            env_name=self.api_key_env, credential_target=self.credential_target
+        ).value
+
+    def credential_source(self) -> str:
+        if self.api_key:
+            return "in-process credential injection"
+        resolved = resolve_secret(
+            env_name=self.api_key_env, credential_target=self.credential_target
+        )
+        return resolved.source or configured_secret_sources(
+            env_name=self.api_key_env, credential_target=self.credential_target
+        )
 
     def get_base_url(self) -> str:
         """Get the API endpoint URL."""

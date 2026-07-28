@@ -11,7 +11,8 @@ experience, and fails closed when a required dependency is unavailable.
 ### Security and privacy
 
 - [ ] No plaintext API credentials exist in the project or release artifacts.
-- [x] Production credentials come from an environment secret or Windows credential store.
+- [x] Production credentials come from an environment override or native Windows Credential
+      Manager lookup; YAML and key-file credentials are rejected.
 - [x] Secret scanning and dependency vulnerability scanning pass for release sources and the
       locked dependency tree.
 - [x] Logs and action audit records redact credentials and sensitive parameters.
@@ -66,7 +67,7 @@ experience, and fails closed when a required dependency is unavailable.
 
 Status: **not production ready**.
 
-Completed in the current milestone: environment-only default credential configuration,
+Completed in the current milestone: environment/Credential Manager credential resolution,
 authoritative event persistence, causal fact references, atomic memory rebuild, stable
 time-versioned preference keys, single-use action confirmation, provider timeouts, strict
 LLM readiness status, unknown no-data telemetry, and standards-compliant WAV generation.
@@ -120,6 +121,12 @@ retention) are now wired into runtime construction. Unsupported advertised provi
 from the default YAML and unsafe or unimplemented configuration fails closed. The new `--doctor`
 family provides human and JSON preflight reports without exposing credential values; online Azure
 health uses the read-only voices-list endpoint. See `docs/deployment_preflight.md`.
+
+Credential storage status: LLM, Azure TTS, and avatar token resolution now uses one constrained
+security boundary. A process environment value is an explicit temporary override; otherwise the
+runtime reads only the configured Windows Generic Credential through `CredReadW` and never
+enumerates the vault. Legacy LLM key-file loading was removed, and YAML rejects both inline and
+file credential fields.
 
 Cloud LLM status: the configured timeout is a cumulative budget covering all attempts and backoff,
 not a fresh allowance per HTTP request. Retries are limited to connection-establishment failures and
@@ -201,11 +208,14 @@ The action and perception features must remain disabled until their correspondin
 ## Verification evidence (2026-07-29)
 
 - `ruff check companion tests scripts`: passed.
-- `mypy companion scripts`: passed in strict mode for 68 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 330 tests passed with 79.14%
+- `mypy companion scripts`: passed in strict mode for 69 source files.
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 339 tests passed with 79.28%
   total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 83%, voice
   pipeline 85%, cloud LLM 63%, cloud TTS 81%, avatar acceptance 77%, action service 82%, and the
   action audit store 94%.
+- Windows Credential Manager integration passed focused resolution, precedence, validation, and
+  native missing-target tests. Environment overrides take precedence; absent or unreadable Generic
+  Credentials fail closed without enumerating the vault or exposing credential content.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version
   negotiation, health, model list/validate/load, full state mapping, timeout, disconnect,
   reconnect, and shutdown all passed. Orchestrator readiness fails for an unhealthy configured

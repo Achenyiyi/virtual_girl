@@ -23,10 +23,12 @@ def test_packaged_default_config_is_cwd_independent(tmp_path, monkeypatch) -> No
     assert config.identity.name == "未命名伙伴"
     assert config.llm_config is not None
     assert config.llm_config.api_key_env == "DEEPSEEK_API_KEY"
+    assert config.llm_config.credential_target == "VirtualCompanion/DeepSeek"
     assert config.llm_config.model == "deepseek-chat"
     assert config.llm_config.max_retries == 3
     assert config.tts_config is not None
     assert config.tts_config.region == "eastasia"
+    assert config.tts_config.credential_target == "VirtualCompanion/AzureSpeech"
     assert config.memory_config is not None
     assert config.memory_config.db_path == str(
         (runtime_root / "data" / "companion_memory.db").resolve()
@@ -136,6 +138,7 @@ def test_enabled_avatar_bridge_config_is_parsed(tmp_path) -> None:
     assert config.avatar_config is not None
     assert config.avatar_config.url == "ws://127.0.0.1:9999/avatar"
     assert config.avatar_config.auth_token_env == "TEST_AVATAR_TOKEN"
+    assert config.avatar_config.credential_target == ""
     assert config.avatar_config.request_timeout_seconds == 1.5
 
 
@@ -240,6 +243,7 @@ def test_enabled_actions_reject_unsafe_configuration(tmp_path, action_yaml) -> N
     [
         {"providers": {"llm": {"type": "local"}}},
         {"providers": {"llm": {"type": "cloud", "cloud": {"api_key": "forbidden"}}}},
+        {"providers": {"llm": {"type": "cloud", "cloud": {"api_key_file": "key.txt"}}}},
         {"providers": {"asr": {"batch": {"provider": "unknown"}}}},
         {"providers": {"perception": {"enabled": True}}},
         {"telemetry": {"enabled": True}},

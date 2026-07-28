@@ -48,6 +48,7 @@ from companion.providers.implementations.windows_readonly_action import (
 )
 from companion.security.action_audit import SQLiteActionAuditStore
 from companion.security.redaction import RedactingFormatter
+from companion.security.windows_credentials import configured_secret_sources
 from companion.services.action_service import ActionService
 from companion.services.proactive_scheduler import ProactiveScheduler, SchedulerConfig
 from companion.services.voice_pipeline import VoicePipeline
@@ -171,12 +172,13 @@ class CompanionApp:
                 logger = logging.getLogger(__name__)
                 logger.info("LLM API key found for %s", llm_config.provider)
             else:
-                print(
-                    f"{Colors.YELLOW}⚠ 未找到 LLM API Key。请设置环境变量 "
-                    f"{llm_config.api_key_env}{Colors.RESET}"
+                sources = configured_secret_sources(
+                    env_name=llm_config.api_key_env,
+                    credential_target=llm_config.credential_target,
                 )
                 print(
-                    f"{Colors.YELLOW}  例如: export {llm_config.api_key_env}=your-key{Colors.RESET}"
+                    f"{Colors.YELLOW}⚠ 未找到 LLM API Key。请配置 {sources}。"
+                    f"{Colors.RESET}"
                 )
 
         self._tts = CloudTTSProvider(config.tts_config) if config.tts_config else None
@@ -291,7 +293,7 @@ class CompanionApp:
             return False
         api_key = llm_config.get_api_key() if llm_config else ""
         if not api_key:
-            key_source = llm_config.api_key_file or llm_config.api_key_env or "API Key"
+            key_source = llm_config.credential_source()
             print(f"{Colors.YELLOW}⚠ 未检测到 API Key（来源: {key_source}）。{Colors.RESET}")
             return False
 
@@ -462,8 +464,7 @@ async def async_main(args: argparse.Namespace) -> int:
         elif not config.avatar_config.get_auth_token():
             avatar_report = failed_avatar_acceptance_report(
                 "avatar.credential",
-                f"Avatar token environment variable is unset: "
-                f"{config.avatar_config.auth_token_env}",
+                "Avatar token is unavailable from the configured secure source.",
             )
         else:
             provider = WebSocketAvatarProvider(config.avatar_config)

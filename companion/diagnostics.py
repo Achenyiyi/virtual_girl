@@ -29,6 +29,7 @@ from companion.providers.implementations.websocket_avatar import WebSocketAvatar
 from companion.providers.implementations.windows_readonly_action import (
     WindowsReadOnlyActionProvider,
 )
+from companion.security.windows_credentials import configured_secret_sources
 
 
 class DiagnosticStatus(StrEnum):
@@ -99,21 +100,25 @@ async def run_diagnostics(
             )
         )
     elif not llm_key_available:
+        sources = configured_secret_sources(
+            env_name=config.llm_config.api_key_env,
+            credential_target=config.llm_config.credential_target,
+        )
         checks.append(
             DiagnosticCheck(
                 "llm.credential",
                 DiagnosticStatus.FAIL,
-                f"Required LLM credential environment variable is unset: "
-                f"{config.llm_config.api_key_env}",
-                "Inject a rotated credential through the named environment variable.",
+                f"Required LLM credential is unavailable from {sources}.",
+                "Inject a rotated credential through the configured secure source.",
             )
         )
     else:
+        source = config.llm_config.credential_source()
         checks.append(
             DiagnosticCheck(
                 "llm.credential",
                 DiagnosticStatus.PASS,
-                f"LLM credential is available through {config.llm_config.api_key_env}.",
+                f"LLM credential is available through {source}.",
             )
         )
 
@@ -273,21 +278,28 @@ def _voice_checks(config: RuntimeConfig, *, require_voice: bool) -> list[Diagnos
             )
         )
     elif not config.tts_config.get_api_key():
+        sources = configured_secret_sources(
+            env_name=config.tts_config.api_key_env,
+            credential_target=config.tts_config.credential_target,
+        )
         checks.append(
             DiagnosticCheck(
                 "tts.credential",
                 DiagnosticStatus.FAIL,
-                f"Azure TTS credential environment variable is unset: "
-                f"{config.tts_config.api_key_env}",
-                "Inject the Azure Speech credential through the named environment variable.",
+                f"Azure TTS credential is unavailable from {sources}.",
+                "Inject the Azure Speech credential through the configured secure source.",
             )
         )
     else:
+        source = _resolved_secret_source(
+            env_name=config.tts_config.api_key_env,
+            credential_target=config.tts_config.credential_target,
+        )
         checks.append(
             DiagnosticCheck(
                 "tts.credential",
                 DiagnosticStatus.PASS,
-                f"Azure TTS credential is available through {config.tts_config.api_key_env}.",
+                f"Azure TTS credential is available through {source}.",
             )
         )
     return checks
@@ -457,12 +469,15 @@ async def _optional_provider_checks(
     checks: list[DiagnosticCheck] = []
     if config.avatar_config:
         if not config.avatar_config.get_auth_token():
+            sources = configured_secret_sources(
+                env_name=config.avatar_config.auth_token_env,
+                credential_target=config.avatar_config.credential_target,
+            )
             checks.append(
                 DiagnosticCheck(
                     "avatar.credential",
                     DiagnosticStatus.FAIL,
-                    f"Enabled avatar token environment variable is unset: "
-                    f"{config.avatar_config.auth_token_env}",
+                    f"Enabled avatar token is unavailable from {sources}.",
                 )
             )
         elif online:
@@ -506,6 +521,17 @@ async def _optional_provider_checks(
             )
         )
     return checks
+
+
+def _resolved_secret_source(*, env_name: str, credential_target: str) -> str:
+    from companion.security.windows_credentials import resolve_secret
+
+    resolved = resolve_secret(
+        env_name=env_name, credential_target=credential_target
+    )
+    return resolved.source or configured_secret_sources(
+        env_name=env_name, credential_target=credential_target
+    )
 
 
 def _health_check(code: str, label: str, health: ProviderHealth) -> DiagnosticCheck:
