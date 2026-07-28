@@ -126,11 +126,19 @@ python -m companion --doctor-json --voice-input
 
 # 轮换凭据注入后的真实语音上线验收；交互提示走 stderr，结果写入 JSON
 python -m companion --accept-voice-json 1>voice-acceptance.json
+
+# AIRI/Live2D/VRM 扩展启动后，验收模型加载、状态应用和真实渲染帧推进
+python -m companion --config production.yaml --accept-avatar-json 1>avatar-acceptance.json
 ```
 
 语音上线验收要求一轮真实麦克风到流式播放完整成功，再在第二轮播放期间通过新的 VAD
 speech-start 边沿立即打断；默认门槛为首音频 900 ms、打断 300 ms。完整流程和报告字段见
 [`docs/deployment_preflight.md`](docs/deployment_preflight.md)。
+
+形象舞台上线验收要求启用 `providers.avatar`、设置 `identity.avatar_model_id` 和头像鉴权
+环境变量。舞台扩展还需实现只读 `stage.inspect` 验收方法，报告渲染器实际应用的状态序号
+和已呈现帧序号；具体字段及人工视觉签字要求见
+[`docs/avatar_bridge_protocol.md`](docs/avatar_bridge_protocol.md) 和上线预检文档。
 
 形象舞台默认关闭。桥接协议、鉴权环境变量和 AIRI 当前适配状态见
 [`docs/avatar_bridge_protocol.md`](docs/avatar_bridge_protocol.md)。在真实舞台扩展完成前，不要把

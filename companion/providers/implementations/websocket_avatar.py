@@ -64,6 +64,27 @@ class WebSocketAvatarConfig:
         return os.environ.get(self.auth_token_env, "") if self.auth_token_env else ""
 
 
+@dataclass(frozen=True)
+class AvatarStageInspection:
+    """Read-only renderer evidence returned by the optional release-gate extension."""
+
+    renderer: str
+    model_id: str
+    model_loaded: bool
+    visible: bool
+    state_sequence: int
+    rendered_state_sequence: int
+    frame_sequence: int
+    expression_sequence: int
+    gesture_sequence: int
+    proactive_sequence: int
+    expression_id: str
+    valence: float
+    arousal: float
+    proactive_level: int
+    last_gesture_id: str
+
+
 class WebSocketAvatarProvider(AvatarProvider):
     """RPC client for the documented companion avatar bridge protocol."""
 
@@ -164,6 +185,36 @@ class WebSocketAvatarProvider(AvatarProvider):
     async def validate_model(self, model_id: str) -> list[str]:
         result = await self._request("model.validate", {"model_id": model_id})
         return _string_list(result.get("errors", []))
+
+    async def inspect_stage(self) -> AvatarStageInspection:
+        """Read renderer state from a stage that implements the release-gate extension."""
+        result = await self._request("stage.inspect", {})
+        renderer = _required_string(result, "renderer")
+        model_id = _required_string(result, "model_id")
+        expression_id = _required_string(result, "expression_id")
+        return AvatarStageInspection(
+            renderer=renderer,
+            model_id=model_id,
+            model_loaded=_required_bool(result, "model_loaded"),
+            visible=_required_bool(result, "visible"),
+            state_sequence=_required_nonnegative_int(result, "state_sequence"),
+            rendered_state_sequence=_required_nonnegative_int(
+                result, "rendered_state_sequence"
+            ),
+            frame_sequence=_required_nonnegative_int(result, "frame_sequence"),
+            expression_sequence=_required_nonnegative_int(
+                result, "expression_sequence"
+            ),
+            gesture_sequence=_required_nonnegative_int(result, "gesture_sequence"),
+            proactive_sequence=_required_nonnegative_int(
+                result, "proactive_sequence"
+            ),
+            expression_id=expression_id,
+            valence=_required_number(result, "valence"),
+            arousal=_required_number(result, "arousal"),
+            proactive_level=_required_int_range(result, "proactive_level", 0, 4),
+            last_gesture_id=_required_string(result, "last_gesture_id", allow_empty=True),
+        )
 
     async def shutdown(self) -> None:
         self._closed = True
@@ -334,4 +385,43 @@ def _optional_string(value: object) -> str | None:
 def _string_list(value: object) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise AvatarBridgeError("avatar bridge returned an invalid string array")
+    return value
+
+
+def _required_string(
+    result: dict[str, Any], key: str, *, allow_empty: bool = False
+) -> str:
+    value = result.get(key)
+    if not isinstance(value, str) or (not allow_empty and not value):
+        raise AvatarBridgeError(f"stage.inspect field {key} must be a string")
+    return value
+
+
+def _required_bool(result: dict[str, Any], key: str) -> bool:
+    value = result.get(key)
+    if not isinstance(value, bool):
+        raise AvatarBridgeError(f"stage.inspect field {key} must be a boolean")
+    return value
+
+
+def _required_nonnegative_int(result: dict[str, Any], key: str) -> int:
+    value = result.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise AvatarBridgeError(f"stage.inspect field {key} must be a non-negative integer")
+    return value
+
+
+def _required_number(result: dict[str, Any], key: str) -> float:
+    value = result.get(key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise AvatarBridgeError(f"stage.inspect field {key} must be a number")
+    return float(value)
+
+
+def _required_int_range(result: dict[str, Any], key: str, minimum: int, maximum: int) -> int:
+    value = _required_nonnegative_int(result, key)
+    if not minimum <= value <= maximum:
+        raise AvatarBridgeError(
+            f"stage.inspect field {key} must be between {minimum} and {maximum}"
+        )
     return value

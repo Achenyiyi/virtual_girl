@@ -35,6 +35,8 @@ python -m companion --doctor-online --voice-input
 python -m companion --doctor-json --voice-input
 python -m companion --accept-voice
 python -m companion --accept-voice-json 1>voice-acceptance.json
+python -m companion --config production.yaml --accept-avatar
+python -m companion --config production.yaml --accept-avatar-json 1>avatar-acceptance.json
 ```
 
 `--doctor` performs no LLM/TTS network calls. `--doctor-online` validates configured remote
@@ -75,6 +77,22 @@ stdout. Redirect stdout to retain release evidence. The report contains only che
 pass/fail state, latency values, targets, event-stage failure categories, and exit code. It never
 contains microphone audio, transcripts, generated replies, credentials, or raw exception text.
 
+`--accept-avatar` is independent of LLM and voice readiness. It requires an explicitly enabled
+avatar bridge, a non-empty `identity.avatar_model_id`, the configured token environment variable,
+and a real stage implementing the optional `stage.inspect` release-gate extension documented in
+`docs/avatar_bridge_protocol.md`. The command proves authenticated health, Live2D/VRM model
+enumeration/validation/load, full-state application, expression and gesture commands, proactive
+level, renderer-consumed state sequence, and a newly presented frame. Its JSON output contains
+only check identifiers and pass/fail messages; it contains no token, model path, state payload,
+user content, screenshot, or raw exception text.
+
+The avatar JSON report is necessary but not sufficient for visual release approval. While the gate
+runs, an operator must confirm the intended character/model is visible, the happy expression and
+nod are visibly applied, animation does not freeze, and there is no release-blocking clipping,
+missing texture, broken alpha, or severe lip/expression mismatch. Record that human sign-off next
+to the machine report. A self-reported `stage.inspect` result without this visual observation does
+not close the AIRI/Live2D/VRM release gate.
+
 ## Target-machine release sequence
 
 1. Rotate any credential that was ever stored outside the environment/credential manager.
@@ -85,7 +103,8 @@ contains microphone audio, transcripts, generated replies, credentials, or raw e
 6. Inject the rotated DeepSeek and Azure credentials and run online doctor.
 7. Run `python -m companion --accept-voice-json 1>voice-acceptance.json`; follow the stderr prompts
    and retain the passing JSON report with the release evidence.
-8. Enable the avatar only when its bridge extension is running and test Live2D/VRM state sync.
+8. Start the pinned AIRI stage extension, run `--accept-avatar-json`, retain its passing report, and
+   record the visual sign-off described above.
 9. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.
 
 An action provider timeout is a process-lifetime quarantine, not a retry signal. For execution and

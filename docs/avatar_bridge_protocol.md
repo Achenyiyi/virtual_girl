@@ -86,6 +86,38 @@ response order.
 | `gesture.trigger` | `gesture_id`, `intensity` | empty object |
 | `proactive.set_level` | `level` from 0 through 4 | empty object |
 
+### Optional release-gate inspection extension
+
+A stage intended for production acceptance must additionally implement the read-only
+`stage.inspect` method. Normal runtime operation does not require it, so existing v1 presentation
+stages remain compatible; `--accept-avatar` fails until the extension is present.
+
+`stage.inspect` takes no parameters and returns:
+
+| Field | Type | Required meaning |
+| --- | --- | --- |
+| `renderer` | non-empty string | `live2d` or `vrm`, sourced from the active renderer |
+| `model_id` | non-empty string | model currently bound to the renderer |
+| `model_loaded` | boolean | renderer model resources completed loading |
+| `visible` | boolean | model is attached to a visible stage/view |
+| `state_sequence` | non-negative integer | most recent accepted full-state sequence |
+| `rendered_state_sequence` | non-negative integer | state sequence consumed by the render loop |
+| `frame_sequence` | non-negative integer | monotonically increasing presented-frame counter |
+| `expression_sequence` | non-negative integer | most recent expression command applied |
+| `gesture_sequence` | non-negative integer | most recent gesture command applied |
+| `proactive_sequence` | non-negative integer | most recent proactive-level command applied |
+| `expression_id` | non-empty string | expression currently applied by the renderer |
+| `valence`, `arousal` | number | affect values currently applied by the renderer |
+| `proactive_level` | integer 0-4 | active presentation behavior level |
+| `last_gesture_id` | string | most recently accepted one-shot gesture, empty if none |
+
+The inspection values must come from renderer-owned applied state, not merely the WebSocket
+request handler. In particular, `rendered_state_sequence` may advance only after the render loop
+consumes the matching `state.update`, and `frame_sequence` may advance only after a frame is
+presented. Expression, gesture, and proactive sequences may advance only after their corresponding
+command is applied to renderer-owned state. The method must not return model paths, user text,
+credentials, or image/audio data.
+
 The complete state contains `expression`, `pose`, `eyes`, `valence`, `arousal`, `energy`,
 `is_speaking`, and `audio_level`. Nested fields use the names defined by
 `companion.providers.avatar.AvatarState`. A stage should treat every state update as a full

@@ -22,6 +22,12 @@ from typing import Any
 
 from companion.audio.microphone import MicrophoneCapture, VoiceChatMode
 from companion.audio.player import SoundDeviceAudioOutput, SystemAudioOutput
+from companion.avatar_acceptance import (
+    failed_avatar_acceptance_report,
+    render_avatar_acceptance_report,
+    run_avatar_acceptance,
+    shutdown_avatar_acceptance_provider,
+)
 from companion.config_loader import RuntimeConfig
 from companion.core.event_bus import EventBus
 from companion.core.expression_mapper import ExpressionMapper
@@ -439,6 +445,48 @@ async def async_main(args: argparse.Namespace) -> int:
         print(report.to_json() if args.doctor_json else render_diagnostic_report(report))
         return report.exit_code
 
+    accept_avatar = bool(
+        getattr(args, "accept_avatar", False)
+        or getattr(args, "accept_avatar_json", False)
+    )
+    if accept_avatar:
+        json_output = bool(getattr(args, "accept_avatar_json", False))
+        if not config.avatar_config:
+            avatar_report = failed_avatar_acceptance_report(
+                "avatar.config", "Avatar bridge is disabled or not configured."
+            )
+        elif not config.identity or not config.identity.avatar_model_id:
+            avatar_report = failed_avatar_acceptance_report(
+                "avatar.model_config", "Configured identity.avatar_model_id is empty."
+            )
+        elif not config.avatar_config.get_auth_token():
+            avatar_report = failed_avatar_acceptance_report(
+                "avatar.credential",
+                f"Avatar token environment variable is unset: "
+                f"{config.avatar_config.auth_token_env}",
+            )
+        else:
+            provider = WebSocketAvatarProvider(config.avatar_config)
+            try:
+                print(
+                    "Observe the stage now: confirm the intended model, happy expression, "
+                    "and nod gesture are visibly correct.",
+                    file=sys.stderr,
+                )
+                avatar_report = await run_avatar_acceptance(
+                    provider,
+                    model_id=config.identity.avatar_model_id,
+                    visual_hold_seconds=3.0,
+                )
+            finally:
+                await shutdown_avatar_acceptance_provider(provider)
+        print(
+            avatar_report.to_json()
+            if json_output
+            else render_avatar_acceptance_report(avatar_report)
+        )
+        return avatar_report.exit_code
+
     if args.backup_memory:
         memory = MemoryService(config.effective_memory_config())
         try:
@@ -742,6 +790,16 @@ def main() -> None:
         help="交互验收真实语音链路并仅输出结构化 JSON 结果",
     )
     parser.add_argument(
+        "--accept-avatar",
+        action="store_true",
+        help="验收真实 Live2D/VRM 舞台、模型加载和状态渲染",
+    )
+    parser.add_argument(
+        "--accept-avatar-json",
+        action="store_true",
+        help="验收真实形象舞台并仅输出结构化 JSON 结果",
+    )
+    parser.add_argument(
         "--backup-memory",
         type=Path,
         default=None,
@@ -783,16 +841,20 @@ def main() -> None:
                 )
             ),
             bool(args.accept_voice or args.accept_voice_json),
+            bool(args.accept_avatar or args.accept_avatar_json),
             bool(args.backup_memory),
             bool(args.verify_memory_backup),
         )
     )
     if maintenance_modes > 1:
         parser.error(
-            "doctor、accept-voice、backup-memory 和 verify-memory-backup 模式不能组合使用"
+            "doctor、accept-voice、accept-avatar、backup-memory 和 "
+            "verify-memory-backup 模式不能组合使用"
         )
     if args.accept_voice and args.accept_voice_json:
         parser.error("--accept-voice 和 --accept-voice-json 只能选择一个")
+    if args.accept_avatar and args.accept_avatar_json:
+        parser.error("--accept-avatar 和 --accept-avatar-json 只能选择一个")
     if args.overwrite_backup and not args.backup_memory:
         parser.error("--overwrite-backup 只能与 --backup-memory 一起使用")
     if args.doctor_voice_hardware:

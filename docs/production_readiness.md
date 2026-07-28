@@ -91,6 +91,14 @@ The remaining renderer gate is an AIRI-side extension and a real Live2D/VRM end-
 remote plugin bootstrap is unfinished at the inspected upstream commit, so no undocumented Eventa
 wire format is hard-coded. See `docs/avatar_bridge_protocol.md`.
 
+Avatar acceptance status: the release CLI now has an LLM-independent `--accept-avatar` gate. A
+production stage extension must expose renderer-owned inspection evidence showing the configured
+Live2D/VRM model is loaded and visible, the full state was consumed by the render loop, the expected
+expression/gesture/proactive level was applied, and a later frame was presented. The inspection
+schema is strict and privacy-safe. This machine evidence intentionally does not claim pixel-level
+correctness; the gate remains open until the AIRI extension exists, the command passes against it,
+and an operator signs off the visible model, animation, expression, textures, alpha, and clipping.
+
 Action implementation status: a real Windows provider now exposes only `check_system_status`,
 `read_window_title`, and `read_active_app`. It has no shell or generic command surface and rejects
 parameters, unknown actions, method/risk mismatches, and foreign sandbox IDs. Enabling it requires
@@ -193,14 +201,19 @@ The action and perception features must remain disabled until their correspondin
 ## Verification evidence (2026-07-29)
 
 - `ruff check companion tests scripts`: passed.
-- `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 324 tests passed with 79.11%
-  total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice
-  pipeline 85%, cloud LLM 63%, cloud TTS 81%, action service 82%, and the action audit store 94%.
+- `mypy companion scripts`: passed in strict mode for 68 source files.
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 330 tests passed with 79.14%
+  total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 83%, voice
+  pipeline 85%, cloud LLM 63%, cloud TTS 81%, avatar acceptance 77%, action service 82%, and the
+  action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version
   negotiation, health, model list/validate/load, full state mapping, timeout, disconnect,
   reconnect, and shutdown all passed. Orchestrator readiness fails for an unhealthy configured
   avatar.
+- The avatar release gate passed against a real loopback WebSocket process implementing the
+  renderer-inspection extension, including strict schema parsing, model load, applied state and
+  command sequences, and presented-frame advancement. The real AIRI extension and visual sign-off
+  remain pending.
 - A real Win32 integration test executed the capability-confined system-status action and verified
   the persisted SQLite hash chain. Boundary tests proved `open_app`, parameter injection, forged
   risk/method values, and unknown actions cannot reach provider execution.
