@@ -11,7 +11,7 @@ enters the shared conversation history (via turn.completed).
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import Field
 
@@ -121,6 +121,26 @@ class ConversationTurnInterruptedEvent(BaseEvent):
         default="user_speech",
         description="Why the interruption happened: 'user_speech', 'system_event', 'timeout'",
     )
+
+
+class ConversationTurnFailedEvent(BaseEvent):
+    """A started turn ended without a completed response."""
+
+    __event_type__: ClassVar[str] = "conversation.turn.failed"
+
+    turn_id: str = Field(..., description="Turn identifier")
+    session_id: str = Field(..., description="Session identifier")
+    turn_sequence: int = Field(..., ge=0)
+    stage: Literal["configuration", "generation", "persistence", "cancellation"] = Field(
+        ...,
+        description="Failure stage: configuration, generation, persistence, or cancellation",
+    )
+    error_type: str = Field(
+        default="runtime_error",
+        description="Sanitized exception class or stable failure category",
+    )
+    retryable: bool = Field(default=False)
+    elapsed_ms: int = Field(..., ge=0)
 
 
 class ConversationTurnCompletedEvent(BaseEvent):

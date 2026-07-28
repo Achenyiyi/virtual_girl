@@ -21,6 +21,8 @@ experience, and fails closed when a required dependency is unavailable.
 - [x] Every domain event is recorded before subscribers process it, including events with
       no subscribers.
 - [x] Completed conversation turns are persisted and extracted facts reference real event IDs.
+- [x] Every started text turn reaches one durable terminal event; failed configuration,
+      generation, persistence, and cancellation paths are recorded without storing exception text.
 - [x] Memory consistency checks pass after normal conversation, restart, forget, and rebuild.
 - [x] Rebuild is atomic: failure leaves the previous derived memory intact.
 - [x] Live memory can be backed up consistently, verified independently, and protected from
@@ -116,6 +118,13 @@ caller waits for the accepted commit to resolve. Subscriber failures are isolate
 time out, shutdown drains an in-flight publish, and the closed bus rejects publishing, replay, new
 subscriptions, and persistence-handler replacement.
 
+Text conversation lifecycle status: text turns are serialized so sequence numbers, prompt history,
+affect updates, and terminal events cannot interleave. Configuration, LLM generation, pre-completion
+persistence, and cancellation failures emit a typed `conversation.turn.failed` event with a
+sanitized error category. Cancellation during a committed completion waits for conversation history
+to catch up, preserving exactly one terminal state. Voice turns retain their separate completed and
+interrupted lifecycle and still require the target-device end-to-end gate below.
+
 Memory operations status: the SQLite service creates its own configured parent directory and
 provides CLI-level online backup and independent verification. Backup publication is atomic,
 existing targets are protected by default, WAL-backed live state is captured through SQLite's
@@ -133,7 +142,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 255 tests passed with 77.07% total
+- `pytest -q --cov=companion --cov-fail-under=70`: 264 tests passed with 77.50% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
   84%, action service 80%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version

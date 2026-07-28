@@ -28,6 +28,7 @@ from companion.events.conversation import (
     AsrFinalizedEvent,
     AudioPlayedEvent,
     ConversationTurnCompletedEvent,
+    ConversationTurnFailedEvent,
     ConversationTurnInterruptedEvent,
     ConversationTurnStartedEvent,
     LlmResponseGeneratedEvent,
@@ -215,6 +216,33 @@ class TestConversationEvents:
             new_turn_id="turn_new",
         )
         assert interrupted.interrupted_at_audio_ms == 300
+
+    def test_failed_turn_round_trip_and_stage_validation(self):
+        failed = ConversationTurnFailedEvent(
+            turn_id="turn_failed",
+            session_id="sess_test",
+            turn_sequence=2,
+            stage="generation",
+            error_type="TimeoutError",
+            retryable=True,
+            elapsed_ms=250,
+        )
+
+        restored = get_registry().deserialize(
+            failed.event_type,
+            failed.model_dump(mode="json"),
+        )
+
+        assert isinstance(restored, ConversationTurnFailedEvent)
+        assert restored.stage == "generation"
+        with pytest.raises(ValidationError):
+            ConversationTurnFailedEvent(
+                turn_id="turn_invalid",
+                session_id="sess_test",
+                turn_sequence=3,
+                stage="unknown",  # type: ignore[arg-type]
+                elapsed_ms=0,
+            )
 
 
 class TestSharedExperienceEvents:

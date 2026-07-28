@@ -10,9 +10,10 @@ It reads from all services but is the single writer for dialogue decisions.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from typing import Any
+from typing import Any, Literal
 
 from companion.conversation import ConversationHistory, TurnEntry
 from companion.core.event_bus import EventBus
@@ -22,6 +23,7 @@ from companion.core.state_manager import StateManager
 from companion.events.base import generate_ulid
 from companion.events.conversation import (
     ConversationTurnCompletedEvent,
+    ConversationTurnFailedEvent,
     ConversationTurnStartedEvent,
     LlmResponseGeneratedEvent,
 )
@@ -36,6 +38,7 @@ from companion.providers.perception import PerceptionProvider
 from companion.providers.tts import TTSProvider
 
 logger = logging.getLogger(__name__)
+TurnFailureStage = Literal["configuration", "generation", "persistence", "cancellation"]
 
 
 class CompanionOrchestrator:
@@ -81,6 +84,7 @@ class CompanionOrchestrator:
         self._fact_extractor: FactExtractor = FactExtractor()
         self._prompt_builder: PromptBuilder = PromptBuilder()
         self._expression_mapper = ExpressionMapper()
+        self._text_turn_lock = asyncio.Lock()
 
     # ── Provider setters (for late binding / testing) ─────────────────
 
@@ -221,6 +225,13 @@ class CompanionOrchestrator:
         Returns:
             Dict with keys: response_text, emotion, latency_ms, model_id, turn_id
         """
+        async with self._text_turn_lock:
+            return await self._process_user_input_serialized(text, turn_id, session_id)
+
+    async def _process_user_input_serialized(
+        self, text: str, turn_id: str, session_id: str
+    ) -> dict[str, Any]:
+        """Run one text turn against a stable history and sequence number."""
         if not turn_id:
             turn_id = f"turn_{generate_ulid()}"
         if not self._session_id:
@@ -231,16 +242,34 @@ class CompanionOrchestrator:
         self._turn_sequence += 1
         t_start = time.time()
 
-        await self.bus.publish(
-            ConversationTurnStartedEvent(
-                session_id=self._session_id,
-                turn_id=turn_id,
-                turn_sequence=self._turn_sequence,
-                input_modality="text",
+        try:
+            await self.bus.publish(
+                ConversationTurnStartedEvent(
+                    session_id=self._session_id,
+                    turn_id=turn_id,
+                    turn_sequence=self._turn_sequence,
+                    input_modality="text",
+                )
             )
-        )
+        except asyncio.CancelledError:
+            # EventBus completes an accepted start commit before cancellation propagates.
+            await self._publish_turn_failed(
+                turn_id,
+                stage="cancellation",
+                error_type="cancelled",
+                retryable=True,
+                started_at=t_start,
+            )
+            raise
 
         if not self._llm:
+            await self._publish_turn_failed(
+                turn_id,
+                stage="configuration",
+                error_type="llm_not_configured",
+                retryable=False,
+                started_at=t_start,
+            )
             return {
                 "response_text": "[LLM provider not configured]",
                 "emotion": "neutral",
@@ -249,8 +278,24 @@ class CompanionOrchestrator:
 
         try:
             response = await self.prepare_response(text, turn_id)
-        except Exception:
+        except asyncio.CancelledError:
+            await self._publish_turn_failed(
+                turn_id,
+                stage="cancellation",
+                error_type="cancelled",
+                retryable=True,
+                started_at=t_start,
+            )
+            raise
+        except Exception as exc:
             logger.exception("LLM generation failed")
+            await self._publish_turn_failed(
+                turn_id,
+                stage="generation",
+                error_type=type(exc).__name__,
+                retryable=True,
+                started_at=t_start,
+            )
             return {
                 "response_text": "抱歉，我暂时无法回应…",
                 "emotion": "concerned",
@@ -259,17 +304,44 @@ class CompanionOrchestrator:
                 "turn_id": turn_id,
             }
 
-        await self.bus.publish(
-            LlmResponseGeneratedEvent(
-                turn_id=turn_id,
-                response_text=response.text,
-                model_id=response.model_id,
-                model_provider=response.model_provider,
-                time_to_first_token_ms=response.time_to_first_token_ms,
-                total_latency_ms=response.total_latency_ms,
-                token_count=response.token_count,
+        try:
+            await self.bus.publish(
+                LlmResponseGeneratedEvent(
+                    turn_id=turn_id,
+                    response_text=response.text,
+                    model_id=response.model_id,
+                    model_provider=response.model_provider,
+                    time_to_first_token_ms=response.time_to_first_token_ms,
+                    total_latency_ms=response.total_latency_ms,
+                    token_count=response.token_count,
+                )
             )
-        )
+
+        except asyncio.CancelledError:
+            await self._publish_turn_failed(
+                turn_id,
+                stage="cancellation",
+                error_type="cancelled",
+                retryable=True,
+                started_at=t_start,
+            )
+            raise
+        except Exception as exc:
+            logger.exception("Conversation event persistence failed")
+            await self._publish_turn_failed(
+                turn_id,
+                stage="persistence",
+                error_type=type(exc).__name__,
+                retryable=True,
+                started_at=t_start,
+            )
+            return {
+                "response_text": "抱歉，我暂时无法回应…",
+                "emotion": "concerned",
+                "latency_ms": int((time.time() - t_start) * 1000),
+                "model_id": "error",
+                "turn_id": turn_id,
+            }
 
         completed_event = ConversationTurnCompletedEvent(
             turn_id=turn_id,
@@ -281,14 +353,30 @@ class CompanionOrchestrator:
             total_latency_ms=response.total_latency_ms,
             model_id=response.model_id,
         )
-        await self.bus.publish(completed_event)
+        try:
+            await self.bus.publish(completed_event)
+        except asyncio.CancelledError:
+            # EventBus finishes an accepted publish before cancellation propagates.
+            await self._commit_response_uncancellable(text, response, completed_event.event_id)
+            raise
+        except Exception as exc:
+            logger.exception("Conversation completion persistence failed")
+            await self._publish_turn_failed(
+                turn_id,
+                stage="persistence",
+                error_type=type(exc).__name__,
+                retryable=True,
+                started_at=t_start,
+            )
+            return {
+                "response_text": "抱歉，我暂时无法回应…",
+                "emotion": "concerned",
+                "latency_ms": int((time.time() - t_start) * 1000),
+                "model_id": "error",
+                "turn_id": turn_id,
+            }
 
-        await self.commit_response(
-            text,
-            response,
-            completed_event.event_id,
-            communicated_text=response.text,
-        )
+        await self._commit_response_uncancellable(text, response, completed_event.event_id)
 
         return {
             "response_text": response.text,
@@ -297,6 +385,44 @@ class CompanionOrchestrator:
             "model_id": response.model_id,
             "turn_id": turn_id,
         }
+
+    async def _commit_response_uncancellable(
+        self, user_text: str, response: LLMResponse, source_event_id: str
+    ) -> None:
+        commit_task = asyncio.create_task(
+            self.commit_response(
+                user_text,
+                response,
+                source_event_id,
+                communicated_text=response.text,
+            )
+        )
+        try:
+            await asyncio.shield(commit_task)
+        except asyncio.CancelledError:
+            await commit_task
+            raise
+
+    async def _publish_turn_failed(
+        self,
+        turn_id: str,
+        *,
+        stage: TurnFailureStage,
+        error_type: str,
+        retryable: bool,
+        started_at: float,
+    ) -> None:
+        await self.bus.publish(
+            ConversationTurnFailedEvent(
+                turn_id=turn_id,
+                session_id=self._session_id,
+                turn_sequence=self._turn_sequence,
+                stage=stage,
+                error_type=error_type,
+                retryable=retryable,
+                elapsed_ms=max(0, int((time.time() - started_at) * 1000)),
+            )
+        )
 
     async def prepare_response(self, text: str, turn_id: str) -> LLMResponse:
         """Generate a contextual response without committing conversation history."""

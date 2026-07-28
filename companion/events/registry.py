@@ -108,6 +108,7 @@ def _register_all(registry: EventRegistry) -> None:
         AsrFinalizedEvent,
         AudioPlayedEvent,
         ConversationTurnCompletedEvent,
+        ConversationTurnFailedEvent,
         ConversationTurnInterruptedEvent,
         ConversationTurnStartedEvent,
         LlmResponseGeneratedEvent,
@@ -153,6 +154,7 @@ def _register_all(registry: EventRegistry) -> None:
         TtsSynthesizedEvent,
         AudioPlayedEvent,
         ConversationTurnInterruptedEvent,
+        ConversationTurnFailedEvent,
         ConversationTurnCompletedEvent,
         # Memory
         FactExtractedEvent,
