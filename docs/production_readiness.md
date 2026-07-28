@@ -103,6 +103,12 @@ action, audit, proactive, latency, and audio queues are bounded. The durable SQL
 not truncated by these in-memory limits. Confirmation-requiring actions have a ten-item pending
 limit and a two-minute TTL by default, with expired requests revoked and audited.
 
+Lifecycle status: all runtime entry paths now converge on one idempotent shutdown task. Startup,
+single-turn, voice-loop, and microphone-cleanup failures cannot bypass application cleanup. Audio,
+voice, provider, memory, avatar, action, and audit shutdowns run independently with per-component
+timeouts; one failure cannot prevent later cleanup, and caller cancellation is propagated only
+after the underlying shutdown task finishes.
+
 Memory operations status: the SQLite service creates its own configured parent directory and
 provides CLI-level online backup and independent verification. Backup publication is atomic,
 existing targets are protected by default, WAL-backed live state is captured through SQLite's
@@ -120,7 +126,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 243 tests passed with 76.34% total
+- `pytest -q --cov=companion --cov-fail-under=70`: 249 tests passed with 76.96% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
   84%, action service 80%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version

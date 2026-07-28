@@ -68,6 +68,11 @@ cache disk use but does not invalidate the model/inference check.
 8. Enable the avatar only when its bridge extension is running and test Live2D/VRM state sync.
 9. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.
 
+Normal shutdown, startup failure, single-turn failure, and voice-loop failure all use the same
+bounded cleanup path. If logs report a component shutdown timeout or failure, do not restart in a
+tight loop: confirm the prior process has exited and that microphone, audio, database, and avatar
+resources are no longer held before relaunching.
+
 ## Memory backup and recovery preparation
 
 Create a verified backup before upgrades, configuration migrations, or any repair operation:

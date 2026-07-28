@@ -45,6 +45,8 @@ from companion.services.action_service import ActionService
 from companion.services.proactive_scheduler import ProactiveScheduler, SchedulerConfig
 from companion.services.voice_pipeline import VoicePipeline
 
+_SHUTDOWN_STEP_TIMEOUT_SECONDS = 5.0
+
 # ── Logging setup ──────────────────────────────────────────────────────
 
 
@@ -132,6 +134,7 @@ class CompanionApp:
 
     def __init__(self, config: RuntimeConfig) -> None:
         self._config = config
+        self._stop_task: asyncio.Task[None] | None = None
 
         # Core components
         self._state_mgr = StateManager()
@@ -341,13 +344,42 @@ class CompanionApp:
         return True
 
     async def stop(self) -> None:
-        """Shutdown the companion."""
-        await self._audio_output.stop()
-        await self._voice_audio_output.stop()
-        await self._voice_pipeline.shutdown()
-        await self._orchestrator.shutdown()
+        """Release every runtime resource once, even if the caller is cancelled."""
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(self._stop_components())
+        try:
+            await asyncio.shield(self._stop_task)
+        except asyncio.CancelledError:
+            await self._stop_task
+            raise
+
+    async def _stop_components(self) -> None:
+        components: list[tuple[str, Any]] = [
+            ("system audio", self._audio_output.stop()),
+            ("streaming audio", self._voice_audio_output.stop()),
+            ("voice pipeline", self._voice_pipeline.shutdown()),
+            ("orchestrator", self._orchestrator.shutdown()),
+        ]
         if self._action_audit:
-            await self._action_audit.shutdown()
+            components.append(("action audit", self._action_audit.shutdown()))
+        await asyncio.gather(
+            *(self._stop_component(name, operation) for name, operation in components)
+        )
+
+    @staticmethod
+    async def _stop_component(name: str, operation: Any) -> None:
+        try:
+            await asyncio.wait_for(operation, timeout=_SHUTDOWN_STEP_TIMEOUT_SECONDS)
+        except TimeoutError:
+            logging.getLogger(__name__).error(
+                "Timed out after %.1fs while shutting down %s",
+                _SHUTDOWN_STEP_TIMEOUT_SECONDS,
+                name,
+            )
+        except asyncio.CancelledError:
+            logging.getLogger(__name__).warning("Shutdown of %s was cancelled", name)
+        except Exception:
+            logging.getLogger(__name__).exception("Error shutting down %s", name)
 
 
 async def async_main(args: argparse.Namespace) -> int:
@@ -389,46 +421,40 @@ async def async_main(args: argparse.Namespace) -> int:
     )
 
     app = CompanionApp(config)
-    ready = await app.start()
-
-    if not ready:
-        await app.stop()
-        return 1
-
-    companion_name = app.state.identity.name
-
-    if args.voice_input:
-        if not await app.start_voice_mode():
-            await app.stop()
-            return 1
-        microphone = MicrophoneCapture(config.microphone_config)
-        if not await microphone.start():
-            print(f"{Colors.RED}✗ 麦克风不可用。{Colors.RESET}")
-            await app.stop()
-            return 1
-        try:
-            await VoiceChatMode(microphone, app.voice_pipeline, companion_name).run()
-        finally:
-            await microphone.stop()
-            await app.stop()
-        return 0
-
-    # ── Single message mode ────────────────────────────────────────────
-    if args.once:
-        result = await app.chat(args.once, speak=args.voice)
-        print_response(
-            companion_name,
-            result["response_text"],
-            emotion=result.get("emotion", ""),
-            latency_ms=result.get("latency_ms", 0),
-        )
-        await app.stop()
-        return 0
-
-    # ── Interactive mode ───────────────────────────────────────────────
-    print_companion_name(companion_name)
-
     try:
+        ready = await app.start()
+        if not ready:
+            return 1
+
+        companion_name = app.state.identity.name
+
+        if args.voice_input:
+            if not await app.start_voice_mode():
+                return 1
+            microphone = MicrophoneCapture(config.microphone_config)
+            if not await microphone.start():
+                print(f"{Colors.RED}✗ 麦克风不可用。{Colors.RESET}")
+                return 1
+            try:
+                await VoiceChatMode(microphone, app.voice_pipeline, companion_name).run()
+            finally:
+                try:
+                    await microphone.stop()
+                finally:
+                    await app.stop()
+            return 0
+
+        if args.once:
+            result = await app.chat(args.once, speak=args.voice)
+            print_response(
+                companion_name,
+                result["response_text"],
+                emotion=result.get("emotion", ""),
+                latency_ms=result.get("latency_ms", 0),
+            )
+            return 0
+
+        print_companion_name(companion_name)
         while True:
             try:
                 user_input = input(f"{Colors.GREEN}你{Colors.RESET}: ").strip()
