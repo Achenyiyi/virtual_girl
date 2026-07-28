@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable
 
 from companion.events.base import BaseEvent
@@ -45,10 +45,12 @@ class EventBus:
         max_log_size: int = 10_000,
         persistence_handler: EventPersistenceHandler | None = None,
     ) -> None:
+        if max_log_size < 1:
+            raise ValueError("max_log_size must be positive")
         self.name = name
         self._subscribers: dict[str, list[EventHandler]] = defaultdict(list)
         self._wildcard_subscribers: list[EventHandler] = []
-        self._event_log: list[BaseEvent] = []  # For replay/debugging
+        self._event_log: deque[BaseEvent] = deque(maxlen=max_log_size)
         self._max_log_size: int = max_log_size
         self._persistence_handler = persistence_handler
         self._running: bool = False
@@ -105,8 +107,6 @@ class EventBus:
 
         # Record every event, even when no component currently subscribes to it.
         self._event_log.append(event)
-        if len(self._event_log) > self._max_log_size:
-            self._event_log = self._event_log[-self._max_log_size :]
 
         # Persistence is deliberately fail-closed. Delivering an event that was not
         # durably recorded would break causality, recovery, and deletion semantics.

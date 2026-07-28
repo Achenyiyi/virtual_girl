@@ -37,7 +37,9 @@ def test_packaged_default_config_is_cwd_independent(tmp_path, monkeypatch) -> No
     assert config.voice_pipeline_config.language == "zh"
     assert config.policy_config.level_4_per_hour == 1
     assert config.policy_config.level_4_cooldown_seconds == 1800
-    assert config.event_log_retention == 100_000
+    assert config.log_max_bytes == 10 * 1024 * 1024
+    assert config.log_backup_count == 5
+    assert config.event_log_retention == 10_000
 
 
 def test_missing_explicit_config_fails_closed(tmp_path) -> None:
@@ -133,6 +135,8 @@ def test_enabled_windows_readonly_actions_require_safe_boundary(tmp_path) -> Non
     assert config.action_service_config.sandbox_enabled
     assert config.action_service_config.require_durable_audit
     assert not config.action_service_config.allow_reversible_low_auto
+    assert config.action_service_config.max_pending_confirmations == 10
+    assert config.action_service_config.confirmation_ttl_seconds == 120.0
     assert config.action_audit_db_path == str(audit_path.resolve())
 
 
@@ -221,6 +225,23 @@ def test_non_mapping_yaml_is_rejected(tmp_path) -> None:
 def test_ambiguous_nested_configuration_is_rejected(tmp_path, payload) -> None:
     path = tmp_path / "ambiguous.yaml"
     path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        RuntimeConfig.from_yaml(path)
+
+
+@pytest.mark.parametrize(
+    "dev",
+    [
+        {"log_max_bytes": 0},
+        {"log_backup_count": 0},
+        {"event_log_retention": 99},
+        {"event_log_retention": 100_001},
+    ],
+)
+def test_unbounded_or_invalid_resource_configuration_is_rejected(tmp_path, dev) -> None:
+    path = tmp_path / "invalid-resources.yaml"
+    path.write_text(yaml.safe_dump({"dev": dev}), encoding="utf-8")
 
     with pytest.raises(ValueError):
         RuntimeConfig.from_yaml(path)

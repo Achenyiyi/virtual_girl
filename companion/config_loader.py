@@ -61,7 +61,9 @@ class RuntimeConfig:
     # Dev
     log_level: str = "INFO"
     log_file: str = ""
-    event_log_retention: int = 100_000
+    log_max_bytes: int = 10 * 1024 * 1024
+    log_backup_count: int = 5
+    event_log_retention: int = 10_000
 
     # Raw config for inspection
     raw: dict[str, Any] = field(default_factory=dict)
@@ -239,6 +241,12 @@ class RuntimeConfig:
                 sandbox_enabled=True,
                 max_concurrent_actions=int(action_raw.get("max_concurrent_actions", 1)),
                 action_timeout_seconds=float(action_raw.get("timeout_seconds", 5.0)),
+                max_pending_confirmations=int(
+                    action_raw.get("max_pending_confirmations", 10)
+                ),
+                confirmation_ttl_seconds=float(
+                    action_raw.get("confirmation_ttl_seconds", 120.0)
+                ),
                 undo_enabled=False,
                 audit_enabled=True,
                 require_durable_audit=True,
@@ -280,9 +288,15 @@ class RuntimeConfig:
         cfg.log_level = dev_raw.get("log_level", "INFO")
         log_file = str(dev_raw.get("log_file", "")).strip()
         cfg.log_file = _resolve_runtime_path(log_file, runtime_root) if log_file else ""
-        cfg.event_log_retention = int(dev_raw.get("event_log_retention", 100_000))
-        if cfg.event_log_retention < 1000:
-            raise ValueError("event_log_retention must be at least 1000")
+        cfg.log_max_bytes = int(dev_raw.get("log_max_bytes", 10 * 1024 * 1024))
+        cfg.log_backup_count = int(dev_raw.get("log_backup_count", 5))
+        cfg.event_log_retention = int(dev_raw.get("event_log_retention", 10_000))
+        if not 1024 <= cfg.log_max_bytes <= 1024 * 1024 * 1024:
+            raise ValueError("log_max_bytes must be between 1 KiB and 1 GiB")
+        if not 1 <= cfg.log_backup_count <= 100:
+            raise ValueError("log_backup_count must be between 1 and 100")
+        if not 100 <= cfg.event_log_retention <= 100_000:
+            raise ValueError("event_log_retention must be between 100 and 100000")
 
         return cfg
 

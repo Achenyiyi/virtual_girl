@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
@@ -47,12 +48,25 @@ from companion.services.voice_pipeline import VoicePipeline
 # ── Logging setup ──────────────────────────────────────────────────────
 
 
-def setup_logging(level: str = "INFO", log_file: str = "") -> None:
+def setup_logging(
+    level: str = "INFO",
+    log_file: str = "",
+    *,
+    max_bytes: int = 10 * 1024 * 1024,
+    backup_count: int = 5,
+) -> None:
     """Configure logging for the companion runtime."""
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stderr)]
     if log_file:
         os.makedirs(os.path.dirname(log_file) or ".", exist_ok=True)
-        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+        handlers.append(
+            RotatingFileHandler(
+                log_file,
+                maxBytes=max_bytes,
+                backupCount=backup_count,
+                encoding="utf-8",
+            )
+        )
 
     formatter = RedactingFormatter(
         fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -60,7 +74,11 @@ def setup_logging(level: str = "INFO", log_file: str = "") -> None:
     )
     for handler in handlers:
         handler.setFormatter(formatter)
-    logging.basicConfig(level=getattr(logging, level.upper(), logging.INFO), handlers=handlers)
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        handlers=handlers,
+        force=True,
+    )
 
 
 # ── Output formatting ─────────────────────────────────────────────────
@@ -359,7 +377,12 @@ async def async_main(args: argparse.Namespace) -> int:
         print(f"Memory backup created and verified: {backup}")
         return 0
 
-    setup_logging(args.log_level or config.log_level, config.log_file)
+    setup_logging(
+        args.log_level or config.log_level,
+        config.log_file,
+        max_bytes=config.log_max_bytes,
+        backup_count=config.log_backup_count,
+    )
 
     app = CompanionApp(config)
     ready = await app.start()

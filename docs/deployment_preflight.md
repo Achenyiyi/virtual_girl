@@ -14,7 +14,8 @@ The following settings are now authoritative at runtime:
 - Azure TTS region, voice, timeout, credential environment name, and 24 kHz PCM format;
 - microphone/ASR sample rate, language, pre-roll, speech/silence limits, and turn timeout;
 - quiet hours, hourly proactive budgets, and per-level cooldowns;
-- event-bus retention, avatar bridge, and Windows read-only action settings.
+- rotating file-log size/count, bounded in-memory event retention, avatar bridge, and Windows
+  read-only action settings including pending-confirmation capacity and TTL.
 
 Relative data/log/audit paths in the packaged default resolve under
 `%LOCALAPPDATA%\VirtualCompanion`, independent of the launch directory. Set

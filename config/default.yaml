@@ -91,6 +91,8 @@ providers:
     audit_db_path: "./data/action_audit.db"
     timeout_seconds: 5.0
     max_concurrent_actions: 1
+    max_pending_confirmations: 10
+    confirmation_ttl_seconds: 120.0
     max_text_characters: 4096
 
 # ── Policy ──────────────────────────────────────────────────────────────
@@ -116,4 +118,6 @@ policy:
 dev:
   log_level: "INFO"
   log_file: "./data/companion.log"
-  event_log_retention: 100000
+  log_max_bytes: 10485760
+  log_backup_count: 5
+  event_log_retention: 10000

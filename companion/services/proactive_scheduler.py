@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
@@ -65,6 +66,12 @@ class SchedulerConfig:
     feedback_window_size: int = 50
     learning_rate: float = 0.1
 
+    def __post_init__(self) -> None:
+        if self.periodic_check_interval_seconds <= 0:
+            raise ValueError("periodic_check_interval_seconds must be positive")
+        if self.feedback_window_size < 1:
+            raise ValueError("feedback_window_size must be positive")
+
 
 class ProactiveScheduler:
     """Schedules and manages proactive companion behaviors.
@@ -88,7 +95,7 @@ class ProactiveScheduler:
         self._bus = bus
         self._config = config or SchedulerConfig()
 
-        self._history: list[ProactiveEvent] = []
+        self._history: deque[ProactiveEvent] = deque(maxlen=self._config.feedback_window_size)
         self._running = False
         self._check_task: asyncio.Task[None] | None = None
 
@@ -249,7 +256,7 @@ class ProactiveScheduler:
 
     def get_acceptance_rate(self, window: int | None = None) -> float:
         """Get the recent proactive acceptance rate."""
-        events = self._history[-window:] if window else self._history
+        events = list(self._history)[-window:] if window else list(self._history)
         rated = [e for e in events if e.user_accepted is not None]
         if not rated:
             return 1.0  # No feedback yet = optimistic

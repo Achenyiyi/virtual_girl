@@ -31,6 +31,7 @@ experience, and fails closed when a required dependency is unavailable.
 - [x] PolicyGate is the single authorization path.
 - [x] Irreversible actions always require a fresh explicit confirmation and preview.
 - [x] Confirmation is single-use and concurrent duplicate confirmation is idempotent.
+- [x] Pending confirmations expire, have a fixed capacity, and cannot authorize stale actions.
 - [x] Provider execution has an enforced timeout and durable redacted audit records.
 - [x] The Windows provider is capability-confined to three parameterless read-only Win32 queries;
       real execution and the durable audit chain pass on the target Windows machine.
@@ -52,6 +53,7 @@ experience, and fails closed when a required dependency is unavailable.
 - [x] Runtime dependencies are locked and reproducible; package and clean-machine install pass.
 - [x] A credential-safe deployment doctor validates configuration, SQLite integrity, local voice
       modules/devices, and optionally remote provider health with deterministic exit codes.
+- [x] Runtime logs and diagnostic histories have explicit memory/disk bounds and rotation.
 - [ ] Unit, integration, recovery, security, and end-to-end suites pass in CI.
 - [x] Ruff and mypy pass for production code; critical production paths meet agreed coverage.
 
@@ -96,6 +98,11 @@ from the default YAML and unsafe or unimplemented configuration fails closed. Th
 family provides human and JSON preflight reports without exposing credential values; online Azure
 health uses the read-only voices-list endpoint. See `docs/deployment_preflight.md`.
 
+Long-running resource status: file logs rotate at 10 MiB with five backups by default; replay,
+action, audit, proactive, latency, and audio queues are bounded. The durable SQLite event ledger is
+not truncated by these in-memory limits. Confirmation-requiring actions have a ten-item pending
+limit and a two-minute TTL by default, with expired requests revoked and audited.
+
 Memory operations status: the SQLite service creates its own configured parent directory and
 provides CLI-level online backup and independent verification. Backup publication is atomic,
 existing targets are protected by default, WAL-backed live state is captured through SQLite's
@@ -107,7 +114,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 214 tests passed with at least 75% total
+- `pytest -q --cov=companion --cov-fail-under=70`: 229 tests passed with 75.70% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
   84%, action service 80%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version

@@ -129,6 +129,10 @@ Windows 行动能力同样默认关闭。目前只提供三个不可变、无参
 影响和明确不支持的操作见
 [`docs/windows_readonly_actions.md`](docs/windows_readonly_actions.md)。
 
+默认文件日志按 10 MiB 轮转并保留 5 个历史文件；事件重放和诊断历史仅保留有界内存窗口，完整
+会话事件仍写入 SQLite 账本。可通过 `dev.log_max_bytes`、`dev.log_backup_count` 和
+`dev.event_log_retention` 调整，但超出安全范围的配置会被拒绝。
+
 ## 开发阶段
 
 | Phase | 目标 | 状态 |

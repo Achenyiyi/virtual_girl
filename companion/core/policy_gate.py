@@ -16,6 +16,7 @@ relevance + urgency + relationship_value - interruption_cost
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
@@ -116,7 +117,7 @@ class PolicyGate:
             ProactiveLevel.LEVEL_3_CONVERSATION: config.level_3_per_hour,
             ProactiveLevel.LEVEL_4_ACTION: config.level_4_per_hour,
         }
-        self._proactive_history: list[tuple[float, ProactiveLevel]] = []
+        self._proactive_history: deque[tuple[float, ProactiveLevel]] = deque()
 
         # Quiet hours
         self._quiet_hours_start_hour = config.quiet_hours_start_hour
@@ -407,6 +408,8 @@ class PolicyGate:
         """Count proactives of a given level within the time window."""
         now = time.time()
         cutoff = now - window_seconds
+        while self._proactive_history and self._proactive_history[0][0] < cutoff:
+            self._proactive_history.popleft()
         return sum(1 for ts, lvl in self._proactive_history if lvl == level and ts >= cutoff)
 
     def _last_proactive_time(self, level: ProactiveLevel) -> float | None:

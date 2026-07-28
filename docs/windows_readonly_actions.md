@@ -35,6 +35,8 @@ providers:
     audit_db_path: ./data/action_audit.db
     timeout_seconds: 5.0
     max_concurrent_actions: 1
+    max_pending_confirmations: 10
+    confirmation_ttl_seconds: 120.0
     max_text_characters: 4096
 ```
 
@@ -48,6 +50,10 @@ When enabled, the application fails startup if:
 Every requested, executing, and executed stage is persisted before or around the provider
 boundary. Action parameters and errors pass through the existing credential redaction layer.
 Provider result data is not persisted in the audit ledger.
+
+Any future confirmation-requiring provider inherits a bounded pending queue and a short
+confirmation TTL. Expired confirmations are revoked and audited, and excess proposals are denied;
+an approval can therefore never authorize an arbitrarily old request or grow memory without bound.
 
 ## Privacy and operational notes
 

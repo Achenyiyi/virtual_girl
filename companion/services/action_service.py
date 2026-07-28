@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
@@ -76,6 +77,10 @@ class ActionServiceConfig:
     allow_reversible_low_auto: bool = True
     allow_reversible_high_auto: bool = False
     allow_irreversible_auto: bool = False
+    max_history_entries: int = 1000
+    max_in_memory_audit_entries: int = 1000
+    max_pending_confirmations: int = 10
+    confirmation_ttl_seconds: float = 120.0
 
     def __post_init__(self) -> None:
         if self.max_concurrent_actions < 1:
@@ -84,6 +89,10 @@ class ActionServiceConfig:
             raise ValueError("action_timeout_seconds must be positive")
         if self.require_durable_audit and not self.audit_enabled:
             raise ValueError("durable action audit requires audit_enabled")
+        if self.max_history_entries < 1 or self.max_in_memory_audit_entries < 1:
+            raise ValueError("action history and in-memory audit limits must be positive")
+        if self.max_pending_confirmations < 1 or self.confirmation_ttl_seconds <= 0:
+            raise ValueError("pending confirmation limits and TTL must be positive")
 
 
 class ActionService:
@@ -103,13 +112,41 @@ class ActionService:
         self._policy_gate = policy_gate or PolicyGate()
         self._audit_store = audit_store
 
-        self._history: list[ActionRecord] = []
+        self._history: deque[ActionRecord] = deque(maxlen=self._config.max_history_entries)
         self._pending: dict[str, ActionRecord] = {}
         self._active_semaphore: asyncio.Semaphore = asyncio.Semaphore(
             self._config.max_concurrent_actions
         )
         self._confirmation_lock = asyncio.Lock()
-        self._audit_log: list[dict[str, Any]] = []
+        self._audit_log: deque[dict[str, Any]] = deque(
+            maxlen=self._config.max_in_memory_audit_entries
+        )
+
+    def _record_history(self, record: ActionRecord) -> None:
+        self._history.append(record)
+
+    async def _expire_stale_confirmations(self, now: float | None = None) -> None:
+        cutoff = (now or time.time()) - self._config.confirmation_ttl_seconds
+        expired = [
+            record
+            for record in self._pending.values()
+            if record.state == ActionState.WAITING_CONFIRMATION and record.created_at < cutoff
+        ]
+        for record in expired:
+            self._pending.pop(record.request.action_id, None)
+            record.state = ActionState.REVOKED
+            record.result = ActionResult(
+                action_id=record.request.action_id,
+                success=False,
+                method_used=record.request.method,
+                error_message="Action confirmation expired",
+            )
+            self._record_history(record)
+            await self._audit(
+                record,
+                "confirmation_expired",
+                success=False,
+            )
 
     # ── Action execution ──────────────────────────────────────────────
 
@@ -146,7 +183,7 @@ class ActionService:
                 state=ActionState.DENIED,
                 created_at=time.time(),
             )
-            self._history.append(record)
+            self._record_history(record)
             await self._audit(
                 record,
                 "denied",
@@ -157,7 +194,6 @@ class ActionService:
 
         auto_allow = self._check_auto_allow(risk_level)
         needs_confirmation = decision.requires_user_confirmation or requires_conf or not auto_allow
-
         request = ActionRequest(
             action_id=f"act_{generate_ulid()}",
             action_type=action_type,
@@ -173,7 +209,32 @@ class ActionService:
             state=ActionState.WAITING_CONFIRMATION if needs_confirmation else ActionState.PENDING,
             created_at=time.time(),
         )
-        self._pending[request.action_id] = record
+        if needs_confirmation:
+            async with self._confirmation_lock:
+                await self._expire_stale_confirmations()
+                pending_count = sum(
+                    item.state == ActionState.WAITING_CONFIRMATION
+                    for item in self._pending.values()
+                )
+                if pending_count >= self._config.max_pending_confirmations:
+                    result = ActionResult(
+                        action_id=request.action_id,
+                        success=False,
+                        method_used=method,
+                        error_message="Too many actions are awaiting confirmation",
+                    )
+                    record.state = ActionState.DENIED
+                    record.result = result
+                    self._record_history(record)
+                    await self._audit(
+                        record,
+                        "confirmation_capacity_exceeded",
+                        success=False,
+                    )
+                    return record, result
+                self._pending[request.action_id] = record
+        else:
+            self._pending[request.action_id] = record
 
         if not await self._audit(
             record,
@@ -189,7 +250,7 @@ class ActionService:
             record.state = ActionState.FAILED
             record.result = result
             self._pending.pop(request.action_id, None)
-            self._history.append(record)
+            self._record_history(record)
             return record, result
 
         if needs_confirmation and self._provider:
@@ -208,7 +269,7 @@ class ActionService:
                     error_message=f"Action preview failed: {type(exc).__name__}",
                 )
                 record.result = result
-                self._history.append(record)
+                self._record_history(record)
                 await self._audit(
                     record,
                     "preview_failed",
@@ -243,6 +304,7 @@ class ActionService:
     async def confirm(self, action_id: str, approved: bool) -> ActionResult | None:
         """Confirm or deny a pending action."""
         async with self._confirmation_lock:
+            await self._expire_stale_confirmations()
             record = self._pending.get(action_id)
             if not record:
                 logger.warning("Action %s not found for confirmation", action_id)
@@ -261,7 +323,7 @@ class ActionService:
             if not approved:
                 record.state = ActionState.DENIED
                 self._pending.pop(action_id, None)
-                self._history.append(record)
+                self._record_history(record)
             else:
                 # Claim the confirmation before releasing the lock so a concurrent
                 # duplicate cannot execute the same action.
@@ -294,7 +356,7 @@ class ActionService:
             )
             record.result = result
             self._pending.pop(action_id, None)
-            self._history.append(record)
+            self._record_history(record)
             return result
 
         if not approved:
@@ -353,7 +415,7 @@ class ActionService:
 
         record.state = ActionState.COMPLETED if result.success else ActionState.FAILED
         record.result = result
-        self._history.append(record)
+        self._record_history(record)
         self._pending.pop(record.request.action_id, None)
 
         # Publish execution event
@@ -494,7 +556,7 @@ class ActionService:
 
         undo_record.state = ActionState.REVOKED if result.success else ActionState.FAILED
         undo_record.result = result
-        self._history.append(undo_record)
+        self._record_history(undo_record)
 
         if self._bus:
             from companion.events.action import ActionRevokedEvent
@@ -613,13 +675,15 @@ class ActionService:
         return [r for r in self._pending.values() if r.state == ActionState.WAITING_CONFIRMATION]
 
     def get_recent_actions(self, limit: int = 50) -> list[ActionRecord]:
-        return self._history[-limit:]
+        safe_limit = max(0, limit)
+        return list(self._history)[-safe_limit:] if safe_limit else []
 
     def get_action(self, action_id: str) -> ActionRecord | None:
         return self._pending.get(action_id)
 
     def get_audit_log(self, limit: int = 100) -> list[dict[str, Any]]:
-        return self._audit_log[-limit:]
+        safe_limit = max(0, limit)
+        return list(self._audit_log)[-safe_limit:] if safe_limit else []
 
     def get_stats(self) -> dict[str, Any]:
         total = len(self._history)
