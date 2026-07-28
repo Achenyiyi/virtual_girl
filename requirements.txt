@@ -1,0 +1,28 @@
+# Core - Data & Validation
+pydantic>=2.10
+pydantic-settings>=2.7
+orjson>=3.10
+
+# Communication
+websockets>=14.1
+fastapi>=0.115
+uvicorn[standard]>=0.34
+httpx>=0.28
+
+# Storage
+sqlalchemy>=2.0,<3.0
+aiosqlite>=0.20
+
+# Observability
+opentelemetry-api>=1.29
+opentelemetry-sdk>=1.29
+opentelemetry-exporter-otlp>=1.29
+structlog>=24.4
+
+# Configuration & Security
+python-dotenv>=1.0
+pyyaml>=6.0
+cryptography>=44.0
+
+# Chinese NLP (optional, for tokenization)
+jieba>=0.42

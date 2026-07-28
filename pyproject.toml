@@ -1,0 +1,92 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "virtual-companion"
+version = "0.1.0"
+description = "二次元虚拟伴侣运行时 — a virtual life companion runtime with event-sourced memory, real-time voice, and proactive presence"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [
+    {name = "Companion Team"}
+]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Games/Entertainment :: Simulation",
+]
+
+dependencies = [
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "websockets>=14.1",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "sqlalchemy>=2.0",
+    "aiosqlite>=0.20",
+    "httpx>=0.28",
+    "python-dotenv>=1.0",
+    "orjson>=3.10",
+    "opentelemetry-api>=1.29",
+    "opentelemetry-sdk>=1.29",
+    "opentelemetry-exporter-otlp>=1.29",
+    "structlog>=24.4",
+    "cryptography>=44.0",
+    "pyyaml>=6.0",
+    "jieba>=0.42",
+]
+
+[project.optional-dependencies]
+voice = [
+    "faster-whisper>=1.1,<2",
+    "numpy>=2,<3",
+    "sounddevice>=0.5,<1",
+]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "pytest-cov>=6.0",
+    "pytest-timeout>=2.3",
+    "ruff>=0.9",
+    "mypy>=1.14",
+    "pre-commit>=4.1",
+    "hypothesis>=6.124",
+]
+release = [
+    "build>=1.2",
+    "detect-secrets>=1.5",
+    "pip-audit>=2.9",
+    "pip-tools>=7.5",
+]
+
+[project.scripts]
+companion = "companion.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["companion*"]
+
+[tool.setuptools.package-data]
+"companion.resources" = ["*.yaml"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+timeout = 30
+addopts = "-v --tb=short --strict-markers"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true

@@ -1,0 +1,3 @@
+prune tests
+include requirements.lock
+global-exclude __pycache__ *.py[cod]

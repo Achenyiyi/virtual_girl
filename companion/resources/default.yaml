@@ -1,0 +1,141 @@
+# Default configuration for the Virtual Companion runtime.
+
+identity:
+  name: "未命名伙伴"
+  self_concept: "我是你的虚拟伙伴，陪伴你度过每一天。"
+  origin_story: "通过用户配置创建"
+  core_traits:
+    - 友善
+    - 好奇
+    - 尊重
+    - 适度幽默
+  speaking_style: "温和、自然，使用中文交流，偶尔穿插轻松的语气"
+  speech_quirks: []
+  default_address_term: "你"
+  emotional_expression_range: "natural"
+  values:
+    - 诚实
+    - 用户福祉优先
+    - 尊重边界
+    - 不替代现实关系
+  hard_boundaries:
+    - 不假装自己是人类
+    - 不操纵用户情感
+    - 不未经同意访问隐私数据
+    - 不鼓励替代现实人际关系
+    - 不接受暴力或违法请求
+  interests: []
+  knowledge_domains: []
+  avatar_model_id: ""
+
+providers:
+  llm:
+    type: "cloud"
+    cloud:
+      provider: "openai_compatible"
+      model: "deepseek-chat"
+      api_key_env: "DEEPSEEK_API_KEY"
+      base_url: "https://api.deepseek.com/v1/chat/completions"
+      max_tokens: 4096
+      temperature: 0.7
+    local:
+      provider: "ollama"
+      model: "qwen2.5:7b"
+      base_url: "http://localhost:11434"
+      max_tokens: 2048
+      temperature: 0.7
+    fallback_chain:
+      - "cloud"
+      - "local"
+
+  tts:
+    type: "cloud"
+    providers:
+      cosyvoice:
+        enabled: false
+        endpoint: "http://localhost:5000"
+      cloud:
+        enabled: true
+        provider: "azure"
+        voice: "zh-CN-XiaoxiaoNeural"
+    default_voice: "default"
+    sample_rate: 24000
+
+  asr:
+    streaming:
+      provider: "cloud"
+      language: "zh"
+      sample_rate: 16000
+      pre_roll_ms: 400
+    batch:
+      provider: "faster-whisper"
+      model: "base"
+      language: "zh"
+      device: "auto"
+      compute_type: "default"
+      cpu_threads: 0
+    fallback_to_batch: true
+
+  memory:
+    type: "sqlite"
+    db_path: "./data/companion_memory.db"
+    wal_mode: true
+    fts_enabled: true
+
+  avatar:
+    enabled: false
+    type: "websocket_bridge"
+    url: "ws://127.0.0.1:6121/ws"
+    auth_token_env: "COMPANION_AVATAR_TOKEN"
+    connect_timeout_seconds: 3.0
+    request_timeout_seconds: 3.0
+    max_message_bytes: 1048576
+
+  action:
+    enabled: false
+    type: "windows_readonly"
+    sandbox_enabled: true
+    audit_db_path: "./data/action_audit.db"
+    timeout_seconds: 5.0
+    max_concurrent_actions: 1
+    max_text_characters: 4096
+
+  perception:
+    enabled: false
+    monitor_app_focus: false
+    monitor_activity: false
+
+policy:
+  quiet_hours:
+    enabled: true
+    start: "23:00"
+    end: "07:00"
+
+  proactive_budget:
+    level_1_per_hour: 30
+    level_2_per_hour: 10
+    level_3_per_hour: 3
+    level_4_per_hour: 1
+
+  cooldown_seconds:
+    level_1: 5
+    level_2: 30
+    level_3: 300
+    level_4: 1800
+
+  action_policy:
+    readonly: "auto_approve"
+    reversible_low: "auto_approve"
+    reversible_high: "confirm"
+    irreversible: "confirm_with_preview"
+
+telemetry:
+  enabled: false
+  latency_tracking: true
+  export_interval_seconds: 60
+
+dev:
+  log_level: "INFO"
+  log_file: "./data/companion.log"
+  event_log_retention: 100000
+  enable_debug_endpoints: false
