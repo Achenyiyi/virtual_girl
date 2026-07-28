@@ -35,6 +35,53 @@ async def test_action_fails_closed_without_required_durable_audit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_cancellation_ignoring_audit_store_is_bounded_and_fails_closed() -> None:
+    release = asyncio.Event()
+
+    class CancellationIgnoringAuditStore:
+        async def append(self, entry):
+            del entry
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+        async def query(self, *, action_id=None, limit=100):
+            del action_id, limit
+            return []
+
+        async def verify_chain(self):
+            return True
+
+        async def shutdown(self):
+            return None
+
+    service = ActionService(
+        provider=MockActionProvider(),
+        audit_store=CancellationIgnoringAuditStore(),
+        config=ActionServiceConfig(action_timeout_seconds=0.01),
+    )
+
+    try:
+        record, result = await asyncio.wait_for(
+            service.request("read_window_title"), timeout=0.5
+        )
+        assert result is not None and not result.success
+        assert record.state.value == "failed"
+        assert result.error_message == "Durable action audit is unavailable"
+
+        second_record, second_result = await asyncio.wait_for(
+            service.request("read_active_app"), timeout=0.5
+        )
+        assert second_result is not None and not second_result.success
+        assert second_record.state.value == "failed"
+        assert second_result.error_message == "Durable action audit is unavailable"
+    finally:
+        release.set()
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
 async def test_durable_audit_is_redacted_persistent_and_chain_valid(tmp_path) -> None:
     db_path = tmp_path / "action_audit.db"
     store = SQLiteActionAuditStore(str(db_path))

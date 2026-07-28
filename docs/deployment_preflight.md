@@ -69,6 +69,13 @@ cache disk use but does not invalidate the model/inference check.
 8. Enable the avatar only when its bridge extension is running and test Live2D/VRM state sync.
 9. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.
 
+An action provider timeout is a process-lifetime quarantine, not a retry signal. For execution and
+undo, the external outcome is explicitly unknown because the provider may complete after the
+application deadline. Stop issuing actions, inspect the target system and durable audit ledger,
+reconcile any partial side effect, then restart the process. Preview or sandbox timeouts also
+quarantine the provider because its health is no longer trustworthy. A durable-audit timeout makes
+all later actions fail closed until restart.
+
 Normal shutdown, startup failure, single-turn failure, and voice-loop failure all use the same
 bounded cleanup path. If logs report a component shutdown timeout or failure, do not restart in a
 tight loop: confirm the prior process has exited and that microphone, audio, database, and avatar

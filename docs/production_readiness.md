@@ -36,7 +36,8 @@ experience, and fails closed when a required dependency is unavailable.
 - [x] Irreversible actions always require a fresh explicit confirmation and preview.
 - [x] Confirmation is single-use and concurrent duplicate confirmation is idempotent.
 - [x] Pending confirmations expire, have a fixed capacity, and cannot authorize stale actions.
-- [x] Provider execution has an enforced timeout and durable redacted audit records.
+- [x] Preview, sandbox verification, execution, undo, and durable audit writes have hard observation
+      deadlines; a timed-out provider or audit store is quarantined and later actions fail closed.
 - [x] The Windows provider is capability-confined to three parameterless read-only Win32 queries;
       real execution and the durable audit chain pass on the target Windows machine.
 - [ ] A separate OS-isolated provider is required before enabling any mutating action.
@@ -97,6 +98,13 @@ the immutable capability allowlist and a valid durable audit chain; otherwise st
 remains disabled by default because foreground metadata has privacy implications. Mutating actions
 remain unavailable until a separate OS-isolated provider is designed and validated. See
 `docs/windows_readonly_actions.md`.
+
+Action timeout status: provider and durable-audit operations use hard observation deadlines rather
+than cancellation-dependent waits. Any provider timeout quarantines that provider for the process;
+execution or undo timeout is reported as an unknown side-effect outcome, and no later request or
+pending confirmation may cross the provider boundary. An audit timeout similarly quarantines the
+store and makes all subsequent actions fail closed. Detached tasks have eventual exceptions
+consumed, but operators must reconcile any unknown external side effect before restart.
 
 Deployment status: configuration values that were previously documentary-only (memory path,
 voice capture parameters, quiet hours, proactive budgets/cooldowns, Azure region, and event-log
@@ -162,7 +170,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 293 tests passed with 77.87% total
+- `pytest -q --cov=companion --cov-fail-under=70`: 297 tests passed with 77.92% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
   85%, action service 82%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version

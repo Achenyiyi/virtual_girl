@@ -205,6 +205,124 @@ class TestActionService:
         assert "timed out" in (result.error_message or "")
 
     @pytest.mark.asyncio
+    async def test_cancellation_ignoring_execution_is_bounded_and_quarantined(self):
+        release = asyncio.Event()
+
+        class CancellationIgnoringProvider(MockActionProvider):
+            def __init__(self):
+                self.executions = 0
+
+            async def execute(self, request):
+                self.executions += 1
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    await release.wait()
+                return await super().execute(request)
+
+        provider = CancellationIgnoringProvider()
+        service = ActionService(
+            provider=provider,
+            config=ActionServiceConfig(
+                sandbox_enabled=False,
+                audit_enabled=False,
+                require_durable_audit=False,
+                action_timeout_seconds=0.01,
+            ),
+        )
+
+        try:
+            record, result = await asyncio.wait_for(
+                service.request("read_window_title"), timeout=0.5
+            )
+            assert result is not None and not result.success
+            assert record.state.value == "failed"
+            assert "outcome is unknown" in (result.error_message or "")
+
+            blocked_record, blocked_result = await asyncio.wait_for(
+                service.request("read_active_app"), timeout=0.5
+            )
+            assert blocked_result is not None and not blocked_result.success
+            assert blocked_record.state.value == "failed"
+            assert "quarantined" in (blocked_result.error_message or "")
+            assert provider.executions == 1
+        finally:
+            release.set()
+            await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_cancelled_caller_waits_for_execution_terminal_record(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        class BlockingProvider(MockActionProvider):
+            async def execute(self, request):
+                entered.set()
+                await release.wait()
+                return await super().execute(request)
+
+        service = ActionService(
+            provider=BlockingProvider(),
+            config=ActionServiceConfig(
+                sandbox_enabled=False,
+                audit_enabled=False,
+                require_durable_audit=False,
+                action_timeout_seconds=1.0,
+            ),
+        )
+        request_task = asyncio.create_task(service.request("read_window_title"))
+        await entered.wait()
+        request_task.cancel()
+        await asyncio.sleep(0)
+        assert not request_task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+
+        history = service.get_recent_actions()
+        assert len(history) == 1
+        assert history[0].state.value == "completed"
+        assert history[0].result is not None and history[0].result.success
+
+    @pytest.mark.asyncio
+    async def test_cancellation_ignoring_preview_is_bounded_and_quarantined(self):
+        release = asyncio.Event()
+
+        class CancellationIgnoringPreviewProvider(MockActionProvider):
+            async def preview(self, request):
+                try:
+                    await asyncio.Event().wait()
+                except asyncio.CancelledError:
+                    await release.wait()
+                return await super().preview(request)
+
+        service = ActionService(
+            provider=CancellationIgnoringPreviewProvider(),
+            config=ActionServiceConfig(
+                sandbox_enabled=False,
+                audit_enabled=False,
+                require_durable_audit=False,
+                action_timeout_seconds=0.01,
+            ),
+        )
+
+        try:
+            record, result = await asyncio.wait_for(
+                service.request("send_message", {"text": "hello"}), timeout=0.5
+            )
+            assert result is not None and not result.success
+            assert record.state.value == "failed"
+            assert "preview failed" in (result.error_message or "").lower()
+
+            _blocked_record, blocked_result = await service.request("read_window_title")
+            assert blocked_result is not None and not blocked_result.success
+            assert "quarantined" in (blocked_result.error_message or "")
+        finally:
+            release.set()
+            await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
     async def test_provider_error_is_redacted(self):
         class LeakyProvider(MockActionProvider):
             async def execute(self, request):

@@ -14,12 +14,14 @@ Key design from the PLAN:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections import deque
+from collections.abc import Awaitable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import Any, TypeVar
 
 from companion.core.event_bus import EventBus
 from companion.core.policy_gate import PolicyGate
@@ -37,6 +39,7 @@ from companion.security.action_audit import ActionAuditEntry, ActionAuditStore
 from companion.security.redaction import redact_mapping, redact_text
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 class ActionState(StrEnum):
@@ -47,6 +50,12 @@ class ActionState(StrEnum):
     FAILED = "failed"
     REVOKED = "revoked"
     DENIED = "denied"
+
+
+class ActionProviderTimeoutError(TimeoutError):
+    def __init__(self, operation_name: str) -> None:
+        super().__init__(operation_name)
+        self.operation_name = operation_name
 
 
 @dataclass
@@ -121,6 +130,8 @@ class ActionService:
         self._audit_log: deque[dict[str, Any]] = deque(
             maxlen=self._config.max_in_memory_audit_entries
         )
+        self._provider_quarantined_reason = ""
+        self._audit_store_quarantined = False
 
     def _record_history(self, record: ActionRecord) -> None:
         self._history.append(record)
@@ -209,6 +220,25 @@ class ActionService:
             state=ActionState.WAITING_CONFIRMATION if needs_confirmation else ActionState.PENDING,
             created_at=time.time(),
         )
+        if self._provider_quarantined_reason:
+            result = ActionResult(
+                action_id=request.action_id,
+                success=False,
+                method_used=method,
+                error_message=(
+                    "Action provider is quarantined after a timed-out operation; restart required"
+                ),
+            )
+            record.state = ActionState.FAILED
+            record.result = result
+            self._record_history(record)
+            await self._audit(
+                record,
+                "provider_quarantined",
+                success=False,
+                details={"reason": self._provider_quarantined_reason},
+            )
+            return record, result
         if needs_confirmation:
             async with self._confirmation_lock:
                 await self._expire_stale_confirmations()
@@ -255,9 +285,9 @@ class ActionService:
 
         if needs_confirmation and self._provider:
             try:
-                record.preview = await asyncio.wait_for(
+                record.preview = await self._await_provider_operation(
                     self._provider.preview(request),
-                    timeout=self._config.action_timeout_seconds,
+                    operation_name="preview",
                 )
             except Exception as exc:
                 record.state = ActionState.FAILED
@@ -364,6 +394,14 @@ class ActionService:
         return await self._execute(record)
 
     async def _execute(self, record: ActionRecord) -> ActionResult:
+        execution_task = asyncio.create_task(self._execute_committed(record))
+        try:
+            return await asyncio.shield(execution_task)
+        except asyncio.CancelledError:
+            await execution_task
+            raise
+
+    async def _execute_committed(self, record: ActionRecord) -> ActionResult:
         """Execute a confirmed action."""
         # Wait for concurrency slot (Semaphore-based, non-polling)
         async with self._active_semaphore:
@@ -371,11 +409,13 @@ class ActionService:
             record.executed_at = time.time()
 
             try:
-                if self._provider:
+                if self._provider_quarantined_reason:
+                    result = self._quarantined_result(record.request)
+                elif self._provider:
                     if self._config.sandbox_enabled:
-                        sandbox = await asyncio.wait_for(
+                        sandbox = await self._await_provider_operation(
                             self._provider.verify_sandbox(record.request),
-                            timeout=self._config.action_timeout_seconds,
+                            operation_name="sandbox verification",
                         )
                         if not sandbox.verified or not sandbox.sandbox_id:
                             result = ActionResult(
@@ -396,13 +436,19 @@ class ActionService:
                         method_used="none",
                         error_message="No action provider configured",
                     )
-            except TimeoutError:
+            except ActionProviderTimeoutError as exc:
+                outcome = (
+                    "; provider outcome is unknown"
+                    if exc.operation_name in {"execution", "undo execution"}
+                    else ""
+                )
                 result = ActionResult(
                     action_id=record.request.action_id,
                     success=False,
                     method_used=record.request.method,
                     error_message=(
-                        f"Action timed out after {self._config.action_timeout_seconds:.1f}s"
+                        f"Action {exc.operation_name} timed out after "
+                        f"{self._config.action_timeout_seconds:.1f}s{outcome}"
                     ),
                 )
             except Exception as e:
@@ -471,15 +517,23 @@ class ActionService:
                 method_used=record.request.method,
                 error_message="Durable action audit is unavailable",
             )
-        return await asyncio.wait_for(
+        return await self._await_provider_operation(
             self._provider.execute(record.request),
-            timeout=self._config.action_timeout_seconds,
+            operation_name="execution",
         )
 
     async def undo(self, action_id: str) -> ActionResult | None:
         """Undo an eligible action through the same audit, sandbox, and timeout boundary."""
         if not self._provider or not self._config.undo_enabled:
             return None
+        if self._provider_quarantined_reason:
+            return self._quarantined_result(
+                ActionRequest(
+                    action_id=f"revoke_{generate_ulid()}",
+                    action_type="undo",
+                    method="none",
+                )
+            )
 
         original = next(
             (record for record in reversed(self._history) if record.request.action_id == action_id),
@@ -516,14 +570,33 @@ class ActionService:
                 error_message="Durable action audit is unavailable",
             )
 
+        undo_task = asyncio.create_task(
+            self._undo_committed(undo_record, original_action_id=action_id)
+        )
+        try:
+            return await asyncio.shield(undo_task)
+        except asyncio.CancelledError:
+            await undo_task
+            raise
+
+    async def _undo_committed(
+        self,
+        undo_record: ActionRecord,
+        *,
+        original_action_id: str,
+    ) -> ActionResult:
+        undo_request = undo_record.request
+        provider = self._provider
+        if provider is None:
+            raise RuntimeError("No action provider configured")
         async with self._active_semaphore:
             undo_record.state = ActionState.EXECUTING
             undo_record.executed_at = time.time()
             try:
                 if self._config.sandbox_enabled:
-                    sandbox = await asyncio.wait_for(
-                        self._provider.verify_sandbox(undo_request),
-                        timeout=self._config.action_timeout_seconds,
+                    sandbox = await self._await_provider_operation(
+                        provider.verify_sandbox(undo_request),
+                        operation_name="undo sandbox verification",
                     )
                     if not sandbox.verified or not sandbox.sandbox_id:
                         result = ActionResult(
@@ -534,16 +607,22 @@ class ActionService:
                         )
                     else:
                         undo_request.sandbox_id = sandbox.sandbox_id
-                        result = await self._undo_provider(undo_record, action_id)
+                        result = await self._undo_provider(undo_record, original_action_id)
                 else:
-                    result = await self._undo_provider(undo_record, action_id)
-            except TimeoutError:
+                    result = await self._undo_provider(undo_record, original_action_id)
+            except ActionProviderTimeoutError as exc:
+                outcome = (
+                    "; provider outcome is unknown"
+                    if exc.operation_name == "undo execution"
+                    else ""
+                )
                 result = ActionResult(
                     action_id=undo_request.action_id,
                     success=False,
                     method_used=undo_request.method,
                     error_message=(
-                        f"Action timed out after {self._config.action_timeout_seconds:.1f}s"
+                        f"Action {exc.operation_name} timed out after "
+                        f"{self._config.action_timeout_seconds:.1f}s{outcome}"
                     ),
                 )
             except Exception as exc:
@@ -563,7 +642,7 @@ class ActionService:
 
             await self._bus.publish(
                 ActionRevokedEvent(
-                    original_action_id=action_id,
+                    original_action_id=original_action_id,
                     revoke_action_id=undo_request.action_id,
                     success=result.success,
                 )
@@ -574,7 +653,7 @@ class ActionService:
             "undo_executed",
             success=result.success,
             details={
-                "original_action_id": action_id,
+                "original_action_id": original_action_id,
                 "error": result.error_message,
                 "sandbox_id": undo_request.sandbox_id,
             },
@@ -604,10 +683,63 @@ class ActionService:
                 method_used=record.request.method,
                 error_message="Durable action audit is unavailable",
             )
-        return await asyncio.wait_for(
+        return await self._await_provider_operation(
             self._provider.undo(original_action_id),
-            timeout=self._config.action_timeout_seconds,
+            operation_name="undo execution",
         )
+
+    async def _await_provider_operation(
+        self,
+        operation: Awaitable[T],
+        *,
+        operation_name: str,
+    ) -> T:
+        task: asyncio.Future[T] = asyncio.ensure_future(operation)
+        try:
+            done, _ = await asyncio.wait(
+                [task], timeout=self._config.action_timeout_seconds
+            )
+        except asyncio.CancelledError:
+            task.cancel()
+            task.add_done_callback(self._consume_task_result)
+            self._provider_quarantined_reason = f"cancelled {operation_name}"
+            logger.critical(
+                "Action provider %s was cancelled and quarantined because its outcome is unknown",
+                operation_name,
+            )
+            raise
+        if not done:
+            task.cancel()
+            task.add_done_callback(self._consume_task_result)
+            self._provider_quarantined_reason = operation_name
+            logger.critical(
+                "Action provider %s exceeded %.1fs and was quarantined",
+                operation_name,
+                self._config.action_timeout_seconds,
+            )
+            raise ActionProviderTimeoutError(operation_name)
+        if task.cancelled():
+            self._provider_quarantined_reason = f"self-cancelled {operation_name}"
+            raise RuntimeError(f"Action provider {operation_name} cancelled unexpectedly")
+        return await task
+
+    @staticmethod
+    def _quarantined_result(request: ActionRequest) -> ActionResult:
+        return ActionResult(
+            action_id=request.action_id,
+            success=False,
+            method_used=request.method,
+            error_message=(
+                "Action provider is quarantined after a timed-out operation; restart required"
+            ),
+        )
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Future[Any]) -> None:
+        if task.cancelled():
+            return
+        with contextlib.suppress(Exception):
+            task.exception()
 
     # ── Policy ────────────────────────────────────────────────────────
 
@@ -639,6 +771,8 @@ class ActionService:
         """Write a redacted audit record and report whether durability is satisfied."""
         if not self._config.audit_enabled:
             return not self._config.require_durable_audit
+        if self._audit_store_quarantined:
+            return False
         safe_details = self._redact_parameters(details or {})
         summary = {
             "action_id": record.request.action_id,
@@ -653,16 +787,42 @@ class ActionService:
         if self._audit_store is None:
             return not self._config.require_durable_audit
         try:
-            await self._audit_store.append(
-                ActionAuditEntry(
-                    action_id=record.request.action_id,
-                    stage=stage,
-                    action_type=record.request.action_type,
-                    risk_level=str(record.request.risk_level),
-                    success=success,
-                    details=safe_details,
+            audit_task = asyncio.ensure_future(
+                self._audit_store.append(
+                    ActionAuditEntry(
+                        action_id=record.request.action_id,
+                        stage=stage,
+                        action_type=record.request.action_type,
+                        risk_level=str(record.request.risk_level),
+                        success=success,
+                        details=safe_details,
+                    )
                 )
             )
+            done, _ = await asyncio.wait(
+                [audit_task], timeout=self._config.action_timeout_seconds
+            )
+            if not done:
+                audit_task.cancel()
+                audit_task.add_done_callback(self._consume_task_result)
+                self._audit_store_quarantined = True
+                logger.critical(
+                    "Action audit persistence timed out for stage %s after %.1fs",
+                    stage,
+                    self._config.action_timeout_seconds,
+                )
+                return False
+            if audit_task.cancelled():
+                self._audit_store_quarantined = True
+                logger.critical("Action audit store cancelled stage %s unexpectedly", stage)
+                return False
+            await audit_task
+        except asyncio.CancelledError:
+            if "audit_task" in locals() and not audit_task.done():
+                audit_task.cancel()
+                audit_task.add_done_callback(self._consume_task_result)
+                self._audit_store_quarantined = True
+            raise
         except Exception:
             logger.exception("Failed to persist action audit record for stage %s", stage)
             return False
