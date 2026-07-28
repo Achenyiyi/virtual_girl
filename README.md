@@ -91,6 +91,10 @@ python -m companion --voice-input
 `.env`、key 文件、命令参数或启动脚本。设置与轮换步骤见
 [`docs/deployment_preflight.md`](docs/deployment_preflight.md)。
 
+同一 Windows 登录会话中，一个伴侣资料库只允许一个运行实例。第二个常驻实例或 Avatar
+验收进程会在打开 Provider、麦克风和舞台前退出；并行开发实例必须使用独立的
+`providers.memory.db_path` 和运行目录。
+
 ### 备份记忆
 
 运行中数据库使用 SQLite 在线备份 API 创建一致性快照；默认拒绝覆盖已有备份：

@@ -48,6 +48,10 @@ from companion.providers.implementations.windows_readonly_action import (
 )
 from companion.security.action_audit import SQLiteActionAuditStore
 from companion.security.redaction import RedactingFormatter
+from companion.security.single_instance import (
+    InstanceAlreadyRunningError,
+    SingleInstanceGuard,
+)
 from companion.security.windows_credentials import configured_secret_sources
 from companion.services.action_service import ActionService
 from companion.services.proactive_scheduler import ProactiveScheduler, SchedulerConfig
@@ -453,34 +457,49 @@ async def async_main(args: argparse.Namespace) -> int:
     )
     if accept_avatar:
         json_output = bool(getattr(args, "accept_avatar_json", False))
-        if not config.avatar_config:
+        instance_guard = SingleInstanceGuard.for_memory_path(
+            config.effective_memory_config().db_path
+        )
+        try:
+            instance_guard.acquire()
+        except InstanceAlreadyRunningError:
             avatar_report = failed_avatar_acceptance_report(
-                "avatar.config", "Avatar bridge is disabled or not configured."
-            )
-        elif not config.identity or not config.identity.avatar_model_id:
-            avatar_report = failed_avatar_acceptance_report(
-                "avatar.model_config", "Configured identity.avatar_model_id is empty."
-            )
-        elif not config.avatar_config.get_auth_token():
-            avatar_report = failed_avatar_acceptance_report(
-                "avatar.credential",
-                "Avatar token is unavailable from the configured secure source.",
+                "avatar.runtime_instance",
+                "Another runtime is already using this companion profile.",
             )
         else:
-            provider = WebSocketAvatarProvider(config.avatar_config)
             try:
-                print(
-                    "Observe the stage now: confirm the intended model, happy expression, "
-                    "and nod gesture are visibly correct.",
-                    file=sys.stderr,
-                )
-                avatar_report = await run_avatar_acceptance(
-                    provider,
-                    model_id=config.identity.avatar_model_id,
-                    visual_hold_seconds=3.0,
-                )
+                if not config.avatar_config:
+                    avatar_report = failed_avatar_acceptance_report(
+                        "avatar.config", "Avatar bridge is disabled or not configured."
+                    )
+                elif not config.identity or not config.identity.avatar_model_id:
+                    avatar_report = failed_avatar_acceptance_report(
+                        "avatar.model_config", "Configured identity.avatar_model_id is empty."
+                    )
+                elif not config.avatar_config.get_auth_token():
+                    avatar_report = failed_avatar_acceptance_report(
+                        "avatar.credential",
+                        "Avatar token is unavailable from the configured secure source.",
+                    )
+                else:
+                    provider = WebSocketAvatarProvider(config.avatar_config)
+                    try:
+                        print(
+                            "Observe the stage now: confirm the intended model, happy expression, "
+                            "and nod gesture are visibly correct.",
+                            file=sys.stderr,
+                        )
+                        avatar_report = await run_avatar_acceptance(
+                            provider,
+                            model_id=config.identity.avatar_model_id,
+                            visual_hold_seconds=3.0,
+                        )
+                    finally:
+                        await shutdown_avatar_acceptance_provider(provider)
             finally:
-                await shutdown_avatar_acceptance_provider(provider)
+                with contextlib.suppress(OSError):
+                    instance_guard.release()
         print(
             avatar_report.to_json()
             if json_output
@@ -497,24 +516,43 @@ async def async_main(args: argparse.Namespace) -> int:
         print(f"Memory backup created and verified: {backup}")
         return 0
 
+    accept_voice = bool(
+        getattr(args, "accept_voice", False)
+        or getattr(args, "accept_voice_json", False)
+    )
+    quiet_output = bool(getattr(args, "accept_voice_json", False))
+    memory_path = config.effective_memory_config().db_path
+    instance_guard = SingleInstanceGuard.for_memory_path(memory_path)
+    try:
+        instance_guard.acquire()
+    except InstanceAlreadyRunningError as exc:
+        if accept_voice:
+            instance_report = failed_voice_acceptance_report(
+                "voice.runtime_instance",
+                "Another runtime is already using this companion profile.",
+            )
+            print(
+                instance_report.to_json()
+                if quiet_output
+                else render_voice_acceptance_report(instance_report)
+            )
+            return 1
+        print(f"Runtime unavailable: {exc}", file=sys.stderr)
+        return 1
+
     setup_logging(
         args.log_level or config.log_level,
         config.log_file,
         max_bytes=config.log_max_bytes,
         backup_count=config.log_backup_count,
     )
-
-    accept_voice = bool(
-        getattr(args, "accept_voice", False)
-        or getattr(args, "accept_voice_json", False)
-    )
-    quiet_output = bool(getattr(args, "accept_voice_json", False))
-    if quiet_output:
-        with contextlib.redirect_stdout(io.StringIO()):
-            app = CompanionApp(config)
-    else:
-        app = CompanionApp(config)
+    app: CompanionApp | None = None
     try:
+        if quiet_output:
+            with contextlib.redirect_stdout(io.StringIO()):
+                app = CompanionApp(config)
+        else:
+            app = CompanionApp(config)
         if quiet_output:
             with contextlib.redirect_stdout(io.StringIO()):
                 ready = await app.start()
@@ -732,7 +770,16 @@ async def async_main(args: argparse.Namespace) -> int:
             )
 
     finally:
-        await app.stop()
+        try:
+            if app is not None:
+                await app.stop()
+        finally:
+            try:
+                instance_guard.release()
+            except OSError:
+                logging.getLogger(__name__).exception(
+                    "Failed to release the single-instance mutex"
+                )
 
     return 0
 

@@ -65,6 +65,19 @@ After rotation, delete the superseded Generic Credential and create its replacem
 `--doctor-online`. The runtime reads only the configured Generic Credential; it does not enumerate
 the user's credential vault.
 
+## Single-instance boundary
+
+The interactive runtime, voice acceptance gate, and avatar acceptance gate acquire a Windows
+session-scoped mutex derived from the resolved memory database path. A second process using the same
+companion profile exits before constructing providers or opening microphone, playback, avatar, or
+action resources. Windows releases must not work around this guard.
+
+Doctor and online memory backup remain available while the runtime is active: doctor is read-only,
+and backup uses SQLite's consistent online backup boundary. A separate development instance must
+use a separate `providers.memory.db_path`; sharing only a different config filename is not enough.
+The mutex name contains only a hash of the resolved path and does not disclose the Windows username
+or database location. Windows abandons the mutex automatically after a process crash.
+
 Exit codes:
 
 - `0`: every required requested check passed; warnings and disabled optional providers are allowed;
