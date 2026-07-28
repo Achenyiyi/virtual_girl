@@ -36,7 +36,7 @@ def generate_ulid() -> str:
     the `python-ulid` package. IDs are unique and time-sortable for all
     practical purposes within this project.
     """
-    encoding = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # Crockford base32
+    encoding = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # pragma: allowlist secret
     ts = int(time.time() * 1000)
     rand = os.urandom(10)
 
