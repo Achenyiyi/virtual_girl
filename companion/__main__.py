@@ -354,10 +354,19 @@ class CompanionApp:
             raise
 
     async def _stop_components(self) -> None:
+        await asyncio.gather(
+            *(
+                self._stop_component(name, operation)
+                for name, operation in [
+                    ("system audio", self._audio_output.stop()),
+                    ("streaming audio", self._voice_audio_output.stop()),
+                    ("voice pipeline", self._voice_pipeline.shutdown()),
+                ]
+            )
+        )
+        # Drain accepted events before closing the memory provider they persist to.
+        await self._stop_component("event bus", self._bus.shutdown())
         components: list[tuple[str, Any]] = [
-            ("system audio", self._audio_output.stop()),
-            ("streaming audio", self._voice_audio_output.stop()),
-            ("voice pipeline", self._voice_pipeline.shutdown()),
             ("orchestrator", self._orchestrator.shutdown()),
         ]
         if self._action_audit:

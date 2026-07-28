@@ -73,6 +73,11 @@ bounded cleanup path. If logs report a component shutdown timeout or failure, do
 tight loop: confirm the prior process has exited and that microphone, audio, database, and avatar
 resources are no longer held before relaunching.
 
+The event bus rejects new work after shutdown and drains any accepted event before the SQLite
+memory provider closes. A persistence error is fail-closed: the event is neither delivered nor
+retained for in-process replay. Treat repeated persistence or subscriber-timeout logs as a failed
+runtime, investigate the database or handler, and restart only after normal cleanup completes.
+
 ## Memory backup and recovery preparation
 
 Create a verified backup before upgrades, configuration migrations, or any repair operation:

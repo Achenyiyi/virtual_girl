@@ -107,7 +107,14 @@ Lifecycle status: all runtime entry paths now converge on one idempotent shutdow
 single-turn, voice-loop, and microphone-cleanup failures cannot bypass application cleanup. Audio,
 voice, provider, memory, avatar, action, and audit shutdowns run independently with per-component
 timeouts; one failure cannot prevent later cleanup, and caller cancellation is propagated only
-after the underlying shutdown task finishes.
+after the underlying shutdown task finishes. Shutdown drains the event bus before closing its
+memory persistence provider.
+
+Event delivery status: concurrent publishes are serialized as durable commit units. Persistence
+must succeed before an event enters the bounded replay log or reaches subscribers; a cancelled
+caller waits for the accepted commit to resolve. Subscriber failures are isolated, hung handlers
+time out, shutdown drains an in-flight publish, and the closed bus rejects publishing, replay, new
+subscriptions, and persistence-handler replacement.
 
 Memory operations status: the SQLite service creates its own configured parent directory and
 provides CLI-level online backup and independent verification. Backup publication is atomic,
@@ -126,7 +133,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 249 tests passed with 76.96% total
+- `pytest -q --cov=companion --cov-fail-under=70`: 255 tests passed with 77.07% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
   84%, action service 80%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version

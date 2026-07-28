@@ -44,20 +44,30 @@ class EventBus:
         name: str = "default",
         max_log_size: int = 10_000,
         persistence_handler: EventPersistenceHandler | None = None,
+        handler_timeout_seconds: float = 10.0,
     ) -> None:
         if max_log_size < 1:
             raise ValueError("max_log_size must be positive")
+        if handler_timeout_seconds <= 0:
+            raise ValueError("handler_timeout_seconds must be positive")
         self.name = name
         self._subscribers: dict[str, list[EventHandler]] = defaultdict(list)
         self._wildcard_subscribers: list[EventHandler] = []
         self._event_log: deque[BaseEvent] = deque(maxlen=max_log_size)
         self._max_log_size: int = max_log_size
         self._persistence_handler = persistence_handler
-        self._running: bool = False
+        self._handler_timeout_seconds = handler_timeout_seconds
+        self._publish_lock = asyncio.Lock()
+        self._closed = False
 
     def set_persistence_handler(self, handler: EventPersistenceHandler | None) -> None:
         """Set the durable event sink used before subscriber delivery."""
+        self._ensure_open()
         self._persistence_handler = handler
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError(f"EventBus[{self.name}] is shut down")
 
     def on(self, event_type: str) -> Callable[[EventHandler], EventHandler]:
         """Decorator: subscribe a handler to an event type.
@@ -77,6 +87,7 @@ class EventBus:
         """Decorator: subscribe a handler to ALL events."""
 
         def decorator(handler: EventHandler) -> EventHandler:
+            self._ensure_open()
             self._wildcard_subscribers.append(handler)
             return handler
 
@@ -84,6 +95,7 @@ class EventBus:
 
     def subscribe(self, event_type: str, handler: EventHandler) -> None:
         """Subscribe a handler to a specific event type."""
+        self._ensure_open()
         self._subscribers[event_type].append(handler)
         logger.debug("EventBus[%s]: subscribed to '%s'", self.name, event_type)
 
@@ -102,44 +114,66 @@ class EventBus:
 
         The event is also recorded in the event log for replay/debugging.
         """
-        event_type = event.event_type
-        handlers = self._subscribers.get(event_type, []) + self._wildcard_subscribers
+        publish_task = asyncio.create_task(self._publish_committed(event))
+        try:
+            await asyncio.shield(publish_task)
+        except asyncio.CancelledError:
+            await publish_task
+            raise
 
-        # Record every event, even when no component currently subscribes to it.
-        self._event_log.append(event)
-
-        # Persistence is deliberately fail-closed. Delivering an event that was not
-        # durably recorded would break causality, recovery, and deletion semantics.
-        if self._persistence_handler:
-            await self._persistence_handler(event)
-
-        if not handlers:
-            logger.debug(
-                "EventBus[%s]: no subscribers for '%s'",
-                self.name,
-                event_type,
+    async def _publish_committed(self, event: BaseEvent) -> None:
+        """Commit one accepted event without cancellation leaving an ambiguous result."""
+        async with self._publish_lock:
+            if self._closed:
+                raise RuntimeError(f"EventBus[{self.name}] is shut down")
+            event_type = event.event_type
+            handlers = tuple(
+                self._subscribers.get(event_type, []) + self._wildcard_subscribers
             )
-            return
 
-        # Call all handlers concurrently
-        async def safe_call(handler: EventHandler, evt: BaseEvent) -> None:
-            try:
-                result = handler(evt)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception:
-                logger.exception(
-                    "EventBus[%s]: handler error for '%s'",
+            # Persistence is deliberately fail-closed. Only committed events enter
+            # the replay log or reach subscribers.
+            if self._persistence_handler:
+                await self._persistence_handler(event)
+            self._event_log.append(event)
+
+            if not handlers:
+                logger.debug(
+                    "EventBus[%s]: no subscribers for '%s'",
                     self.name,
                     event_type,
                 )
+                return
 
-        await asyncio.gather(*(safe_call(h, event) for h in handlers))
+            async def safe_call(handler: EventHandler, evt: BaseEvent) -> None:
+                try:
+                    async with asyncio.timeout(self._handler_timeout_seconds):
+                        result = handler(evt)
+                        if asyncio.iscoroutine(result):
+                            await result
+                except TimeoutError:
+                    logger.error(
+                        "EventBus[%s]: handler timed out for '%s' after %.1fs",
+                        self.name,
+                        event_type,
+                        self._handler_timeout_seconds,
+                    )
+                except Exception:
+                    logger.exception(
+                        "EventBus[%s]: handler error for '%s'",
+                        self.name,
+                        event_type,
+                    )
+
+            await asyncio.gather(*(safe_call(h, event) for h in handlers))
 
     async def replay(self, handler: EventHandler, event_types: list[str] | None = None) -> int:
         """Replay logged events through a handler. Returns count replayed."""
+        async with self._publish_lock:
+            self._ensure_open()
+            events = tuple(self._event_log)
         count = 0
-        for event in self._event_log:
+        for event in events:
             if event_types is None or event.event_type in event_types:
                 try:
                     result = handler(event)
@@ -160,6 +194,16 @@ class EventBus:
 
     async def shutdown(self) -> None:
         """Clear subscribers and stop accepting events."""
-        self._running = False
-        self._subscribers.clear()
-        self._wildcard_subscribers.clear()
+        shutdown_task = asyncio.create_task(self._shutdown_committed())
+        try:
+            await asyncio.shield(shutdown_task)
+        except asyncio.CancelledError:
+            await shutdown_task
+            raise
+
+    async def _shutdown_committed(self) -> None:
+        async with self._publish_lock:
+            self._closed = True
+            self._subscribers.clear()
+            self._wildcard_subscribers.clear()
+            self._persistence_handler = None

@@ -59,8 +59,29 @@ def _inject_lifecycle_components(
     )
     app._voice_audio_output = LifecycleComponent("streaming_audio", calls)
     app._voice_pipeline = LifecycleComponent("voice_pipeline", calls)
+    app._bus = LifecycleComponent("event_bus", calls)
     app._orchestrator = LifecycleComponent("orchestrator", calls)
     app._action_audit = LifecycleComponent("action_audit", calls)
+
+
+class OrderedEventBus(LifecycleComponent):
+    def __init__(self, calls: list[str], drained: asyncio.Event) -> None:
+        super().__init__("event_bus", calls)
+        self.drained = drained
+
+    async def shutdown(self) -> None:
+        self.calls.append(self.name)
+        self.drained.set()
+
+
+class OrderedOrchestrator(LifecycleComponent):
+    def __init__(self, calls: list[str], drained: asyncio.Event) -> None:
+        super().__init__("orchestrator", calls)
+        self.drained = drained
+
+    async def shutdown(self) -> None:
+        assert self.drained.is_set()
+        self.calls.append(self.name)
 
 
 @pytest.mark.asyncio
@@ -73,7 +94,14 @@ async def test_stop_attempts_every_component_and_is_idempotent() -> None:
     await app.stop()
 
     assert sorted(calls) == sorted(
-        ["system_audio", "streaming_audio", "voice_pipeline", "orchestrator", "action_audit"]
+        [
+            "system_audio",
+            "streaming_audio",
+            "voice_pipeline",
+            "event_bus",
+            "orchestrator",
+            "action_audit",
+        ]
     )
 
 
@@ -95,7 +123,14 @@ async def test_cancelled_stop_waits_for_cleanup_before_propagating() -> None:
     with pytest.raises(asyncio.CancelledError):
         await stop_task
     assert sorted(calls) == sorted(
-        ["system_audio", "streaming_audio", "voice_pipeline", "orchestrator", "action_audit"]
+        [
+            "system_audio",
+            "streaming_audio",
+            "voice_pipeline",
+            "event_bus",
+            "orchestrator",
+            "action_audit",
+        ]
     )
 
 
@@ -111,8 +146,29 @@ async def test_hung_component_is_bounded_and_does_not_block_other_cleanup(monkey
     await asyncio.wait_for(app.stop(), timeout=1)
 
     assert sorted(calls) == sorted(
-        ["system_audio", "streaming_audio", "voice_pipeline", "orchestrator", "action_audit"]
+        [
+            "system_audio",
+            "streaming_audio",
+            "voice_pipeline",
+            "event_bus",
+            "orchestrator",
+            "action_audit",
+        ]
     )
+
+
+@pytest.mark.asyncio
+async def test_event_bus_drains_before_provider_shutdown() -> None:
+    app = CompanionApp(RuntimeConfig())
+    calls: list[str] = []
+    drained = asyncio.Event()
+    _inject_lifecycle_components(app, calls)
+    app._bus = OrderedEventBus(calls, drained)
+    app._orchestrator = OrderedOrchestrator(calls, drained)
+
+    await app.stop()
+
+    assert calls.index("event_bus") < calls.index("orchestrator")
 
 
 @pytest.mark.asyncio

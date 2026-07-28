@@ -10,6 +10,8 @@ Phase 0 acceptance criteria:
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from companion.core.event_bus import EventBus
@@ -258,6 +260,159 @@ class TestEventBus:
         )
         await bus.publish(event)
         assert order == [f"persist:{event.event_id}", f"deliver:{event.event_id}"]
+
+    @pytest.mark.asyncio
+    async def test_persistence_failure_is_not_replayable_or_delivered(self):
+        received: list = []
+
+        async def fail_persistence(_event):
+            raise OSError("database unavailable")
+
+        bus = EventBus("test", persistence_handler=fail_persistence)
+
+        @bus.on("conversation.turn.started")
+        async def handler(event):
+            received.append(event)
+
+        event = ConversationTurnStartedEvent(
+            session_id="sess",
+            turn_id="not-committed",
+            turn_sequence=0,
+        )
+        with pytest.raises(OSError, match="database unavailable"):
+            await bus.publish(event)
+
+        assert received == []
+        assert await bus.replay(lambda _: None) == 0
+
+    @pytest.mark.asyncio
+    async def test_concurrent_publish_is_committed_and_delivered_in_order(self):
+        first_persisted = asyncio.Event()
+        release_first = asyncio.Event()
+        order: list[str] = []
+
+        async def persist(event):
+            order.append(f"persist:{event.turn_id}")
+            if event.turn_id == "first":
+                first_persisted.set()
+                await release_first.wait()
+
+        bus = EventBus("test", persistence_handler=persist)
+
+        @bus.on("conversation.turn.started")
+        async def handler(event):
+            order.append(f"deliver:{event.turn_id}")
+
+        first = ConversationTurnStartedEvent(
+            session_id="sess", turn_id="first", turn_sequence=0
+        )
+        second = ConversationTurnStartedEvent(
+            session_id="sess", turn_id="second", turn_sequence=1
+        )
+        first_task = asyncio.create_task(bus.publish(first))
+        await first_persisted.wait()
+        second_task = asyncio.create_task(bus.publish(second))
+        await asyncio.sleep(0)
+        assert not second_task.done()
+
+        release_first.set()
+        await asyncio.gather(first_task, second_task)
+        assert order == [
+            "persist:first",
+            "deliver:first",
+            "persist:second",
+            "deliver:second",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_shutdown_waits_for_inflight_publish_and_rejects_new_events(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        bus = EventBus("test")
+
+        @bus.on("conversation.turn.started")
+        async def handler(_event):
+            entered.set()
+            await release.wait()
+
+        event = ConversationTurnStartedEvent(
+            session_id="sess", turn_id="inflight", turn_sequence=0
+        )
+        publish_task = asyncio.create_task(bus.publish(event))
+        await entered.wait()
+        shutdown_task = asyncio.create_task(bus.shutdown())
+        await asyncio.sleep(0)
+        assert not shutdown_task.done()
+
+        release.set()
+        await asyncio.gather(publish_task, shutdown_task)
+        with pytest.raises(RuntimeError, match="shut down"):
+            await bus.publish(event)
+        with pytest.raises(RuntimeError, match="shut down"):
+            await bus.replay(lambda _: None)
+        with pytest.raises(RuntimeError, match="shut down"):
+            bus.subscribe("conversation.turn.started", lambda _: None)
+        with pytest.raises(RuntimeError, match="shut down"):
+            bus.set_persistence_handler(None)
+        with pytest.raises(RuntimeError, match="shut down"):
+
+            @bus.on_any()
+            async def late_handler(_event):
+                pass
+
+    @pytest.mark.asyncio
+    async def test_hung_handler_times_out_without_blocking_other_handlers(self):
+        completed: list[str] = []
+        bus = EventBus("test", handler_timeout_seconds=0.01)
+
+        @bus.on("conversation.turn.started")
+        async def hung(_event):
+            await asyncio.Future()
+
+        @bus.on("conversation.turn.started")
+        async def healthy(_event):
+            completed.append("healthy")
+
+        await asyncio.wait_for(
+            bus.publish(
+                ConversationTurnStartedEvent(
+                    session_id="sess", turn_id="timeout", turn_sequence=0
+                )
+            ),
+            timeout=1,
+        )
+        assert completed == ["healthy"]
+
+    @pytest.mark.asyncio
+    async def test_cancelled_publish_finishes_commit_before_propagating(self):
+        persisted = asyncio.Event()
+        release = asyncio.Event()
+        delivered: list[str] = []
+
+        async def persist(_event):
+            persisted.set()
+            await release.wait()
+
+        bus = EventBus("test", persistence_handler=persist)
+
+        @bus.on("conversation.turn.started")
+        async def handler(event):
+            delivered.append(event.turn_id)
+
+        event = ConversationTurnStartedEvent(
+            session_id="sess", turn_id="cancelled-caller", turn_sequence=0
+        )
+        publish_task = asyncio.create_task(bus.publish(event))
+        await persisted.wait()
+        publish_task.cancel()
+        await asyncio.sleep(0)
+        assert not publish_task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await publish_task
+        assert delivered == ["cancelled-caller"]
+        assert await bus.replay(lambda _: None) == 1
 
     @pytest.mark.asyncio
     async def test_handler_error_does_not_block_others(self):
