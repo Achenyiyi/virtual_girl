@@ -38,7 +38,15 @@ from companion.providers.perception import PerceptionProvider
 from companion.providers.tts import TTSProvider
 
 logger = logging.getLogger(__name__)
-TurnFailureStage = Literal["configuration", "generation", "persistence", "cancellation"]
+TurnFailureStage = Literal[
+    "configuration",
+    "asr",
+    "generation",
+    "tts",
+    "playback",
+    "persistence",
+    "cancellation",
+]
 
 
 class CompanionOrchestrator:

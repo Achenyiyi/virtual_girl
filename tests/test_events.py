@@ -235,6 +235,14 @@ class TestConversationEvents:
 
         assert isinstance(restored, ConversationTurnFailedEvent)
         assert restored.stage == "generation"
+        for stage in ("asr", "tts", "playback"):
+            assert ConversationTurnFailedEvent(
+                turn_id=f"turn_{stage}",
+                session_id="sess_test",
+                turn_sequence=3,
+                stage=stage,  # type: ignore[arg-type]
+                elapsed_ms=0,
+            ).stage == stage
         with pytest.raises(ValidationError):
             ConversationTurnFailedEvent(
                 turn_id="turn_invalid",

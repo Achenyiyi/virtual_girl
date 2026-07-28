@@ -11,7 +11,12 @@ from companion.core.event_bus import EventBus
 from companion.core.orchestrator import CompanionOrchestrator
 from companion.core.policy_gate import PolicyGate, PolicyGateConfig
 from companion.core.state_manager import StateManager
+from companion.events.base import BaseEvent
+from companion.events.conversation import ConversationTurnFailedEvent
 from companion.memory.memory_service import MemoryService, MemoryServiceConfig
+from companion.providers.asr import ASRBatchRequest, ASRBatchResult
+from companion.providers.model import LLMRequest, LLMResponse
+from companion.providers.tts import TTSRequest
 from companion.services.voice_pipeline import VoicePipeline, VoicePipelineConfig
 from tests.test_providers import MockASRProvider, MockLLMProvider, MockTTSProvider
 
@@ -42,6 +47,25 @@ class FakeAudioOutput:
 
     async def finish(self) -> None:
         return None
+
+
+async def captured_events(bus: EventBus) -> list[BaseEvent]:
+    events: list[BaseEvent] = []
+    await bus.replay(events.append)
+    return events
+
+
+def terminal_events(events: list[BaseEvent]) -> list[BaseEvent]:
+    return [
+        event
+        for event in events
+        if event.event_type
+        in {
+            "conversation.turn.completed",
+            "conversation.turn.interrupted",
+            "conversation.turn.failed",
+        }
+    ]
 
 
 @pytest.fixture
@@ -129,6 +153,74 @@ class TestVoicePipelineIntegration:
         assert "conversation.turn.completed" not in event_types
 
     @pytest.mark.asyncio
+    async def test_cancelled_interrupt_call_still_persists_interrupted_terminal(self):
+        persisted: list[BaseEvent] = []
+        interrupt_entered = asyncio.Event()
+        release_interrupt = asyncio.Event()
+
+        async def persist(event: BaseEvent) -> None:
+            if event.event_type == "conversation.turn.interrupted":
+                interrupt_entered.set()
+                await release_interrupt.wait()
+            persisted.append(event)
+
+        output = FakeAudioOutput(blocking=True)
+        bus = EventBus("cancelled-interrupt", persistence_handler=persist)
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+            tts=MockTTSProvider(),
+            audio_output=output,
+        )
+        response_task = asyncio.create_task(voice.process_text_input("hello", speak=True))
+        await output.started.wait()
+        interrupt_task = asyncio.create_task(voice.interrupt())
+        await interrupt_entered.wait()
+
+        interrupt_task.cancel()
+        release_interrupt.set()
+        with pytest.raises(asyncio.CancelledError):
+            await interrupt_task
+        assert await response_task == "mock response"
+        terminal = terminal_events(persisted)
+
+        assert [event.event_type for event in terminal] == ["conversation.turn.interrupted"]
+
+    @pytest.mark.asyncio
+    async def test_interruption_persistence_failure_records_failed_terminal(self):
+        persisted: list[BaseEvent] = []
+
+        async def persist(event: BaseEvent) -> None:
+            if event.event_type == "conversation.turn.interrupted":
+                raise OSError("database offline")
+            persisted.append(event)
+
+        output = FakeAudioOutput(blocking=True)
+        bus = EventBus("interrupt-persistence-failure", persistence_handler=persist)
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+            tts=MockTTSProvider(),
+            audio_output=output,
+        )
+        response_task = asyncio.create_task(voice.process_text_input("hello", speak=True))
+        await output.started.wait()
+
+        assert await voice.interrupt()
+        assert await response_task == "mock response"
+        terminal = terminal_events(persisted)
+
+        assert [event.event_type for event in terminal] == ["conversation.turn.failed"]
+        failed = terminal[0]
+        assert isinstance(failed, ConversationTurnFailedEvent)
+        assert failed.stage == "persistence"
+        assert voice._turn_mgr.get_current_turn().state == "error"
+
+    @pytest.mark.asyncio
     async def test_audio_input_completes_full_spoken_event_chain(self, pipeline):
         output = FakeAudioOutput()
         pipeline._audio_output = output
@@ -162,6 +254,385 @@ class TestVoicePipelineIntegration:
         event_types: list[str] = []
         await pipeline._bus.replay(lambda event: event_types.append(event.event_type))
         assert "conversation.turn.completed" not in event_types
+        assert "conversation.turn.failed" in event_types
+
+    @pytest.mark.asyncio
+    async def test_asr_failure_records_sanitized_terminal_event(self):
+        class FailingASR(MockASRProvider):
+            async def transcribe_batch(self, request: ASRBatchRequest) -> ASRBatchResult:
+                raise TimeoutError("credential must not be persisted")
+
+        bus = EventBus("asr-failure")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            asr=FailingASR(),
+            llm=MockLLMProvider(),
+        )
+
+        response = await voice.process_audio_input(b"audio")
+        terminal = terminal_events(await captured_events(bus))
+
+        assert response == "[ASR transcription failed]"
+        assert len(terminal) == 1
+        failed = terminal[0]
+        assert isinstance(failed, ConversationTurnFailedEvent)
+        assert failed.stage == "asr"
+        assert failed.error_type == "TimeoutError"
+        assert "credential" not in failed.model_dump_json()
+
+    @pytest.mark.asyncio
+    async def test_llm_failure_records_terminal_event(self):
+        class FailingLLM(MockLLMProvider):
+            async def generate(self, request: LLMRequest) -> LLMResponse:
+                raise ConnectionError("private endpoint")
+
+        bus = EventBus("llm-failure")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=FailingLLM(),
+        )
+
+        response = await voice.process_text_input("hello")
+        terminal = terminal_events(await captured_events(bus))
+
+        assert response == "[LLM generation failed]"
+        assert len(terminal) == 1
+        failed = terminal[0]
+        assert isinstance(failed, ConversationTurnFailedEvent)
+        assert failed.stage == "generation"
+        assert failed.error_type == "ConnectionError"
+
+    @pytest.mark.asyncio
+    async def test_tts_failure_records_terminal_event(self):
+        class FailingTTS(MockTTSProvider):
+            async def synthesize_stream(self, request: TTSRequest):
+                raise TimeoutError("provider token")
+                yield  # pragma: no cover
+
+        bus = EventBus("tts-failure")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+            tts=FailingTTS(),
+            audio_output=FakeAudioOutput(),
+        )
+
+        response = await voice.process_text_input("hello", speak=True)
+        terminal = terminal_events(await captured_events(bus))
+
+        assert response == "[Audio playback failed]"
+        assert len(terminal) == 1
+        failed = terminal[0]
+        assert isinstance(failed, ConversationTurnFailedEvent)
+        assert failed.stage == "tts"
+        assert failed.error_type == "TimeoutError"
+
+    @pytest.mark.asyncio
+    async def test_task_cancellation_records_terminal_failure(self):
+        class BlockingLLM(MockLLMProvider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.entered = asyncio.Event()
+
+            async def generate(self, request: LLMRequest) -> LLMResponse:
+                self.entered.set()
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+        bus = EventBus("cancelled-voice")
+        llm = BlockingLLM()
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=llm,
+        )
+        task = asyncio.create_task(voice.process_text_input("hello"))
+        await llm.entered.wait()
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        terminal = terminal_events(await captured_events(bus))
+
+        assert len(terminal) == 1
+        failed = terminal[0]
+        assert isinstance(failed, ConversationTurnFailedEvent)
+        assert failed.stage == "cancellation"
+
+    @pytest.mark.asyncio
+    async def test_interrupt_during_asr_stops_before_llm_generation(self):
+        class BlockingASR(MockASRProvider):
+            def __init__(self) -> None:
+                self.entered = asyncio.Event()
+                self.release = asyncio.Event()
+                self.cancel_calls = 0
+
+            async def transcribe_batch(self, request: ASRBatchRequest) -> ASRBatchResult:
+                self.entered.set()
+                await self.release.wait()
+                return ASRBatchResult(text="late transcript")
+
+            async def cancel(self, turn_id: str) -> bool:
+                self.cancel_calls += 1
+                self.release.set()
+                return True
+
+        class CountingLLM(MockLLMProvider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+
+            async def generate(self, request: LLMRequest) -> LLMResponse:
+                self.calls += 1
+                return await super().generate(request)
+
+        bus = EventBus("asr-interrupt")
+        asr = BlockingASR()
+        llm = CountingLLM()
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            asr=asr,
+            llm=llm,
+        )
+        task = asyncio.create_task(voice.process_audio_input(b"audio"))
+        await asr.entered.wait()
+
+        assert await voice.interrupt()
+        assert await task == ""
+        terminal = terminal_events(await captured_events(bus))
+
+        assert asr.cancel_calls == 1
+        assert llm.calls == 0
+        assert [event.event_type for event in terminal] == ["conversation.turn.interrupted"]
+
+    @pytest.mark.asyncio
+    async def test_interrupt_while_llm_event_commits_cannot_resume_playback(self):
+        persisted: list[BaseEvent] = []
+        llm_event_entered = asyncio.Event()
+        release_llm_event = asyncio.Event()
+
+        async def persist(event: BaseEvent) -> None:
+            if event.event_type == "conversation.llm.response":
+                llm_event_entered.set()
+                await release_llm_event.wait()
+            persisted.append(event)
+
+        output = FakeAudioOutput()
+        bus = EventBus("voice-llm-event-interrupt", persistence_handler=persist)
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+            tts=MockTTSProvider(),
+            audio_output=output,
+        )
+        task = asyncio.create_task(voice.process_text_input("hello", speak=True))
+        await llm_event_entered.wait()
+
+        interrupt_task = asyncio.create_task(voice.interrupt())
+        release_llm_event.set()
+        assert await interrupt_task
+        assert await task == "mock response"
+        terminal = terminal_events(persisted)
+
+        assert output.play_calls == 0
+        assert [event.event_type for event in terminal] == ["conversation.turn.interrupted"]
+
+    @pytest.mark.asyncio
+    async def test_interrupt_while_tts_event_commits_cannot_start_playback(self):
+        persisted: list[BaseEvent] = []
+        tts_event_entered = asyncio.Event()
+        release_tts_event = asyncio.Event()
+
+        async def persist(event: BaseEvent) -> None:
+            if event.event_type == "conversation.tts.synthesized":
+                tts_event_entered.set()
+                await release_tts_event.wait()
+            persisted.append(event)
+
+        output = FakeAudioOutput()
+        bus = EventBus("voice-tts-event-interrupt", persistence_handler=persist)
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+            tts=MockTTSProvider(),
+            audio_output=output,
+        )
+        task = asyncio.create_task(voice.process_text_input("hello", speak=True))
+        await tts_event_entered.wait()
+
+        interrupt_task = asyncio.create_task(voice.interrupt())
+        release_tts_event.set()
+        assert await interrupt_task
+        assert await task == "mock response"
+        terminal = terminal_events(persisted)
+
+        assert output.play_calls == 0
+        assert [event.event_type for event in terminal] == ["conversation.turn.interrupted"]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_turns_are_serialized(self):
+        class OrderedLLM(MockLLMProvider):
+            def __init__(self) -> None:
+                super().__init__()
+                self.calls = 0
+                self.first_entered = asyncio.Event()
+                self.release_first = asyncio.Event()
+
+            async def generate(self, request: LLMRequest) -> LLMResponse:
+                self.calls += 1
+                if self.calls == 1:
+                    self.first_entered.set()
+                    await self.release_first.wait()
+                return await super().generate(request)
+
+        bus = EventBus("serialized-voice")
+        llm = OrderedLLM()
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=llm,
+        )
+        first = asyncio.create_task(voice.process_text_input("first"))
+        await llm.first_entered.wait()
+        second = asyncio.create_task(voice.process_text_input("second"))
+        await asyncio.sleep(0)
+
+        assert llm.calls == 1
+        llm.release_first.set()
+        assert await asyncio.gather(first, second) == ["mock response", "mock response"]
+        terminal = terminal_events(await captured_events(bus))
+
+        assert [event.event_type for event in terminal] == [
+            "conversation.turn.completed",
+            "conversation.turn.completed",
+        ]
+        assert [event.turn_sequence for event in terminal] == [1, 2]  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
+    async def test_completed_persistence_failure_records_failed_terminal(self):
+        persisted: list[BaseEvent] = []
+
+        async def persist(event: BaseEvent) -> None:
+            if event.event_type == "conversation.turn.completed":
+                raise OSError("database offline")
+            persisted.append(event)
+
+        bus = EventBus("voice-persistence-failure", persistence_handler=persist)
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+        )
+
+        response = await voice.process_text_input("hello")
+        terminal = terminal_events(persisted)
+
+        assert response == "[Conversation persistence failed]"
+        assert [event.event_type for event in terminal] == ["conversation.turn.failed"]
+        failed = terminal[0]
+        assert isinstance(failed, ConversationTurnFailedEvent)
+        assert failed.stage == "persistence"
+
+    @pytest.mark.asyncio
+    async def test_cancellation_during_completed_commit_keeps_completed_terminal(self):
+        persisted: list[BaseEvent] = []
+        completed_entered = asyncio.Event()
+        release_completed = asyncio.Event()
+
+        async def persist(event: BaseEvent) -> None:
+            if event.event_type == "conversation.turn.completed":
+                completed_entered.set()
+                await release_completed.wait()
+            persisted.append(event)
+
+        bus = EventBus("voice-completed-cancellation", persistence_handler=persist)
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+        )
+        task = asyncio.create_task(voice.process_text_input("hello"))
+        await completed_entered.wait()
+
+        task.cancel()
+        release_completed.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        terminal = terminal_events(persisted)
+
+        assert [event.event_type for event in terminal] == ["conversation.turn.completed"]
+        assert voice._turn_mgr.get_current_turn().state == "completed"
+
+    @pytest.mark.asyncio
+    async def test_interrupt_cannot_race_an_accepted_completion(self):
+        persisted: list[BaseEvent] = []
+        completed_entered = asyncio.Event()
+        release_completed = asyncio.Event()
+
+        async def persist(event: BaseEvent) -> None:
+            if event.event_type == "conversation.turn.completed":
+                completed_entered.set()
+                await release_completed.wait()
+            persisted.append(event)
+
+        bus = EventBus("voice-completion-interrupt", persistence_handler=persist)
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+        )
+        task = asyncio.create_task(voice.process_text_input("hello"))
+        await completed_entered.wait()
+
+        assert await voice.interrupt() is False
+        release_completed.set()
+        assert await task == "mock response"
+        terminal = terminal_events(persisted)
+
+        assert [event.event_type for event in terminal] == ["conversation.turn.completed"]
+
+    @pytest.mark.asyncio
+    async def test_post_completion_history_failure_does_not_add_failed_terminal(self):
+        class FailingHistoryRuntime(CompanionOrchestrator):
+            async def commit_response(self, *args, **kwargs) -> None:
+                raise RuntimeError("derived history unavailable")
+
+        bus = EventBus("voice-history-degradation")
+        runtime = FailingHistoryRuntime(
+            StateManager(),
+            bus,
+            PolicyGate(),
+            llm_provider=MockLLMProvider(),
+        )
+        voice = VoicePipeline(
+            state=runtime.state,
+            bus=bus,
+            policy=runtime.policy,
+            runtime=runtime,
+        )
+
+        response = await voice.process_text_input("hello")
+        terminal = terminal_events(await captured_events(bus))
+
+        assert response == "mock response"
+        assert [event.event_type for event in terminal] == ["conversation.turn.completed"]
 
     @pytest.mark.asyncio
     async def test_spoken_turn_commits_to_runtime_memory(self, tmp_path):

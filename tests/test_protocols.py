@@ -21,6 +21,7 @@ class TestTurnProtocol:
         assert TurnProtocol.can_transition(TurnState.ASR_PROCESSING, TurnState.LLM_THINKING)
         assert TurnProtocol.can_transition(TurnState.LLM_THINKING, TurnState.TTS_SYNTHESIZING)
         assert TurnProtocol.can_transition(TurnState.TTS_SYNTHESIZING, TurnState.PLAYING)
+        assert TurnProtocol.can_transition(TurnState.TTS_SYNTHESIZING, TurnState.COMPLETED)
         assert TurnProtocol.can_transition(TurnState.PLAYING, TurnState.COMPLETED)
 
     def test_interruption_from_any_active_state(self):
@@ -110,6 +111,25 @@ class TestTurnManager:
         t = mgr.get_turn(turn.turn_id)
         assert t.user_text == "你好"
         assert t.companion_text == "你好呀！"
+
+    def test_failed_persistence_can_replace_uncommitted_terminal_claim(self):
+        mgr = TurnManager()
+        completed = mgr.create_turn("sess_test", 0)
+        mgr.transition(completed.turn_id, TurnState.LLM_THINKING)
+        mgr.transition(completed.turn_id, TurnState.TTS_SYNTHESIZING)
+        assert mgr.transition(completed.turn_id, TurnState.COMPLETED)
+
+        assert mgr.fail_turn(completed.turn_id) is None
+        assert mgr.fail_turn(completed.turn_id, allow_completed=True) is completed
+        assert completed.state == TurnState.ERROR
+
+        interrupted = mgr.create_turn("sess_test", 1)
+        mgr.transition(interrupted.turn_id, TurnState.LLM_THINKING)
+        mgr.interrupt_turn(interrupted.turn_id)
+
+        assert mgr.fail_turn(interrupted.turn_id) is None
+        assert mgr.fail_turn(interrupted.turn_id, allow_interrupted=True) is interrupted
+        assert interrupted.state == TurnState.ERROR
 
 
 class TestAudioConfirmation:

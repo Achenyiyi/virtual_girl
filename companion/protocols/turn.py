@@ -126,11 +126,17 @@ class TurnProtocol:
         },
         TurnState.TTS_SYNTHESIZING: {
             TurnState.PLAYING,
+            TurnState.COMPLETED,
             TurnState.INTERRUPTED,
             TurnState.CANCELLED,
             TurnState.ERROR,
         },
-        TurnState.PLAYING: {TurnState.COMPLETED, TurnState.INTERRUPTED, TurnState.ERROR},
+        TurnState.PLAYING: {
+            TurnState.COMPLETED,
+            TurnState.INTERRUPTED,
+            TurnState.CANCELLED,
+            TurnState.ERROR,
+        },
         TurnState.COMPLETED: set(),  # Terminal
         TurnState.INTERRUPTED: set(),  # Terminal
         TurnState.ERROR: set(),  # Terminal
@@ -216,6 +222,25 @@ class TurnManager:
         turn.state = TurnState.INTERRUPTED
         turn.interrupted_at_ms = int(time.time() * 1000)
         turn.cancelled = True
+        return turn
+
+    def fail_turn(
+        self,
+        turn_id: str,
+        *,
+        allow_completed: bool = False,
+        allow_interrupted: bool = False,
+    ) -> TurnRecord | None:
+        """Mark a turn failed, optionally rolling back an unpersisted completion claim."""
+        turn = self._turns.get(turn_id)
+        if turn is None:
+            return None
+        can_replace_terminal = (allow_completed and turn.state == TurnState.COMPLETED) or (
+            allow_interrupted and turn.state == TurnState.INTERRUPTED
+        )
+        if not turn.is_active and not can_replace_terminal:
+            return None
+        turn.state = TurnState.ERROR
         return turn
 
     def get_turn(self, turn_id: str) -> TurnRecord | None:

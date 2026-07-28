@@ -131,9 +131,17 @@ class ConversationTurnFailedEvent(BaseEvent):
     turn_id: str = Field(..., description="Turn identifier")
     session_id: str = Field(..., description="Session identifier")
     turn_sequence: int = Field(..., ge=0)
-    stage: Literal["configuration", "generation", "persistence", "cancellation"] = Field(
+    stage: Literal[
+        "configuration",
+        "asr",
+        "generation",
+        "tts",
+        "playback",
+        "persistence",
+        "cancellation",
+    ] = Field(
         ...,
-        description="Failure stage: configuration, generation, persistence, or cancellation",
+        description="Sanitized pipeline stage where the turn failed",
     )
     error_type: str = Field(
         default="runtime_error",

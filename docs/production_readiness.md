@@ -23,6 +23,8 @@ experience, and fails closed when a required dependency is unavailable.
 - [x] Completed conversation turns are persisted and extracted facts reference real event IDs.
 - [x] Every started text turn reaches one durable terminal event; failed configuration,
       generation, persistence, and cancellation paths are recorded without storing exception text.
+- [x] Voice turns use the same durable terminal invariant across ASR, LLM, TTS, playback,
+      persistence, cancellation, and barge-in paths.
 - [x] Memory consistency checks pass after normal conversation, restart, forget, and rebuild.
 - [x] Rebuild is atomic: failure leaves the previous derived memory intact.
 - [x] Live memory can be backed up consistently, verified independently, and protected from
@@ -74,8 +76,11 @@ remote CI run.
 
 Voice implementation status: the code path now includes optional local faster-whisper ASR,
 contextual runtime generation, network-streamed Azure PCM, gapless sounddevice playback,
-played-audio confirmation, and barge-in cancellation. The gate remains open until this exact
-path passes latency and device tests on the target Windows machine with real credentials.
+played-audio confirmation, and barge-in cancellation. Voice turn admission is serialized while
+the explicit barge-in path remains concurrent; ASR/LLM/TTS/playback failures emit sanitized durable
+terminal events, cancellation cannot leave a started turn dangling, and interruption checks prevent
+late provider or event commits from resuming generation or playback. The gate remains open until
+this exact path passes latency and device tests on the target Windows machine with real credentials.
 
 Avatar implementation status: the Python runtime now owns a versioned, authenticated WebSocket
 bridge with bounded messages and timeouts, concurrent request correlation, model validation/load,
@@ -125,6 +130,13 @@ sanitized error category. Cancellation during a committed completion waits for c
 to catch up, preserving exactly one terminal state. Voice turns retain their separate completed and
 interrupted lifecycle and still require the target-device end-to-end gate below.
 
+Voice conversation lifecycle status: one admitted voice/text-to-speech turn owns the pipeline until
+it reaches `completed`, `interrupted`, or `failed`; concurrent callers queue instead of silently
+replacing the active turn. Barge-in also cancels active ASR and re-checks ownership after ASR, LLM,
+TTS-event, and playback boundaries. A completion claim is made before its durable publish so an
+accepted completion cannot race an interrupt into two terminal events. Post-completion derived
+history failures are logged as degradation rather than creating a contradictory failed terminal.
+
 Memory operations status: the SQLite service creates its own configured parent directory and
 provides CLI-level online backup and independent verification. Backup publication is atomic,
 existing targets are protected by default, WAL-backed live state is captured through SQLite's
@@ -142,7 +154,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 264 tests passed with 77.50% total
+- `pytest -q --cov=companion --cov-fail-under=70`: 279 tests passed with 77.52% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
   84%, action service 80%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version
