@@ -11,10 +11,11 @@ Supports:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -55,7 +56,16 @@ class CloudLLMConfig:
         if self.max_retries < 1 or self.retry_delay_seconds < 0 or self.timeout_seconds <= 0:
             raise ValueError("cloud LLM retry and timeout settings are invalid")
         endpoint = self.get_base_url()
-        if not endpoint or urlsplit(endpoint).scheme != "https":
+        parsed = urlsplit(endpoint)
+        if (
+            not endpoint
+            or parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
             raise ValueError("cloud LLM endpoint must use https://")
 
     def get_api_key(self) -> str:
@@ -91,6 +101,7 @@ class CloudLLMProvider(LLMProvider):
         self._config = config or CloudLLMConfig()
         self._client: httpx.AsyncClient | None = None
         self._active_cancellations: set[str] = set()
+        self._active_tasks: dict[str, asyncio.Task[Any]] = {}
         self._cancel_lock: asyncio.Lock = asyncio.Lock()
         self._last_health: ProviderHealth = ProviderHealth.UNKNOWN
         self._last_health_time: float = 0.0
@@ -105,7 +116,6 @@ class CloudLLMProvider(LLMProvider):
     # ── Main generate methods ─────────────────────────────────────────
 
     async def generate(self, request: LLMRequest) -> LLMResponse:
-        t0 = time.time()
         self._total_requests += 1
 
         api_key = self._config.get_api_key()
@@ -118,6 +128,33 @@ class CloudLLMProvider(LLMProvider):
                 finish_reason="error",
             )
 
+        generation_task = asyncio.create_task(self._generate_with_retries(request, api_key))
+        if request.turn_id:
+            self._active_tasks[request.turn_id] = generation_task
+        try:
+            done, _ = await asyncio.wait(
+                [generation_task], timeout=self._config.timeout_seconds
+            )
+            if not done:
+                generation_task.cancel()
+                generation_task.add_done_callback(self._consume_task_result)
+                self._failed_requests += 1
+                logger.error("LLM generation exceeded the configured total timeout")
+                return self._error_response(request)
+            return await generation_task
+        except asyncio.CancelledError:
+            generation_task.cancel()
+            generation_task.add_done_callback(self._consume_task_result)
+            raise
+        finally:
+            if request.turn_id and self._active_tasks.get(request.turn_id) is generation_task:
+                self._active_tasks.pop(request.turn_id, None)
+            self._active_cancellations.discard(request.turn_id)
+
+    async def _generate_with_retries(
+        self, request: LLMRequest, api_key: str
+    ) -> LLMResponse:
+        t0 = time.time()
         last_error: Exception | None = None
         for attempt in range(self._config.max_retries):
             try:
@@ -135,29 +172,40 @@ class CloudLLMProvider(LLMProvider):
                 )
             except httpx.HTTPStatusError as e:
                 last_error = e
-                if e.response.status_code >= 500:
+                if (
+                    self._is_retryable_status(e.response.status_code)
+                    and attempt < self._config.max_retries - 1
+                ):
                     delay = self._config.retry_delay_seconds * (2**attempt)
                     logger.warning(
-                        "LLM API error (attempt %d/%d): %s, retrying in %.1fs",
+                        "LLM API returned status %d (attempt %d/%d), retrying in %.1fs",
+                        e.response.status_code,
                         attempt + 1,
                         self._config.max_retries,
-                        e,
                         delay,
                     )
                     await asyncio.sleep(delay)
                 else:
-                    break  # Don't retry 4xx errors
-            except Exception as e:
+                    break
+            except (httpx.ConnectError, httpx.ConnectTimeout) as e:
                 last_error = e
                 if attempt < self._config.max_retries - 1:
                     await asyncio.sleep(self._config.retry_delay_seconds * (2**attempt))
                 else:
                     break
+            except Exception as e:
+                last_error = e
+                break
 
         self._failed_requests += 1
         logger.error(
-            "LLM API call failed after %d retries: %s", self._config.max_retries, last_error
+            "LLM API call failed after %d attempts: %s",
+            self._config.max_retries,
+            redact_text(last_error),
         )
+        return self._error_response(request)
+
+    def _error_response(self, request: LLMRequest) -> LLMResponse:
         return LLMResponse(
             text="抱歉，我的大脑暂时离线了...",
             turn_id=request.turn_id,
@@ -176,10 +224,29 @@ class CloudLLMProvider(LLMProvider):
 
         token_index = 0
         is_first = True
+        stream = self._make_streaming_call(request, api_key).__aiter__()
+        stream_task: asyncio.Task[str] | None = None
+        deadline = time.monotonic() + self._config.timeout_seconds
+        owner_task = asyncio.current_task()
+        if request.turn_id:
+            if owner_task is None:
+                raise RuntimeError("streaming generation requires an asyncio task")
+            self._active_tasks[request.turn_id] = owner_task
         try:
-            async for text_chunk in self._make_streaming_call(request, api_key):
+            while True:
+                next_chunk: Awaitable[str] = stream.__anext__()
+                stream_task = asyncio.ensure_future(next_chunk)
+                remaining = max(0.0, deadline - time.monotonic())
+                done, _ = await asyncio.wait([stream_task], timeout=remaining)
+                if not done:
+                    stream_task.cancel()
+                    stream_task.add_done_callback(self._consume_task_result)
+                    raise TimeoutError("stream total timeout")
+                try:
+                    text_chunk = await stream_task
+                except StopAsyncIteration:
+                    break
                 if request.turn_id in self._active_cancellations:
-                    self._active_cancellations.discard(request.turn_id)
                     yield LLMStreamChunk(
                         text="", turn_id=request.turn_id, is_final=True, token_index=token_index
                     )
@@ -193,8 +260,13 @@ class CloudLLMProvider(LLMProvider):
                 )
                 is_first = False
                 token_index += 1
+        except asyncio.CancelledError:
+            if stream_task is not None and not stream_task.done():
+                stream_task.cancel()
+                stream_task.add_done_callback(self._consume_task_result)
+            raise
         except Exception as e:
-            logger.exception("Streaming LLM error")
+            logger.error("Streaming LLM error: %s", redact_text(e))
             yield LLMStreamChunk(
                 text=f"\n[Error: {redact_text(e)}]",
                 turn_id=request.turn_id,
@@ -205,11 +277,31 @@ class CloudLLMProvider(LLMProvider):
             yield LLMStreamChunk(
                 text="", turn_id=request.turn_id, is_final=True, token_index=token_index
             )
+        finally:
+            if request.turn_id and self._active_tasks.get(request.turn_id) is owner_task:
+                self._active_tasks.pop(request.turn_id, None)
+            self._active_cancellations.discard(request.turn_id)
 
     async def cancel(self, turn_id: str) -> bool:
         async with self._cancel_lock:
-            self._active_cancellations.add(turn_id)
-        return True
+            task = self._active_tasks.get(turn_id)
+            if task is not None and not task.done():
+                self._active_cancellations.add(turn_id)
+                task.cancel()
+                task.add_done_callback(self._consume_task_result)
+                return True
+        return False
+
+    @staticmethod
+    def _is_retryable_status(status_code: int) -> bool:
+        return status_code in {408, 409, 425, 429} or status_code >= 500
+
+    @staticmethod
+    def _consume_task_result(task: asyncio.Future[Any]) -> None:
+        if task.cancelled():
+            return
+        with contextlib.suppress(Exception):
+            task.exception()
 
     # ── Internal API call builders ────────────────────────────────────
 
@@ -443,6 +535,12 @@ class CloudLLMProvider(LLMProvider):
         return self._last_health
 
     async def shutdown(self) -> None:
+        active_tasks = tuple(self._active_tasks.values())
+        self._active_tasks.clear()
+        for task in active_tasks:
+            task.cancel()
+            task.add_done_callback(self._consume_task_result)
+        self._active_cancellations.clear()
         if self._client:
             await self._client.aclose()
             self._client = None

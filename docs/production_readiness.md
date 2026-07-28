@@ -113,6 +113,14 @@ from the default YAML and unsafe or unimplemented configuration fails closed. Th
 family provides human and JSON preflight reports without exposing credential values; online Azure
 health uses the read-only voices-list endpoint. See `docs/deployment_preflight.md`.
 
+Cloud LLM status: the configured timeout is a cumulative budget covering all attempts and backoff,
+not a fresh allowance per HTTP request. Retries are limited to connection-establishment failures and
+explicitly transient HTTP statuses; response-read timeouts are not retried because the provider may
+already have completed and billed the generation. Active non-streaming and streaming calls are
+tracked by turn ID, so barge-in cancels the actual HTTP operation even before the first token.
+Streaming remains incremental rather than buffering the entire response. Custom endpoints reject
+URL user information, queries, and fragments so credentials cannot be embedded in routable URLs.
+
 Long-running resource status: file logs rotate at 10 MiB with five backups by default; replay,
 action, audit, proactive, latency, and audio queues are bounded. The durable SQLite event ledger is
 not truncated by these in-memory limits. Confirmation-requiring actions have a ten-item pending
@@ -170,9 +178,9 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 66 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 297 tests passed with 77.92% total
+- `pytest -q --cov=companion --cov-fail-under=70`: 307 tests passed with 78.71% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
-  85%, action service 82%, and the action audit store 94%.
+  85%, cloud LLM 63%, action service 82%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version
   negotiation, health, model list/validate/load, full state mapping, timeout, disconnect,
   reconnect, and shutdown all passed. Orchestrator readiness fails for an unhealthy configured

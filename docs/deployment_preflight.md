@@ -89,6 +89,14 @@ guarantees that the application operation returns, but it does not claim to term
 thread or driver owned by that provider. Treat repeated timeout logs as an unhealthy provider or
 device and recycle the process only after the normal bounded shutdown path completes.
 
+The cloud LLM timeout is also the total budget for all provider attempts and retry backoff. Only
+connection-establishment failures and transient status codes (`408`, `409`, `425`, `429`, and
+`5xx`) are retried. A response-read timeout is not retried because the remote service may already
+have generated and billed the answer; blindly issuing another POST can duplicate cost and output.
+Cancellation targets the active HTTP generation by turn ID, including the period before the first
+streamed token. Custom endpoints must be HTTPS URLs without embedded credentials, query strings, or
+fragments.
+
 The event bus rejects new work after shutdown and drains any accepted event before the SQLite
 memory provider closes. A persistence error is fail-closed: the event is neither delivered nor
 retained for in-process replay. Treat repeated persistence or subscriber-timeout logs as a failed
