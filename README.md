@@ -87,6 +87,22 @@ python -m companion --voice-input
 
 首次启用 `--voice-input` 时，faster-whisper 会加载配置中的本地模型。
 
+启动前建议先运行不会输出凭据内容的结构化自检：
+
+```powershell
+# 本地核心检查
+python -m companion --doctor
+
+# 包含语音依赖、默认麦克风和播放设备
+python -m companion --doctor --voice-input
+
+# 凭据注入后验证远程 LLM/TTS；健康探针不会生成收费语音
+python -m companion --doctor-online --voice-input
+
+# 自动化消费
+python -m companion --doctor-json --voice-input
+```
+
 形象舞台默认关闭。桥接协议、鉴权环境变量和 AIRI 当前适配状态见
 [`docs/avatar_bridge_protocol.md`](docs/avatar_bridge_protocol.md)。在真实舞台扩展完成前，不要把
 `providers.avatar.enabled` 设为 `true`。

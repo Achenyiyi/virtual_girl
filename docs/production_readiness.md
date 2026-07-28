@@ -48,6 +48,8 @@ experience, and fails closed when a required dependency is unavailable.
 - [x] Readiness fails for invalid credentials, unavailable required providers, or database errors.
 - [x] No-data telemetry reports `unknown`, never `passing`.
 - [x] Runtime dependencies are locked and reproducible; package and clean-machine install pass.
+- [x] A credential-safe deployment doctor validates configuration, SQLite integrity, local voice
+      modules/devices, and optionally remote provider health with deterministic exit codes.
 - [ ] Unit, integration, recovery, security, and end-to-end suites pass in CI.
 - [x] Ruff and mypy pass for production code; critical production paths meet agreed coverage.
 
@@ -85,15 +87,22 @@ remains disabled by default because foreground metadata has privacy implications
 remain unavailable until a separate OS-isolated provider is designed and validated. See
 `docs/windows_readonly_actions.md`.
 
+Deployment status: configuration values that were previously documentary-only (memory path,
+voice capture parameters, quiet hours, proactive budgets/cooldowns, Azure region, and event-log
+retention) are now wired into runtime construction. Unsupported advertised providers were removed
+from the default YAML and unsafe or unimplemented configuration fails closed. The new `--doctor`
+family provides human and JSON preflight reports without exposing credential values; online Azure
+health uses the read-only voices-list endpoint. See `docs/deployment_preflight.md`.
+
 The action and perception features must remain disabled until their corresponding gates pass.
 
 ## Verification evidence (2026-07-29)
 
 - `ruff check companion tests`: passed.
-- `mypy companion`: passed in strict mode for 64 source files.
-- `pytest -q --cov=companion --cov-fail-under=70`: 177 tests passed with 74.52% total
+- `mypy companion`: passed in strict mode for 65 source files.
+- `pytest -q --cov=companion --cov-fail-under=70`: 199 tests passed with 74.69% total
   coverage; the Windows read-only provider is 92%, WebSocket avatar provider 81%, voice pipeline
-  83%, action service 80%, and the action audit store 94%.
+  84%, action service 80%, and the action audit store 94%.
 - The avatar integration test exercised a real loopback WebSocket server: authenticated version
   negotiation, health, model list/validate/load, full state mapping, timeout, disconnect,
   reconnect, and shutdown all passed. Orchestrator readiness fails for an unhealthy configured
@@ -101,6 +110,10 @@ The action and perception features must remain disabled until their correspondin
 - A real Win32 integration test executed the capability-confined system-status action and verified
   the persisted SQLite hash chain. Boundary tests proved `open_app`, parameter injection, forged
   risk/method values, and unknown actions cannot reach provider execution.
+- On the target machine's isolated release environment, doctor found faster-whisper, NumPy,
+  sounddevice, a usable default microphone, and a usable default output device. It currently fails
+  only the required DeepSeek and Azure credential checks, as expected before rotated credentials
+  are injected.
 - `python -m build`: wheel and sdist built successfully; the wheel contains the MIT license and
   contains no database, test credential, or key-named file.
 - `pip-audit -r requirements.lock`: no known vulnerabilities in the locked runtime and voice
@@ -122,8 +135,9 @@ The action and perception features must remain disabled until their correspondin
 
 - `deepseek_key.txt` is ignored and never read by the application, but the credential it once
   contained must be revoked/rotated outside this repository before release.
-- No real-device test has yet proven microphone capture, faster-whisper model loading, Azure TTS,
-  gapless playback, and barge-in latency together on the target Windows machine.
+- Local voice modules and default devices now pass doctor in the isolated release environment, but
+  no credential-backed test has yet proven microphone capture, faster-whisper model loading,
+  Azure streaming TTS, gapless playback, and barge-in latency together.
 - The Python avatar bridge is complete and locally integration-tested, but AIRI still needs a thin
   stage extension implementing the documented contract, followed by a real Live2D/VRM rendering
   and emotion-synchronization test. AIRI's currently inspected remote-plugin bootstrap is not a

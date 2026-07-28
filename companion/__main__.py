@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from companion.audio.microphone import MicConfig, MicrophoneCapture, VoiceChatMode
+from companion.audio.microphone import MicrophoneCapture, VoiceChatMode
 from companion.audio.player import SoundDeviceAudioOutput, SystemAudioOutput
 from companion.config_loader import RuntimeConfig
 from companion.core.event_bus import EventBus
@@ -26,7 +26,8 @@ from companion.core.expression_mapper import ExpressionMapper
 from companion.core.orchestrator import CompanionOrchestrator
 from companion.core.policy_gate import PolicyGate
 from companion.core.state_manager import StateManager
-from companion.memory.memory_service import MemoryService, MemoryServiceConfig
+from companion.diagnostics import render_diagnostic_report, run_diagnostics
+from companion.memory.memory_service import MemoryService
 from companion.providers.base import ProviderHealth
 from companion.providers.implementations.cloud_llm import CloudLLMProvider
 from companion.providers.implementations.cloud_tts import CloudTTSProvider
@@ -116,8 +117,8 @@ class CompanionApp:
 
         # Core components
         self._state_mgr = StateManager()
-        self._bus = EventBus(name="main", max_log_size=100_000)
-        self._policy = PolicyGate()
+        self._bus = EventBus(name="main", max_log_size=config.event_log_retention)
+        self._policy = PolicyGate(config.policy_config)
 
         # Apply identity from config
         if config.identity:
@@ -125,13 +126,7 @@ class CompanionApp:
                 self._state_mgr.update_identity(config.identity)
 
         # Provider configuration
-        self._memory = MemoryService(
-            MemoryServiceConfig(
-                db_path=os.environ.get("COMPANION_DB_PATH", "./data/companion_memory.db"),
-                wal_mode=True,
-                fts_enabled=True,
-            )
-        )
+        self._memory = MemoryService(config.effective_memory_config())
         self._bus.set_persistence_handler(self._memory.append_domain_event)
 
         llm_config = config.llm_config
@@ -210,6 +205,7 @@ class CompanionApp:
             tts=self._tts,
             audio_output=self._voice_audio_output,
             runtime=self._orchestrator,
+            config=config.voice_pipeline_config,
         )
 
     @property
@@ -292,7 +288,11 @@ class CompanionApp:
                 tts_req = TTSRequest(
                     text=result["response_text"],
                     turn_id=result.get("turn_id", "tts"),
-                    sample_rate=24000,
+                    sample_rate=(
+                        self._config.tts_config.sample_rate
+                        if self._config.tts_config
+                        else 24000
+                    ),
                 )
                 tts_chunk = await self._tts.synthesize(tts_req)
                 if tts_chunk.audio_bytes:
@@ -336,7 +336,16 @@ async def async_main(args: argparse.Namespace) -> int:
     """Async main entry point."""
     # Load config
     config = RuntimeConfig.from_yaml(args.config)
-    setup_logging(config.log_level, config.log_file)
+    if args.doctor or args.doctor_online or args.doctor_json:
+        report = await run_diagnostics(
+            config,
+            require_voice=args.voice_input or args.voice,
+            online=args.doctor_online,
+        )
+        print(report.to_json() if args.doctor_json else render_diagnostic_report(report))
+        return report.exit_code
+
+    setup_logging(args.log_level or config.log_level, config.log_file)
 
     app = CompanionApp(config)
     ready = await app.start()
@@ -351,7 +360,7 @@ async def async_main(args: argparse.Namespace) -> int:
         if not await app.start_voice_mode():
             await app.stop()
             return 1
-        microphone = MicrophoneCapture(MicConfig(sample_rate=16_000))
+        microphone = MicrophoneCapture(config.microphone_config)
         if not await microphone.start():
             print(f"{Colors.RED}✗ 麦克风不可用。{Colors.RESET}")
             await app.stop()
@@ -511,9 +520,24 @@ def main() -> None:
     parser.add_argument(
         "--log-level",
         type=str,
-        default="INFO",
+        default=None,
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         help="日志级别 (默认: INFO)",
+    )
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="运行本地上线前自检，不启动伴侣",
+    )
+    parser.add_argument(
+        "--doctor-online",
+        action="store_true",
+        help="在 doctor 中额外验证已启用的远程 Provider",
+    )
+    parser.add_argument(
+        "--doctor-json",
+        action="store_true",
+        help="以 JSON 输出 doctor 结果，便于自动化验收",
     )
     parser.add_argument(
         "--voice",
@@ -529,7 +553,12 @@ def main() -> None:
     )
 
     args = parser.parse_args()
-    sys.exit(asyncio.run(async_main(args)))
+    try:
+        exit_code = asyncio.run(async_main(args))
+    except (OSError, ValueError) as exc:
+        print(f"Configuration error: {exc}", file=sys.stderr)
+        exit_code = 2
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

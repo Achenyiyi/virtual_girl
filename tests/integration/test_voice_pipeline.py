@@ -9,7 +9,7 @@ import pytest
 from companion.audio.player import PlaybackResult
 from companion.core.event_bus import EventBus
 from companion.core.orchestrator import CompanionOrchestrator
-from companion.core.policy_gate import PolicyGate
+from companion.core.policy_gate import PolicyGate, PolicyGateConfig
 from companion.core.state_manager import StateManager
 from companion.memory.memory_service import MemoryService, MemoryServiceConfig
 from companion.services.voice_pipeline import VoicePipeline, VoicePipelineConfig
@@ -83,6 +83,31 @@ class TestVoicePipelineIntegration:
         response = await pipeline.process_text_input("你好")
         assert response is not None
         assert len(response) > 0
+
+    @pytest.mark.asyncio
+    async def test_configured_asr_language_reaches_provider(self):
+        class CapturingASR(MockASRProvider):
+            request = None
+
+            async def transcribe_batch(self, request):
+                self.request = request
+                return await super().transcribe_batch(request)
+
+        asr = CapturingASR()
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=EventBus("language-test"),
+            policy=PolicyGate(PolicyGateConfig(quiet_hours_enabled=False)),
+            asr=asr,
+            llm=MockLLMProvider(),
+            tts=MockTTSProvider(),
+            config=VoicePipelineConfig(language="en"),
+        )
+
+        await voice.process_audio_input(b"\x00\x00" * 160)
+
+        assert asr.request is not None
+        assert asr.request.language == "en"
 
     @pytest.mark.asyncio
     async def test_interrupt_current_turn(self, pipeline):

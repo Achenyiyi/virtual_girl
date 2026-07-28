@@ -72,6 +72,7 @@ class VoicePipelineConfig:
     """Configuration for the voice pipeline."""
 
     sample_rate: int = 16000
+    language: str = "zh"
     pre_roll_ms: int = 400  # Pre-roll buffer before VAD trigger
     max_turn_duration_ms: int = 30_000  # Max turn before timeout
     echo_cancellation: bool = True
@@ -84,6 +85,16 @@ class VoicePipelineConfig:
 
     # Debug
     log_latency_breakdown: bool = True
+
+    def __post_init__(self) -> None:
+        if self.sample_rate not in {8000, 16000, 24000, 48000}:
+            raise ValueError("voice sample_rate is unsupported")
+        if self.language not in {"zh", "en", "auto"}:
+            raise ValueError("voice language must be zh, en, or auto")
+        if not 0 <= self.pre_roll_ms <= 2000:
+            raise ValueError("voice pre_roll_ms must be between 0 and 2000")
+        if self.max_turn_duration_ms <= 0:
+            raise ValueError("max_turn_duration_ms must be positive")
 
 
 @dataclass
@@ -211,6 +222,7 @@ class VoicePipeline:
                     ASRBatchRequest(
                         audio_bytes=audio_bytes,
                         sample_rate=self._config.sample_rate,
+                        language=self._config.language,
                         turn_id=turn.turn_id,
                     )
                 ),

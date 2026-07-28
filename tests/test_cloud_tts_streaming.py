@@ -11,8 +11,8 @@ from companion.providers.tts import TTSRequest
 
 class ChunkedAudioStream(httpx.AsyncByteStream):
     async def __aiter__(self):
-        yield b"a" * 20
-        yield b"b" * 10
+        yield b"a" * 4800
+        yield b"b" * 2400
 
 
 @pytest.mark.asyncio
@@ -20,7 +20,7 @@ async def test_streaming_tts_yields_before_final_chunk() -> None:
     provider = CloudTTSProvider(
         CloudTTSConfig(
             api_key="test-key-long-enough",
-            sample_rate=100,
+            sample_rate=24000,
         )
     )
     provider._client = httpx.AsyncClient(
@@ -32,7 +32,7 @@ async def test_streaming_tts_yields_before_final_chunk() -> None:
         chunks = [
             chunk
             async for chunk in provider.synthesize_stream(
-                TTSRequest(text="你好", turn_id="turn_stream", sample_rate=100)
+                TTSRequest(text="你好", turn_id="turn_stream", sample_rate=24000)
             )
         ]
     finally:
@@ -42,7 +42,7 @@ async def test_streaming_tts_yields_before_final_chunk() -> None:
     assert chunks[0].is_first
     assert not chunks[0].is_final
     assert chunks[-1].is_final
-    assert b"".join(chunk.audio_bytes for chunk in chunks) == b"a" * 20 + b"b" * 10
+    assert b"".join(chunk.audio_bytes for chunk in chunks) == b"a" * 4800 + b"b" * 2400
     assert chunks[0].text == "你好"
     assert chunks[1].text == ""
 

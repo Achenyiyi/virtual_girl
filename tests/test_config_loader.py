@@ -13,6 +13,8 @@ from companion.providers.implementations.websocket_avatar import WebSocketAvatar
 
 def test_packaged_default_config_is_cwd_independent(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
+    runtime_root = tmp_path / "runtime"
+    monkeypatch.setenv("COMPANION_RUNTIME_DIR", str(runtime_root))
 
     config = RuntimeConfig.from_yaml()
 
@@ -22,13 +24,34 @@ def test_packaged_default_config_is_cwd_independent(tmp_path, monkeypatch) -> No
     assert config.llm_config is not None
     assert config.llm_config.api_key_env == "DEEPSEEK_API_KEY"
     assert config.llm_config.model == "deepseek-chat"
+    assert config.llm_config.max_retries == 3
+    assert config.tts_config is not None
+    assert config.tts_config.region == "eastasia"
+    assert config.memory_config is not None
+    assert config.memory_config.db_path == str(
+        (runtime_root / "data" / "companion_memory.db").resolve()
+    )
+    assert config.log_file == str((runtime_root / "data" / "companion.log").resolve())
+    assert config.microphone_config.sample_rate == 16000
+    assert config.microphone_config.pre_roll_buffer_ms == 400
+    assert config.voice_pipeline_config.language == "zh"
+    assert config.policy_config.level_4_per_hour == 1
+    assert config.policy_config.level_4_cooldown_seconds == 1800
+    assert config.event_log_retention == 100_000
 
 
-def test_missing_explicit_config_falls_back_without_using_cwd(tmp_path) -> None:
-    config = RuntimeConfig.from_yaml(tmp_path / "missing.yaml")
+def test_missing_explicit_config_fails_closed(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        RuntimeConfig.from_yaml(tmp_path / "missing.yaml")
 
-    assert config.identity is None
-    assert config.llm_config is None
+
+def test_memory_environment_override_is_applied_at_runtime(tmp_path, monkeypatch) -> None:
+    override = tmp_path / "override.db"
+    monkeypatch.setenv("COMPANION_DB_PATH", str(override))
+
+    config = RuntimeConfig.from_yaml()
+
+    assert config.effective_memory_config().db_path == str(override)
 
 
 def test_repository_config_template_matches_packaged_default() -> None:
@@ -110,7 +133,35 @@ def test_enabled_windows_readonly_actions_require_safe_boundary(tmp_path) -> Non
     assert config.action_service_config.sandbox_enabled
     assert config.action_service_config.require_durable_audit
     assert not config.action_service_config.allow_reversible_low_auto
-    assert config.action_audit_db_path == audit_path.as_posix()
+    assert config.action_audit_db_path == str(audit_path.resolve())
+
+
+def test_explicit_config_relative_data_paths_resolve_from_config_directory(tmp_path) -> None:
+    config_dir = tmp_path / "deployment"
+    config_dir.mkdir()
+    path = config_dir / "companion.yaml"
+    path.write_text(
+        """providers:
+  memory:
+    type: sqlite
+    db_path: data/memory.db
+  action:
+    enabled: true
+    type: windows_readonly
+    sandbox_enabled: true
+    audit_db_path: data/audit.db
+dev:
+  log_file: logs/companion.log
+""",
+        encoding="utf-8",
+    )
+
+    config = RuntimeConfig.from_yaml(path)
+
+    assert config.memory_config is not None
+    assert config.memory_config.db_path == str((config_dir / "data/memory.db").resolve())
+    assert config.action_audit_db_path == str((config_dir / "data/audit.db").resolve())
+    assert config.log_file == str((config_dir / "logs/companion.log").resolve())
 
 
 @pytest.mark.parametrize(
@@ -128,6 +179,48 @@ def test_enabled_actions_reject_unsafe_configuration(tmp_path, action_yaml) -> N
         f"providers:\n  action:\n    enabled: true\n    {indented}\n",
         encoding="utf-8",
     )
+
+    with pytest.raises(ValueError):
+        RuntimeConfig.from_yaml(path)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"providers": {"llm": {"type": "local"}}},
+        {"providers": {"llm": {"type": "cloud", "cloud": {"api_key": "forbidden"}}}},
+        {"providers": {"asr": {"batch": {"provider": "unknown"}}}},
+        {"providers": {"perception": {"enabled": True}}},
+        {"telemetry": {"enabled": True}},
+    ],
+)
+def test_unimplemented_or_unsafe_configuration_fails_closed(tmp_path, payload) -> None:
+    path = tmp_path / "unsupported.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        RuntimeConfig.from_yaml(path)
+
+
+def test_non_mapping_yaml_is_rejected(tmp_path) -> None:
+    path = tmp_path / "invalid-root.yaml"
+    path.write_text("- not\n- a\n- mapping\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="mapping"):
+        RuntimeConfig.from_yaml(path)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"providers": []},
+        {"providers": {"avatar": {"enabled": "false"}}},
+        {"policy": {"quiet_hours": {"start": "25:00"}}},
+    ],
+)
+def test_ambiguous_nested_configuration_is_rejected(tmp_path, payload) -> None:
+    path = tmp_path / "ambiguous.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
 
     with pytest.raises(ValueError):
         RuntimeConfig.from_yaml(path)

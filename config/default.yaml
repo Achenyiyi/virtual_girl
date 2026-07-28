@@ -32,51 +32,42 @@ identity:
 # ── Providers ───────────────────────────────────────────────────────────
 providers:
   llm:
-    type: "cloud"  # cloud | local | fallback
+    type: "cloud"
     cloud:
       provider: "openai_compatible"  # DeepSeek uses OpenAI-compatible API
       model: "deepseek-chat"
       api_key_env: "DEEPSEEK_API_KEY"  # pragma: allowlist secret
       base_url: "https://api.deepseek.com/v1/chat/completions"
-      max_tokens: 4096
-      temperature: 0.7
-    local:
-      provider: "ollama"
-      model: "qwen2.5:7b"
-      base_url: "http://localhost:11434"
-      max_tokens: 2048
-      temperature: 0.7
-    fallback_chain:
-      - "cloud"
-      - "local"
+      max_retries: 3
+      retry_delay_seconds: 1.0
+      timeout_seconds: 30.0
 
   tts:
     type: "cloud"
     providers:
-      cosyvoice:
-        enabled: false
-        endpoint: "http://localhost:5000"
       cloud:
         enabled: true
         provider: "azure"
         voice: "zh-CN-XiaoxiaoNeural"
-    default_voice: "default"
+        api_key_env: "AZURE_SPEECH_KEY"  # pragma: allowlist secret
+        region: "eastasia"
+        timeout_seconds: 15.0
     sample_rate: 24000
 
   asr:
-    streaming:
-      provider: "cloud"
+    capture:
       language: "zh"
       sample_rate: 16000
       pre_roll_ms: 400
+      max_speech_duration_ms: 30000
+      silence_duration_ms: 800
+      max_turn_duration_ms: 30000
     batch:
       provider: "faster-whisper"
       model: "base"
-      language: "zh"
       device: "auto"
       compute_type: "default"
       cpu_threads: 0
-    fallback_to_batch: true
 
   memory:
     type: "sqlite"
@@ -102,11 +93,6 @@ providers:
     max_concurrent_actions: 1
     max_text_characters: 4096
 
-  perception:
-    enabled: false
-    monitor_app_focus: false
-    monitor_activity: false
-
 # ── Policy ──────────────────────────────────────────────────────────────
 policy:
   quiet_hours:
@@ -126,21 +112,8 @@ policy:
     level_3: 300
     level_4: 1800
 
-  action_policy:
-    readonly: "auto_approve"
-    reversible_low: "auto_approve"
-    reversible_high: "confirm"
-    irreversible: "confirm_with_preview"
-
-# ── Telemetry ───────────────────────────────────────────────────────────
-telemetry:
-  enabled: false
-  latency_tracking: true
-  export_interval_seconds: 60
-
 # ── Development ─────────────────────────────────────────────────────────
 dev:
   log_level: "INFO"
   log_file: "./data/companion.log"
   event_log_retention: 100000
-  enable_debug_endpoints: false

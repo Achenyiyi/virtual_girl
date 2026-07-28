@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
@@ -39,6 +40,18 @@ class CloudTTSConfig:
     sample_rate: int = 24000
     timeout_seconds: float = 15.0
     default_style: str = "general"  # SSML style
+
+    def __post_init__(self) -> None:
+        if self.provider != "azure":
+            raise ValueError("only Azure cloud TTS is currently implemented")
+        if not re.fullmatch(r"[A-Za-z0-9-]+", self.voice):
+            raise ValueError("Azure voice name contains unsupported characters")
+        if not re.fullmatch(r"[a-z0-9-]+", self.region):
+            raise ValueError("Azure region contains unsupported characters")
+        if self.sample_rate != 24000:
+            raise ValueError("Azure raw PCM output currently requires a 24000 Hz sample rate")
+        if self.timeout_seconds <= 0:
+            raise ValueError("TTS timeout_seconds must be positive")
 
     def get_api_key(self) -> str:
         return self.api_key or os.environ.get(self.api_key_env, "")
@@ -279,14 +292,30 @@ class CloudTTSProvider(TTSProvider):
         )
 
     async def health_check(self) -> ProviderHealth:
-        """Quick TTS health check: synthesize a one-second test phrase."""
+        """Validate the Azure credential and endpoint without synthesizing audio."""
         api_key = self._config.get_api_key()
         if not api_key:
             return ProviderHealth.UNHEALTHY
         try:
-            request = TTSRequest(text="测试", turn_id="health_check")
-            chunk = await self.synthesize(request)
-            return ProviderHealth.HEALTHY if chunk.audio_bytes else ProviderHealth.DEGRADED
+            client = await self._get_client()
+            url = (
+                f"https://{self._config.region}.tts.speech.microsoft.com/"
+                "cognitiveservices/voices/list"
+            )
+            response = await client.get(
+                url,
+                headers={"Ocp-Apim-Subscription-Key": api_key},
+                timeout=5.0,
+            )
+            if 200 <= response.status_code < 300:
+                return ProviderHealth.HEALTHY
+            if response.status_code == 429 or 500 <= response.status_code < 600:
+                return ProviderHealth.DEGRADED
+            return ProviderHealth.UNHEALTHY
+        except httpx.ConnectError:
+            return ProviderHealth.UNHEALTHY
+        except httpx.TimeoutException:
+            return ProviderHealth.DEGRADED
         except Exception:
             return ProviderHealth.UNHEALTHY
 

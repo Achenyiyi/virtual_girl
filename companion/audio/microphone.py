@@ -34,6 +34,18 @@ class MicConfig:
     max_speech_duration_ms: int = 30_000  # Auto-stop after 30s
     silence_duration_ms: int = 800  # Silence before auto-end of speech
 
+    def __post_init__(self) -> None:
+        if self.sample_rate not in {8000, 16000, 24000, 48000}:
+            raise ValueError("microphone sample_rate is unsupported")
+        if self.channels != 1:
+            raise ValueError("only mono microphone capture is supported")
+        if self.chunk_duration_ms not in {10, 20, 30}:
+            raise ValueError("chunk_duration_ms must be 10, 20, or 30")
+        if not 0 <= self.pre_roll_buffer_ms <= 2000:
+            raise ValueError("pre_roll_buffer_ms must be between 0 and 2000")
+        if self.max_speech_duration_ms <= 0 or self.silence_duration_ms <= 0:
+            raise ValueError("microphone duration limits must be positive")
+
 
 @dataclass
 class MicState:

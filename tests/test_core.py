@@ -13,7 +13,7 @@ from __future__ import annotations
 import pytest
 
 from companion.core.event_bus import EventBus
-from companion.core.policy_gate import PolicyGate, ProactiveLevel
+from companion.core.policy_gate import PolicyGate, PolicyGateConfig, ProactiveLevel
 from companion.core.state_manager import StateManager
 from companion.events.base import EventHeader
 from companion.events.conversation import ConversationTurnStartedEvent
@@ -126,6 +126,16 @@ class TestPolicyGate:
         decision = gate.evaluate_proactive(ProactiveLevel.LEVEL_1_SUBTLE)
         # Level 1 (subtle) should generally be allowed
         assert decision.level >= ProactiveLevel.LEVEL_0_IDLE
+
+    def test_configured_hourly_budget_is_authoritative(self):
+        gate = PolicyGate(
+            PolicyGateConfig(quiet_hours_enabled=False, level_1_per_hour=0)
+        )
+
+        decision = gate.evaluate_proactive(ProactiveLevel.LEVEL_1_SUBTLE)
+
+        assert not decision.allowed
+        assert "Hourly budget exhausted" in decision.reason
 
     def test_level_4_requires_high_utility(self):
         gate = self._make_gate()

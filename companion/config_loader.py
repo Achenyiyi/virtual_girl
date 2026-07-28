@@ -8,13 +8,18 @@ orchestrator and all providers.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+import os
+import re
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml  # type: ignore[import-untyped]
 
+from companion.audio.microphone import MicConfig
+from companion.core.policy_gate import PolicyGateConfig
+from companion.memory.memory_service import MemoryServiceConfig
 from companion.providers.implementations.cloud_llm import CloudLLMConfig
 from companion.providers.implementations.cloud_tts import CloudTTSConfig
 from companion.providers.implementations.faster_whisper_asr import FasterWhisperConfig
@@ -24,6 +29,7 @@ from companion.providers.implementations.windows_readonly_action import (
 )
 from companion.schemas.identity import IdentityCore
 from companion.services.action_service import ActionServiceConfig
+from companion.services.voice_pipeline import VoicePipelineConfig
 
 logger = logging.getLogger(__name__)
 
@@ -45,22 +51,28 @@ class RuntimeConfig:
     action_provider_config: WindowsReadOnlyActionConfig | None = None
     action_service_config: ActionServiceConfig | None = None
     action_audit_db_path: str = ""
+    memory_config: MemoryServiceConfig | None = None
+    microphone_config: MicConfig = field(default_factory=MicConfig)
+    voice_pipeline_config: VoicePipelineConfig = field(default_factory=VoicePipelineConfig)
 
     # Policy
-    quiet_hours_enabled: bool = True
-    quiet_hours_start: int = 23
-    quiet_hours_end: int = 7
-    proactive_level_1_per_hour: int = 30
-    proactive_level_2_per_hour: int = 10
-    proactive_level_3_per_hour: int = 3
-    proactive_level_4_per_hour: int = 1
+    policy_config: PolicyGateConfig = field(default_factory=PolicyGateConfig)
 
     # Dev
     log_level: str = "INFO"
     log_file: str = ""
+    event_log_retention: int = 100_000
 
     # Raw config for inspection
     raw: dict[str, Any] = field(default_factory=dict)
+
+    def effective_memory_config(self) -> MemoryServiceConfig:
+        """Return the configured memory settings with the documented env override."""
+        config = self.memory_config or MemoryServiceConfig(
+            db_path="./data/companion_memory.db"
+        )
+        override = os.environ.get("COMPANION_DB_PATH", "").strip()
+        return replace(config, db_path=override) if override else config
 
     @classmethod
     def from_yaml(cls, path: Path | str | None = None) -> RuntimeConfig:
@@ -69,18 +81,29 @@ class RuntimeConfig:
         Environment variables override YAML values where applicable
         (e.g. ANTHROPIC_API_KEY overrides the api_key_env field).
         """
-        config_path = Path(path) if path else DEFAULT_CONFIG_PATH
+        explicit_path = path is not None
+        config_path = (
+            Path(path).expanduser().resolve()
+            if path is not None
+            else DEFAULT_CONFIG_PATH
+        )
         if not config_path.exists():
-            logger.warning("Config file not found at %s, using defaults", config_path)
-            return cls()
+            raise FileNotFoundError(f"Configuration file does not exist: {config_path}")
+        runtime_root = _runtime_root(config_path, explicit=explicit_path)
 
-        with open(config_path, encoding="utf-8") as f:
-            raw: dict[str, Any] = yaml.safe_load(f) or {}
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                loaded = yaml.safe_load(f) or {}
+        except yaml.YAMLError as exc:
+            raise ValueError(f"Invalid YAML configuration: {config_path}") from exc
+        if not isinstance(loaded, dict):
+            raise ValueError("Configuration root must be a YAML mapping")
+        raw: dict[str, Any] = loaded
 
         cfg = cls(raw=raw)
 
         # ── Identity ──────────────────────────────────────────────────
-        identity_raw = raw.get("identity", {})
+        identity_raw = _section(raw, "identity")
         cfg.identity = IdentityCore(
             version=1,
             updated_at=datetime.now(UTC),
@@ -101,9 +124,13 @@ class RuntimeConfig:
         )
 
         # ── LLM Provider ──────────────────────────────────────────────
-        providers_raw = raw.get("providers", {})
-        llm_raw = providers_raw.get("llm", {})
-        llm_cloud = llm_raw.get("cloud", {})
+        providers_raw = _section(raw, "providers")
+        llm_raw = _section(providers_raw, "llm")
+        if llm_raw.get("type", "cloud") != "cloud":
+            raise ValueError("only the cloud LLM provider is currently implemented")
+        llm_cloud = _section(llm_raw, "cloud")
+        if llm_cloud.get("api_key") or llm_cloud.get("api_key_file"):
+            raise ValueError("YAML credentials are forbidden; configure api_key_env instead")
         cfg.llm_config = CloudLLMConfig(
             provider=llm_cloud.get("provider", "anthropic"),
             model=llm_cloud.get("model", "claude-sonnet-5"),
@@ -111,26 +138,31 @@ class RuntimeConfig:
             api_key_env=llm_cloud.get("api_key_env", ""),
             api_key_file=llm_cloud.get("api_key_file", ""),
             base_url=llm_cloud.get("base_url", ""),
-            max_retries=3,
-            timeout_seconds=30.0,
+            max_retries=int(llm_cloud.get("max_retries", 3)),
+            retry_delay_seconds=float(llm_cloud.get("retry_delay_seconds", 1.0)),
+            timeout_seconds=float(llm_cloud.get("timeout_seconds", 30.0)),
         )
 
         # ── TTS Provider ──────────────────────────────────────────────
-        tts_raw = providers_raw.get("tts", {})
-        tts_cloud = tts_raw.get("providers", {}).get("cloud", {})
-        cfg.tts_config = CloudTTSConfig(
-            provider=tts_cloud.get("provider", "azure"),
-            voice=tts_cloud.get("voice", "zh-CN-XiaoxiaoNeural"),
-            api_key_env=tts_cloud.get("api_key_env", "AZURE_SPEECH_KEY")
-            if isinstance(tts_cloud, dict)
-            else "AZURE_SPEECH_KEY",
-            region="eastasia",
-            sample_rate=tts_raw.get("sample_rate", 24000),
-        )
+        tts_raw = _section(providers_raw, "tts")
+        if tts_raw.get("type", "cloud") != "cloud":
+            raise ValueError("only the cloud TTS provider is currently implemented")
+        tts_providers = _section(tts_raw, "providers")
+        tts_cloud = _section(tts_providers, "cloud")
+        if _boolean(tts_cloud.get("enabled", True), "providers.tts.providers.cloud.enabled"):
+            cfg.tts_config = CloudTTSConfig(
+                provider=tts_cloud.get("provider", "azure"),
+                voice=tts_cloud.get("voice", "zh-CN-XiaoxiaoNeural"),
+                api_key_env=tts_cloud.get("api_key_env", "AZURE_SPEECH_KEY"),
+                region=tts_cloud.get("region", "eastasia"),
+                sample_rate=int(tts_raw.get("sample_rate", 24000)),
+                timeout_seconds=float(tts_cloud.get("timeout_seconds", 15.0)),
+            )
 
         # ── ASR Provider ──────────────────────────────────────────────
-        asr_raw = providers_raw.get("asr", {})
-        asr_batch = asr_raw.get("batch", {})
+        asr_raw = _section(providers_raw, "asr")
+        capture_raw = _section(asr_raw, "capture")
+        asr_batch = _section(asr_raw, "batch")
         if asr_batch.get("provider", "faster-whisper") == "faster-whisper":
             cfg.asr_config = FasterWhisperConfig(
                 model_size=asr_batch.get("model", "base"),
@@ -138,10 +170,41 @@ class RuntimeConfig:
                 compute_type=asr_batch.get("compute_type", "default"),
                 cpu_threads=int(asr_batch.get("cpu_threads", 0)),
             )
+        elif asr_batch:
+            raise ValueError("only faster-whisper batch ASR is currently implemented")
+        voice_sample_rate = int(capture_raw.get("sample_rate", 16000))
+        voice_language = str(capture_raw.get("language", "zh"))
+        pre_roll_ms = int(capture_raw.get("pre_roll_ms", 400))
+        cfg.microphone_config = MicConfig(
+            sample_rate=voice_sample_rate,
+            pre_roll_buffer_ms=pre_roll_ms,
+            max_speech_duration_ms=int(capture_raw.get("max_speech_duration_ms", 30_000)),
+            silence_duration_ms=int(capture_raw.get("silence_duration_ms", 800)),
+        )
+        cfg.voice_pipeline_config = VoicePipelineConfig(
+            sample_rate=voice_sample_rate,
+            language=voice_language,
+            pre_roll_ms=pre_roll_ms,
+            max_turn_duration_ms=int(capture_raw.get("max_turn_duration_ms", 30_000)),
+        )
+
+        # ── Memory ────────────────────────────────────────────────────
+        memory_raw = _section(providers_raw, "memory")
+        if memory_raw.get("type", "sqlite") != "sqlite":
+            raise ValueError("only SQLite memory is currently implemented")
+        cfg.memory_config = MemoryServiceConfig(
+            db_path=_resolve_runtime_path(
+                memory_raw.get("db_path", "./data/companion_memory.db"), runtime_root
+            ),
+            wal_mode=_boolean(memory_raw.get("wal_mode", True), "providers.memory.wal_mode"),
+            fts_enabled=_boolean(
+                memory_raw.get("fts_enabled", True), "providers.memory.fts_enabled"
+            ),
+        )
 
         # ── Avatar bridge ────────────────────────────────────────────
-        avatar_raw = providers_raw.get("avatar", {})
-        if avatar_raw.get("enabled", False):
+        avatar_raw = _section(providers_raw, "avatar")
+        if _boolean(avatar_raw.get("enabled", False), "providers.avatar.enabled"):
             if avatar_raw.get("type") != "websocket_bridge":
                 raise ValueError("enabled avatar provider type must be 'websocket_bridge'")
             cfg.avatar_config = WebSocketAvatarConfig(
@@ -157,11 +220,14 @@ class RuntimeConfig:
             )
 
         # ── Windows read-only actions ─────────────────────────────────
-        action_raw = providers_raw.get("action", {})
-        if action_raw.get("enabled", False):
+        action_raw = _section(providers_raw, "action")
+        if _boolean(action_raw.get("enabled", False), "providers.action.enabled"):
             if action_raw.get("type") != "windows_readonly":
                 raise ValueError("enabled action provider type must be 'windows_readonly'")
-            if not action_raw.get("sandbox_enabled", True):
+            if not _boolean(
+                action_raw.get("sandbox_enabled", True),
+                "providers.action.sandbox_enabled",
+            ):
                 raise ValueError("enabled actions require sandbox_enabled")
             audit_db_path = str(action_raw.get("audit_db_path", "")).strip()
             if not audit_db_path:
@@ -181,31 +247,82 @@ class RuntimeConfig:
                 allow_reversible_high_auto=False,
                 allow_irreversible_auto=False,
             )
-            cfg.action_audit_db_path = audit_db_path
+            cfg.action_audit_db_path = _resolve_runtime_path(audit_db_path, runtime_root)
 
         # ── Policy ────────────────────────────────────────────────────
-        policy_raw = raw.get("policy", {})
-        quiet = policy_raw.get("quiet_hours", {})
-        cfg.quiet_hours_enabled = quiet.get("enabled", True)
-        cfg.quiet_hours_start = _parse_hour(quiet.get("start", "23:00"))
-        cfg.quiet_hours_end = _parse_hour(quiet.get("end", "07:00"))
-        budget = policy_raw.get("proactive_budget", {})
-        cfg.proactive_level_1_per_hour = budget.get("level_1_per_hour", 30)
-        cfg.proactive_level_2_per_hour = budget.get("level_2_per_hour", 10)
-        cfg.proactive_level_3_per_hour = budget.get("level_3_per_hour", 3)
-        cfg.proactive_level_4_per_hour = budget.get("level_4_per_hour", 1)
+        policy_raw = _section(raw, "policy")
+        quiet = _section(policy_raw, "quiet_hours")
+        budget = _section(policy_raw, "proactive_budget")
+        cooldown = _section(policy_raw, "cooldown_seconds")
+        cfg.policy_config = PolicyGateConfig(
+            quiet_hours_enabled=_boolean(quiet.get("enabled", True), "policy.quiet_hours.enabled"),
+            quiet_hours_start_hour=_parse_hour(quiet.get("start", "23:00")),
+            quiet_hours_end_hour=_parse_hour(quiet.get("end", "07:00")),
+            level_1_per_hour=int(budget.get("level_1_per_hour", 30)),
+            level_2_per_hour=int(budget.get("level_2_per_hour", 10)),
+            level_3_per_hour=int(budget.get("level_3_per_hour", 3)),
+            level_4_per_hour=int(budget.get("level_4_per_hour", 1)),
+            level_1_cooldown_seconds=float(cooldown.get("level_1", 5)),
+            level_2_cooldown_seconds=float(cooldown.get("level_2", 30)),
+            level_3_cooldown_seconds=float(cooldown.get("level_3", 300)),
+            level_4_cooldown_seconds=float(cooldown.get("level_4", 1800)),
+        )
+
+        perception_raw = _section(providers_raw, "perception")
+        if _boolean(perception_raw.get("enabled", False), "providers.perception.enabled"):
+            raise ValueError("perception is not implemented and must remain disabled")
+        telemetry_raw = _section(raw, "telemetry")
+        if _boolean(telemetry_raw.get("enabled", False), "telemetry.enabled"):
+            raise ValueError("telemetry export is not implemented and must remain disabled")
 
         # ── Dev ───────────────────────────────────────────────────────
-        dev_raw = raw.get("dev", {})
+        dev_raw = _section(raw, "dev")
         cfg.log_level = dev_raw.get("log_level", "INFO")
-        cfg.log_file = dev_raw.get("log_file", "")
+        log_file = str(dev_raw.get("log_file", "")).strip()
+        cfg.log_file = _resolve_runtime_path(log_file, runtime_root) if log_file else ""
+        cfg.event_log_retention = int(dev_raw.get("event_log_retention", 100_000))
+        if cfg.event_log_retention < 1000:
+            raise ValueError("event_log_retention must be at least 1000")
 
         return cfg
 
 
-def _parse_hour(hhmm: str) -> int:
+def _parse_hour(hhmm: object) -> int:
     """Parse 'HH:MM' to int hour."""
-    try:
-        return int(hhmm.split(":")[0])
-    except (ValueError, IndexError):
-        return 0
+    if not isinstance(hhmm, str) or not re.fullmatch(r"(?:[01]\d|2[0-3]):[0-5]\d", hhmm):
+        raise ValueError("quiet-hours values must use 24-hour HH:MM format")
+    return int(hhmm[:2])
+
+
+def _section(parent: dict[str, Any], key: str) -> dict[str, Any]:
+    value = parent.get(key, {})
+    if not isinstance(value, dict):
+        raise ValueError(f"Configuration section '{key}' must be a mapping")
+    return value
+
+
+def _boolean(value: object, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"Configuration field '{field_name}' must be true or false")
+    return value
+
+
+def _runtime_root(config_path: Path, *, explicit: bool) -> Path:
+    """Choose a deterministic writable root for relative runtime data paths."""
+    if explicit:
+        return config_path.parent
+    override = os.environ.get("COMPANION_RUNTIME_DIR", "").strip()
+    if override:
+        return Path(override).expanduser().resolve()
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        return Path(local_app_data).resolve() / "VirtualCompanion"
+    return Path.home() / ".virtual-companion"
+
+
+def _resolve_runtime_path(value: object, root: Path) -> str:
+    raw = str(value).strip()
+    if not raw:
+        raise ValueError("runtime path must not be empty")
+    candidate = Path(raw).expanduser()
+    return str(candidate.resolve() if candidate.is_absolute() else (root / candidate).resolve())

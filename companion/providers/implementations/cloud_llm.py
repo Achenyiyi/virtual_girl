@@ -47,6 +47,17 @@ class CloudLLMConfig:
     retry_delay_seconds: float = 1.0
     timeout_seconds: float = 30.0
 
+    def __post_init__(self) -> None:
+        if self.provider not in {"anthropic", "openai", "openai_compatible"}:
+            raise ValueError("unsupported cloud LLM provider")
+        if not self.model.strip():
+            raise ValueError("cloud LLM model must not be empty")
+        if self.max_retries < 1 or self.retry_delay_seconds < 0 or self.timeout_seconds <= 0:
+            raise ValueError("cloud LLM retry and timeout settings are invalid")
+        endpoint = self.get_base_url()
+        if not endpoint or urlsplit(endpoint).scheme != "https":
+            raise ValueError("cloud LLM endpoint must use https://")
+
     def get_api_key(self) -> str:
         """Resolve API key: explicit > env var > file."""
         if self.api_key:

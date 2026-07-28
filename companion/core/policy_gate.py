@@ -61,6 +61,45 @@ class ActionDecision:
     cooldown_until: float = 0.0  # Unix timestamp
 
 
+@dataclass(frozen=True)
+class PolicyGateConfig:
+    """Deterministic proactive-policy limits loaded from runtime configuration."""
+
+    quiet_hours_enabled: bool = True
+    quiet_hours_start_hour: int = 23
+    quiet_hours_end_hour: int = 7
+    level_1_per_hour: int = 30
+    level_2_per_hour: int = 10
+    level_3_per_hour: int = 3
+    level_4_per_hour: int = 1
+    level_1_cooldown_seconds: float = 5.0
+    level_2_cooldown_seconds: float = 30.0
+    level_3_cooldown_seconds: float = 300.0
+    level_4_cooldown_seconds: float = 1800.0
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.quiet_hours_start_hour <= 23:
+            raise ValueError("quiet_hours_start_hour must be between 0 and 23")
+        if not 0 <= self.quiet_hours_end_hour <= 23:
+            raise ValueError("quiet_hours_end_hour must be between 0 and 23")
+        budgets = (
+            self.level_1_per_hour,
+            self.level_2_per_hour,
+            self.level_3_per_hour,
+            self.level_4_per_hour,
+        )
+        if any(value < 0 for value in budgets):
+            raise ValueError("proactive hourly budgets must not be negative")
+        cooldowns = (
+            self.level_1_cooldown_seconds,
+            self.level_2_cooldown_seconds,
+            self.level_3_cooldown_seconds,
+            self.level_4_cooldown_seconds,
+        )
+        if any(value < 0 for value in cooldowns):
+            raise ValueError("proactive cooldowns must not be negative")
+
+
 class PolicyGate:
     """Deterministic policy engine for proactive behavior and action approval.
 
@@ -68,27 +107,28 @@ class PolicyGate:
     LLM judgment — it uses configurable thresholds and counts.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, config: PolicyGateConfig | None = None) -> None:
+        config = config or PolicyGateConfig()
         # Proactive budget
         self._max_proactives_per_hour: dict[ProactiveLevel, int] = {
-            ProactiveLevel.LEVEL_1_SUBTLE: 30,
-            ProactiveLevel.LEVEL_2_HINT: 10,
-            ProactiveLevel.LEVEL_3_CONVERSATION: 3,
-            ProactiveLevel.LEVEL_4_ACTION: 1,
+            ProactiveLevel.LEVEL_1_SUBTLE: config.level_1_per_hour,
+            ProactiveLevel.LEVEL_2_HINT: config.level_2_per_hour,
+            ProactiveLevel.LEVEL_3_CONVERSATION: config.level_3_per_hour,
+            ProactiveLevel.LEVEL_4_ACTION: config.level_4_per_hour,
         }
         self._proactive_history: list[tuple[float, ProactiveLevel]] = []
 
         # Quiet hours
-        self._quiet_hours_start_hour: int = 23
-        self._quiet_hours_end_hour: int = 7
-        self._quiet_hours_enabled: bool = True
+        self._quiet_hours_start_hour = config.quiet_hours_start_hour
+        self._quiet_hours_end_hour = config.quiet_hours_end_hour
+        self._quiet_hours_enabled = config.quiet_hours_enabled
 
         # Cooldown between proactives (seconds)
         self._cooldown: dict[ProactiveLevel, float] = {
-            ProactiveLevel.LEVEL_1_SUBTLE: 5.0,
-            ProactiveLevel.LEVEL_2_HINT: 30.0,
-            ProactiveLevel.LEVEL_3_CONVERSATION: 300.0,
-            ProactiveLevel.LEVEL_4_ACTION: 1800.0,
+            ProactiveLevel.LEVEL_1_SUBTLE: config.level_1_cooldown_seconds,
+            ProactiveLevel.LEVEL_2_HINT: config.level_2_cooldown_seconds,
+            ProactiveLevel.LEVEL_3_CONVERSATION: config.level_3_cooldown_seconds,
+            ProactiveLevel.LEVEL_4_ACTION: config.level_4_cooldown_seconds,
         }
 
         # Action permissions
@@ -173,8 +213,14 @@ class PolicyGate:
         hourly_count = self._count_recent_proactives(proposed_level, 3600)
         max_allowed = self._max_proactives_per_hour.get(proposed_level, 0)
         if hourly_count >= max_allowed:
-            # Try one level down (never downgrade below Level 1)
-            downgraded = ProactiveLevel(max(1, int(proposed_level) - 1))
+            if proposed_level == ProactiveLevel.LEVEL_1_SUBTLE:
+                return ProactiveDecision(
+                    allowed=False,
+                    level=ProactiveLevel.LEVEL_0_IDLE,
+                    reason="Hourly budget exhausted for Level 1",
+                    recent_proactive_count=hourly_count,
+                )
+            downgraded = ProactiveLevel(int(proposed_level) - 1)
             return self.evaluate_proactive(downgraded, relevance, urgency, relationship_value)
 
         # Cooldown check

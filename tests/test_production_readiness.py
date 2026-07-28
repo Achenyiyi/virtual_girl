@@ -11,6 +11,7 @@ from companion.core.policy_gate import PolicyGate
 from companion.core.state_manager import StateManager
 from companion.providers.base import ProviderHealth
 from companion.providers.implementations.cloud_llm import CloudLLMConfig, CloudLLMProvider
+from companion.providers.implementations.cloud_tts import CloudTTSConfig, CloudTTSProvider
 from companion.services.telemetry import TelemetryService
 from tests.test_providers import (
     MockActionProvider,
@@ -44,6 +45,39 @@ async def test_cloud_health_requires_a_usable_endpoint(status_code, expected) ->
     )
     try:
         assert await provider.health_check() == expected
+    finally:
+        await provider.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "expected"),
+    [
+        (200, ProviderHealth.HEALTHY),
+        (401, ProviderHealth.UNHEALTHY),
+        (403, ProviderHealth.UNHEALTHY),
+        (429, ProviderHealth.DEGRADED),
+        (503, ProviderHealth.DEGRADED),
+    ],
+)
+async def test_tts_health_is_readonly_and_requires_usable_credentials(
+    status_code, expected
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status_code)
+
+    provider = CloudTTSProvider(
+        CloudTTSConfig(api_key="test-secret-value-long-enough")
+    )
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        assert await provider.health_check() == expected
+        assert len(requests) == 1
+        assert requests[0].method == "GET"
+        assert requests[0].url.path.endswith("/cognitiveservices/voices/list")
     finally:
         await provider.shutdown()
 
