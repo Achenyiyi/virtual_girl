@@ -70,6 +70,14 @@ _SHUTDOWN_STEP_TIMEOUT_SECONDS = 5.0
 # ── Logging setup ──────────────────────────────────────────────────────
 
 
+def _configure_cli_streams() -> None:
+    """Keep multilingual CLI output usable on legacy Windows code pages."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="backslashreplace")
+
+
 def setup_logging(
     level: str = "INFO",
     log_file: str = "",
@@ -859,6 +867,7 @@ async def async_main(args: argparse.Namespace) -> int:
 
 def main() -> None:
     """Parse arguments and run the companion."""
+    _configure_cli_streams()
     parser = argparse.ArgumentParser(
         description="二次元虚拟伴侣 — Virtual Companion Runtime",
         formatter_class=argparse.RawDescriptionHelpFormatter,

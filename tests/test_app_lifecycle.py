@@ -6,10 +6,28 @@ from typing import Any
 
 import pytest
 
-from companion.__main__ import CompanionApp, async_main
+from companion.__main__ import CompanionApp, _configure_cli_streams, async_main
 from companion.config_loader import RuntimeConfig
 
 _REAL_APP_STOP = CompanionApp.stop
+
+
+def test_cli_streams_use_utf8_for_multilingual_output(monkeypatch) -> None:
+    calls: list[dict[str, str]] = []
+
+    class LegacyStream:
+        def reconfigure(self, **options: str) -> None:
+            calls.append(options)
+
+    monkeypatch.setattr("companion.__main__.sys.stdout", LegacyStream())
+    monkeypatch.setattr("companion.__main__.sys.stderr", LegacyStream())
+
+    _configure_cli_streams()
+
+    assert calls == [
+        {"encoding": "utf-8", "errors": "backslashreplace"},
+        {"encoding": "utf-8", "errors": "backslashreplace"},
+    ]
 
 
 class LifecycleComponent:

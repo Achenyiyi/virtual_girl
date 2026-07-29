@@ -228,7 +228,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 72 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 363 tests passed with 79.69%
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 364 tests passed with 79.69%
   total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 83%, voice
   pipeline 85%, cloud LLM 63%, cloud TTS 81%, avatar acceptance 77%, action service 82%, and the
   action audit store 94%.
