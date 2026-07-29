@@ -127,6 +127,9 @@ python -m companion --backup-memory D:\CompanionBackups\latest.db --overwrite-ba
 启动前建议先运行不会输出凭据内容的结构化自检：
 
 ```powershell
+# 只校验字段、类型、范围和安全约束，不访问凭据、存储、设备或 Provider
+python -m companion --config production.yaml --validate-config
+
 # 本地核心检查
 python -m companion --doctor
 

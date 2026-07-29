@@ -464,6 +464,9 @@ async def async_main(args: argparse.Namespace) -> int:
         return 0
     # Load config for every operation that uses runtime settings.
     config = RuntimeConfig.from_yaml(args.config)
+    if getattr(args, "validate_config", False):
+        print("Configuration is valid.")
+        return 0
     restore_memory_backup = getattr(args, "restore_memory_backup", None)
     if restore_memory_backup:
         memory_path = config.effective_memory_config().db_path
@@ -915,6 +918,11 @@ def main() -> None:
         help="运行本地上线前自检，不启动伴侣",
     )
     parser.add_argument(
+        "--validate-config",
+        action="store_true",
+        help="严格校验配置文件后退出，不访问凭据、存储、设备或 Provider",
+    )
+    parser.add_argument(
         "--doctor-online",
         action="store_true",
         help="在 doctor 中额外验证已启用的远程 Provider",
@@ -988,6 +996,7 @@ def main() -> None:
     args = parser.parse_args()
     maintenance_modes = sum(
         (
+            bool(args.validate_config),
             any(
                 (
                     args.doctor,
@@ -1005,7 +1014,7 @@ def main() -> None:
     )
     if maintenance_modes > 1:
         parser.error(
-            "doctor、accept-voice、accept-avatar、backup-memory 和 "
+            "validate-config、doctor、accept-voice、accept-avatar、backup-memory、"
             "verify-memory-backup 和 restore-memory-backup 模式不能组合使用"
         )
     if args.accept_voice and args.accept_voice_json:
