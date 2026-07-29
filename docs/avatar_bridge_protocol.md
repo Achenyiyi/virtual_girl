@@ -146,13 +146,13 @@ per-connection concurrency, Eventa forwarding boundary, strict renderer input va
 renderer-owned evidence state machine. Active peers close deterministically during shutdown.
 
 The pinned patch in `integrations/airi-v0.11.3` wires the dependency callbacks to AIRI's real
-Live2D/VRM stores and component lifecycle. `notifyModelLoaded()` is called by the real model-loaded
-callbacks, `notifyPresentedFrame()` follows successful Pixi/VRM render callbacks, and visibility is
-the conjunction of renderer visibility and Electron main-window visibility. Unsupported operations
-fail closed. The patch also removes AIRI's stale MediaPipe patched-dependency entry because the
-published package already contains that fix. It passes `git apply --check`; the stage app and its
-31 dependency workspaces build successfully with pnpm `10.33.0`, and post-build typechecking finds
-no errors in patch-modified files. Real runtime and visual acceptance remain open release gates.
+Live2D/VRM stores and component lifecycle. Renderer-side loading invalidates stale model evidence;
+`notifyModelLoaded()` is called by the real model-loaded callbacks, `notifyPresentedFrame()` follows
+successful Pixi/VRM render callbacks, and visibility is the conjunction of renderer visibility and
+Electron main-window visibility. Unsupported operations fail closed. The patch leaves AIRI's
+existing MediaPipe patched dependency and pnpm metadata unchanged. It passes `git apply --check`,
+and a frozen filtered install of the stage app plus its 31 dependency workspaces succeeds with pnpm
+`10.33.0`. Real runtime and visual acceptance remain open release gates.
 
 Research references:
 

@@ -106,10 +106,10 @@ The AIRI `v0.11.3` protocol core, loopback H3/CrossWS server, Eventa forwarding 
 renderer-owned evidence state machine are implemented and tested under `integrations/airi-v0.11.3`.
 A pinned patch now wires Electron startup/shutdown, Eventa renderer invocation, Live2D/VRM state
 operations, actual model-loaded callbacks, successful render callbacks, and main-window visibility.
-The patch removes AIRI's stale MediaPipe patched-dependency entry, passes `git apply --check`, and
-the pinned stage application plus its 31 dependency workspaces build successfully with pnpm
-`10.33.0`. Post-build typechecking reports no errors in patch-modified files. A real end-to-end run
-and visual acceptance remain. AIRI's
+Renderer-side loading now invalidates stale model evidence. The patch leaves AIRI's existing
+MediaPipe patched dependency and pnpm metadata unchanged, passes `git apply --check`, and supports a
+frozen filtered install of the pinned stage application plus its 31 dependency workspaces with pnpm
+`10.33.0`. A real end-to-end run and visual acceptance remain. AIRI's
 remote plugin bootstrap is unfinished at the pinned upstream commit, so no undocumented remote API
 is claimed. See `docs/avatar_bridge_protocol.md`.
 
@@ -118,8 +118,9 @@ production stage extension must expose renderer-owned inspection evidence showin
 Live2D/VRM model is loaded and visible, the full state was consumed by the render loop, the expected
 expression/gesture/proactive level was applied, and a later frame was presented. The inspection
 schema is strict and privacy-safe. This machine evidence intentionally does not claim pixel-level
-correctness; the gate remains open until the patched AIRI application builds, the command passes against it,
-and an operator signs off the visible model, animation, expression, textures, alpha, and clipping.
+correctness; the gate remains open until AIRI is launched with an injected avatar token, the real
+`--accept-avatar-json` command passes against it, and an operator signs off the visible model,
+animation, expression, textures, alpha, and clipping.
 
 Action implementation status: a real Windows provider now exposes only `check_system_status`,
 `read_window_title`, and `read_active_app`. It has no shell or generic command surface and rejects
@@ -333,10 +334,13 @@ The action and perception features must remain disabled until their correspondin
 - Local voice modules and default devices now pass doctor in the isolated release environment, but
   no credential-backed test has yet proven microphone capture, faster-whisper model loading,
   Azure streaming TTS, gapless playback, and barge-in latency together.
-- The Python avatar bridge plus the pinned AIRI `v0.11.3` loopback server, Eventa boundary, and
-  renderer-owned evidence core are locally tested. AIRI still needs concrete Live2D/VRM store and
-  component-hook wiring, followed by real rendering and emotion-synchronization acceptance. AIRI's
-  inspected remote-plugin bootstrap is not a stable target.
+- The pinned AIRI `v0.11.3` patch now includes concrete Live2D/VRM store and component-hook wiring,
+  but AIRI has not been launched with an injected avatar token and no real
+  `--accept-avatar-json` or human visual acceptance run has completed.
+- Natural runtime one-shot gestures remain unwired: `ExpressionMapper.gestures` is intentionally
+  excluded from repeated affect-state synchronization, and only the explicit acceptance gesture
+  currently exercises `gesture.trigger`.
+- Human security review and production sign-off remain pending.
 - The real Windows read-only provider is wired and validated, but file changes, messages,
   application control, input automation, installation, and other mutating actions remain
   unavailable. They require a separate OS isolation boundary and target-device acceptance tests.

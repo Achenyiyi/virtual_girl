@@ -1,6 +1,6 @@
 diff --git a/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/eventa-adapter.ts b/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/eventa-adapter.ts
 new file mode 100644
-index 0000000..082ad24
+index 0000000000000000000000000000000000000000..082ad245075ce5157070bae197de1fad405c49c7
 --- /dev/null
 +++ b/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/eventa-adapter.ts
 @@ -0,0 +1,28 @@
@@ -34,7 +34,7 @@ index 0000000..082ad24
 +}
 diff --git a/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/server.ts b/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/server.ts
 new file mode 100644
-index 0000000..a7c181d
+index 0000000000000000000000000000000000000000..a7c181daed824dc815f57354fbd1cdf9eb7ca9a6
 --- /dev/null
 +++ b/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/server.ts
 @@ -0,0 +1,194 @@
@@ -233,7 +233,7 @@ index 0000000..a7c181d
 +  return Number.MAX_SAFE_INTEGER
 +}
 diff --git a/apps/stage-tamagotchi/src/main/windows/main/index.ts b/apps/stage-tamagotchi/src/main/windows/main/index.ts
-index 0f452fc..391755b 100644
+index 0f452fc8a559ca96c133864e0d9b4c2b71c5e5b4..391755b48d2e6110bc12889d2e156baaa8931cd8 100644
 --- a/apps/stage-tamagotchi/src/main/windows/main/index.ts
 +++ b/apps/stage-tamagotchi/src/main/windows/main/index.ts
 @@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
@@ -280,7 +280,7 @@ index 0f452fc..391755b 100644
     * This is a know issue (or expected behavior maybe) to Electron.
     * We don't use this approach on Linux because it's not working.
 diff --git a/apps/stage-tamagotchi/src/renderer/pages/index.vue b/apps/stage-tamagotchi/src/renderer/pages/index.vue
-index aadea79..58c9bb3 100644
+index aadea7902387c0321926225fed1452ac10166620..1f2dc222bd9a6f14ba4fe7575d5976819e5cc58b 100644
 --- a/apps/stage-tamagotchi/src/renderer/pages/index.vue
 +++ b/apps/stage-tamagotchi/src/renderer/pages/index.vue
 @@ -3,10 +3,12 @@ import type { ModelSettingsRuntimeSnapshot } from '@proj-airi/stage-ui/component
@@ -373,12 +373,13 @@ index aadea79..58c9bb3 100644
  </script>
  
  <template>
-@@ -677,6 +726,10 @@ const cursorPosition = computed(() => ({
+@@ -677,6 +726,11 @@ const cursorPosition = computed(() => ({
            flex-1
            :cursor-position="cursorPosition"
            :paused="stagePaused"
 +          @avatar-stage-mounted="renderer => avatarRendererRuntime.notifyStageMounted(renderer)"
 +          @avatar-stage-unmounted="avatarRendererRuntime.notifyStageUnmounted()"
++          @avatar-model-loading="(renderer, modelId) => avatarRendererRuntime.notifyModelLoading(renderer, modelId)"
 +          @avatar-model-loaded="(renderer, modelId) => avatarRendererRuntime.notifyModelLoaded(renderer, modelId)"
 +          @avatar-frame-presented="avatarRendererRuntime.notifyPresentedFrame()"
          />
@@ -386,7 +387,7 @@ index aadea79..58c9bb3 100644
          <ControlsIsland ref="controlsIslandRef" />
 diff --git a/apps/stage-tamagotchi/src/shared/avatar-bridge/protocol.ts b/apps/stage-tamagotchi/src/shared/avatar-bridge/protocol.ts
 new file mode 100644
-index 0000000..d496033
+index 0000000000000000000000000000000000000000..d49603370f34a085b0577592466fde22325b3bee
 --- /dev/null
 +++ b/apps/stage-tamagotchi/src/shared/avatar-bridge/protocol.ts
 @@ -0,0 +1,160 @@
@@ -552,7 +553,7 @@ index 0000000..d496033
 +}
 diff --git a/apps/stage-tamagotchi/src/shared/avatar-bridge/renderer-contract.ts b/apps/stage-tamagotchi/src/shared/avatar-bridge/renderer-contract.ts
 new file mode 100644
-index 0000000..8bfc554
+index 0000000000000000000000000000000000000000..8bfc55426573174de5014e2830d249276b6236be
 --- /dev/null
 +++ b/apps/stage-tamagotchi/src/shared/avatar-bridge/renderer-contract.ts
 @@ -0,0 +1,22 @@
@@ -580,10 +581,10 @@ index 0000000..8bfc554
 +) => Promise<Record<string, unknown>>
 diff --git a/apps/stage-tamagotchi/src/shared/avatar-bridge/renderer-runtime.ts b/apps/stage-tamagotchi/src/shared/avatar-bridge/renderer-runtime.ts
 new file mode 100644
-index 0000000..11ee4bf
+index 0000000000000000000000000000000000000000..9f0affc26ba52b806fd105992eedbc2ff52d2f1e
 --- /dev/null
 +++ b/apps/stage-tamagotchi/src/shared/avatar-bridge/renderer-runtime.ts
-@@ -0,0 +1,365 @@
+@@ -0,0 +1,426 @@
 +export type SupportedRenderer = 'live2d' | 'vrm'
 +
 +export interface RendererModel {
@@ -672,6 +673,8 @@ index 0000000..11ee4bf
 +
 +  private readonly modelWaiters = new Set<() => void>()
 +  private modelLoadGeneration = 0
++  private activeModelLoad?: { modelId: string, renderer: SupportedRenderer }
++  private pendingModelLoad?: { generation: number, modelId: string, renderer: SupportedRenderer }
 +
 +  constructor(dependencies: RendererRuntimeDependencies) {
 +    this.dependencies = dependencies
@@ -693,6 +696,8 @@ index 0000000..11ee4bf
 +  }
 +
 +  notifyStageMounted(renderer: SupportedRenderer): void {
++    if (this.state.renderer && this.state.renderer !== renderer)
++      this.state.modelLoaded = false
 +    this.state.renderer = renderer
 +    this.state.stageMounted = true
 +  }
@@ -700,15 +705,45 @@ index 0000000..11ee4bf
 +  notifyStageUnmounted(): void {
 +    this.state.stageMounted = false
 +    this.state.modelLoaded = false
++    this.activeModelLoad = undefined
++    this.pendingModelLoad = undefined
++    this.modelLoadGeneration += 1
++    this.resolveModelWaiters()
++  }
++
++  notifyModelLoading(renderer: SupportedRenderer, modelId: string): void {
++    const supersedesPending = this.pendingModelLoad
++      && (renderer !== this.pendingModelLoad.renderer || modelId !== this.pendingModelLoad.modelId)
++
++    this.activeModelLoad = { renderer, modelId }
++    this.state.renderer = renderer
++    this.state.modelId = modelId
++    this.state.modelLoaded = false
++
++    if (supersedesPending) {
++      this.pendingModelLoad = undefined
++      this.modelLoadGeneration += 1
++      this.resolveModelWaiters()
++    }
 +  }
 +
 +  notifyModelLoaded(renderer: SupportedRenderer, modelId: string): void {
-+    if (!this.state.stageMounted || renderer !== this.state.renderer || modelId !== this.state.modelId)
++    if (!this.state.stageMounted || renderer !== this.state.renderer)
 +      return
++    if (!this.activeModelLoad && !this.pendingModelLoad && this.state.modelId && modelId !== this.state.modelId)
++      return
++    if (this.activeModelLoad
++      && (renderer !== this.activeModelLoad.renderer || modelId !== this.activeModelLoad.modelId))
++      return
++    if (this.pendingModelLoad
++      && (renderer !== this.pendingModelLoad.renderer || modelId !== this.pendingModelLoad.modelId))
++      return
++    this.state.renderer = renderer
++    this.state.modelId = modelId
 +    this.state.modelLoaded = true
-+    for (const resolve of this.modelWaiters)
-+      resolve()
-+    this.modelWaiters.clear()
++    this.activeModelLoad = undefined
++    this.pendingModelLoad = undefined
++    this.resolveModelWaiters()
 +  }
 +
 +  notifyPresentedFrame(): void {
@@ -753,12 +788,33 @@ index 0000000..11ee4bf
 +      return { loaded: false }
 +
 +    const generation = ++this.modelLoadGeneration
++    this.resolveModelWaiters()
++    if (this.state.stageMounted
++      && this.state.modelLoaded
++      && this.state.modelId === model.id
++      && this.state.renderer === model.renderer) {
++      this.activeModelLoad = undefined
++      this.pendingModelLoad = undefined
++      return { loaded: true }
++    }
++
++    this.activeModelLoad = { modelId: model.id, renderer: model.renderer }
++    this.pendingModelLoad = { generation, modelId: model.id, renderer: model.renderer }
 +    this.state.modelId = model.id
 +    this.state.renderer = model.renderer
 +    this.state.modelLoaded = false
-+    await this.dependencies.selectModel(model.id)
-+    if (!this.state.modelLoaded)
-+      await this.waitForModelLoad(this.dependencies.modelLoadTimeoutMs ?? 3_000)
++    try {
++      await this.dependencies.selectModel(model.id)
++      if (generation !== this.modelLoadGeneration)
++        return { loaded: false }
++      if (!this.state.modelLoaded)
++        await this.waitForModelLoad(this.dependencies.modelLoadTimeoutMs ?? 3_000)
++    }
++    catch (error) {
++      if (this.pendingModelLoad?.generation === generation)
++        this.pendingModelLoad = undefined
++      throw error
++    }
 +    return {
 +      loaded: generation === this.modelLoadGeneration
 +        && this.state.modelId === model.id
@@ -844,6 +900,12 @@ index 0000000..11ee4bf
 +      }, timeoutMs)
 +      this.modelWaiters.add(done)
 +    })
++  }
++
++  private resolveModelWaiters(): void {
++    for (const resolve of this.modelWaiters)
++      resolve()
++    this.modelWaiters.clear()
 +  }
 +
 +  private requireRendererReady(): void {
@@ -950,7 +1012,7 @@ index 0000000..11ee4bf
 +  return parsed
 +}
 diff --git a/apps/stage-tamagotchi/src/shared/eventa/index.ts b/apps/stage-tamagotchi/src/shared/eventa/index.ts
-index 818b602..ca8541a 100644
+index 818b602ac94ba9cf683a83ae76b80e47c478dd3a..ca8541a0a0819a64df0f564f9c78a4530457bda4 100644
 --- a/apps/stage-tamagotchi/src/shared/eventa/index.ts
 +++ b/apps/stage-tamagotchi/src/shared/eventa/index.ts
 @@ -30,6 +30,10 @@ import type { Rectangle } from 'electron'
@@ -965,22 +1027,38 @@ index 818b602..ca8541a 100644
  export const electronStartDraggingWindow = defineInvokeEventa('eventa:invoke:electron:start-dragging-window')
  
 diff --git a/packages/stage-ui-live2d/src/components/scenes/Live2D.vue b/packages/stage-ui-live2d/src/components/scenes/Live2D.vue
-index eff476f..9df6922 100644
+index eff476fbebc50e083eecd16750640aca80e22a32..1a02912dc880cf7c3144190fffb7c405521c6efc 100644
 --- a/packages/stage-ui-live2d/src/components/scenes/Live2D.vue
 +++ b/packages/stage-ui-live2d/src/components/scenes/Live2D.vue
-@@ -35,6 +35,11 @@ const componentState = defineModel<'pending' | 'loading' | 'mounted'>('state', {
+@@ -35,6 +35,12 @@ const componentState = defineModel<'pending' | 'loading' | 'mounted'>('state', {
  const componentStateCanvas = defineModel<'pending' | 'loading' | 'mounted'>('canvasState', { default: 'pending' })
  const componentStateModel = defineModel<'pending' | 'loading' | 'mounted'>('modelState', { default: 'pending' })
  
 +const emit = defineEmits<{
-+  (e: 'modelLoaded'): void
++  (e: 'modelLoading', modelId: string): void
++  (e: 'modelLoaded', modelId: string): void
 +  (e: 'framePresented'): void
 +}>()
 +
  const live2dCanvasRef = ref<InstanceType<typeof Live2DCanvas>>()
  const live2dModelRef = ref<InstanceType<typeof Live2DModel>>()
  const activeCursorPosition = ref<Live2DEyeFocusSource | null>(null)
-@@ -101,6 +106,7 @@ defineExpose({
+@@ -82,6 +88,14 @@ watch([componentStateModel, componentStateCanvas], () => {
+ })
+ 
+ defineExpose({
++  playMotion: async (motionName: string, index?: number) => {
++    if (!live2dModelRef.value)
++      throw new Error('Live2D model is unavailable')
++    await live2dModelRef.value.playMotion(motionName, index)
++  },
++  setAvatarExpression: (expressionId: string, intensity: number, durationMs: number) => {
++    return live2dModelRef.value?.setAvatarExpression(expressionId, intensity, durationMs) ?? false
++  },
+   canvasElement: () => {
+     return live2dCanvasRef.value?.canvasElement()
+   },
+@@ -101,6 +115,7 @@ defineExpose({
        :height="height"
        :resolution="live2dRenderScale"
        :max-fps="live2dMaxFps"
@@ -988,18 +1066,28 @@ index eff476f..9df6922 100644
        max-h="100dvh"
      >
        <Live2DModel
-@@ -125,6 +131,7 @@ defineExpose({
+@@ -125,6 +140,8 @@ defineExpose({
          :live2d-force-auto-blink-enabled="live2dForceAutoBlinkEnabled"
          :live2d-expression-enabled="live2dExpressionEnabled"
          :live2d-shadow-enabled="live2dShadowEnabled"
-+        @model-loaded="emit('modelLoaded')"
++        @model-loading="modelId => emit('modelLoading', modelId)"
++        @model-loaded="modelId => emit('modelLoaded', modelId)"
        />
      </Live2DCanvas>
    </Screen>
 diff --git a/packages/stage-ui-live2d/src/components/scenes/live2d/Canvas.vue b/packages/stage-ui-live2d/src/components/scenes/live2d/Canvas.vue
-index 1e86fb5..30770eb 100644
+index 1e86fb552b59fbe2931ba6014b4423d02681804e..3dd757393ce0abc10f90c9bea7b806496e49d550 100644
 --- a/packages/stage-ui-live2d/src/components/scenes/live2d/Canvas.vue
 +++ b/packages/stage-ui-live2d/src/components/scenes/live2d/Canvas.vue
+@@ -1,7 +1,7 @@
+ <script setup lang="ts">
+ import { Application } from '@pixi/app'
+ import { extensions } from '@pixi/extensions'
+-import { Ticker, TickerPlugin } from '@pixi/ticker'
++import { Ticker, TickerPlugin, UPDATE_PRIORITY } from '@pixi/ticker'
+ import { Live2DModel } from 'pixi-live2d-display/cubism4'
+ import { onMounted, onUnmounted, ref, watch } from 'vue'
+ 
 @@ -17,6 +17,10 @@ const props = withDefaults(defineProps<{
  
  const componentState = defineModel<'pending' | 'loading' | 'mounted'>('state', { default: 'pending' })
@@ -1019,28 +1107,616 @@ index 1e86fb5..30770eb 100644
      }
      catch (error) {
        console.error('[Live2D] Pixi render error.', error)
+@@ -41,7 +46,7 @@ function installRenderGuard(app: Application) {
+   }
+ 
+   app.ticker.remove(app.render, app)
+-  app.ticker.add(guardedRender)
++  app.ticker.add(guardedRender, undefined, UPDATE_PRIORITY.LOW)
+   app.ticker.maxFPS = resolveMaxFps(props.maxFps)
+ }
+ 
+diff --git a/packages/stage-ui-live2d/src/components/scenes/live2d/Model.vue b/packages/stage-ui-live2d/src/components/scenes/live2d/Model.vue
+index 402f511ff462dfb6247ca9bb65fd3c8d65ed2d80..272f25f262151c3593d052437503d9984fdd8a69 100644
+--- a/packages/stage-ui-live2d/src/components/scenes/live2d/Model.vue
++++ b/packages/stage-ui-live2d/src/components/scenes/live2d/Model.vue
+@@ -15,7 +15,9 @@ import { Live2DFactory, Live2DModel, MotionPriority } from 'pixi-live2d-display/
+ import { computed, onMounted, onUnmounted, ref, shallowRef, toRef, watch } from 'vue'
+ 
+ import {
++  createSemanticExpressionController,
+   createBeatSyncController,
++  requireLive2DMotionStarted,
+   useExpressionController,
+   useLive2DMotionManagerUpdate,
+   useMotionUpdatePluginAutoEyeBlink,
+@@ -27,7 +29,7 @@ import {
+ } from '../../../composables/live2d'
+ import { useFitModel } from '../../../composables/live2d/fit-model'
+ import { Emotion, EmotionNeutralMotionName } from '../../../constants/emotions'
+-import { useL2dViewControl, useLive2dParams } from '../../../stores'
++import { useExpressionStore, useL2dViewControl, useLive2dParams } from '../../../stores'
+ 
+ const props = withDefaults(defineProps<{
+   modelSrc?: string
+@@ -70,7 +72,8 @@ const props = withDefaults(defineProps<{
+ })
+ 
+ const emits = defineEmits<{
+-  (e: 'modelLoaded'): void
++  (e: 'modelLoading', modelId: string): void
++  (e: 'modelLoaded', modelId: string): void
+   (e: 'error', error: Error): void
+ }>()
+ 
+@@ -181,6 +184,8 @@ const expressionController = useExpressionController({
+   internalModel: internalModelRef,
+   modelId: props.modelId,
+ })
++const expressionStore = useExpressionStore()
++const semanticExpressionController = createSemanticExpressionController()
+ // Saved SDK manager references for runtime expression toggle (restore on disable)
+ const savedEyeBlink = shallowRef<any>(null)
+ const savedExpressionManager = shallowRef<any>(null)
+@@ -207,6 +212,8 @@ async function loadModel() {
+ 
+   modelLoading.value = true
+   componentState.value = 'loading'
++  const loadingModelId = props.modelId ?? ''
++  emits('modelLoading', loadingModelId)
+ 
+   if (!pixiApp.value || !pixiApp.value.stage) {
+     try {
+@@ -225,6 +232,7 @@ async function loadModel() {
+   if (model.value && pixiApp.value?.stage) {
+     // Dispose expression controller before destroying the old model
+     expressionController.dispose()
++    semanticExpressionController.dispose()
+     internalModelRef.value = undefined
+ 
+     try {
+@@ -243,6 +251,7 @@ async function loadModel() {
+     return
+   }
+ 
++  let modelLoaded = false
+   try {
+     if (isUnmounted) {
+       modelLoading.value = false
+@@ -358,6 +367,9 @@ async function loadModel() {
+     // Blink second: reads post-expression eye values, Multiply-modulates on top.
+     // This ensures blink respects expression state (0 × blinkFactor = 0).
+     motionManagerUpdate.register(useMotionUpdatePluginExpression(expressionController), 'final')
++    motionManagerUpdate.register((ctx) => {
++      semanticExpressionController.apply(ctx.model)
++    }, 'final')
+     motionManagerUpdate.register(useMotionUpdatePluginAutoEyeBlink(live2dExpressionEnabled), 'final')
+     motionManagerUpdate.register(useMotionUpdatePluginLipSync(mouthOpenSize, nowSpeaking), 'final')
+ 
+@@ -435,7 +447,7 @@ async function loadModel() {
+       internalModelRef.value = internalModel
+     }
+ 
+-    emits('modelLoaded')
++    modelLoaded = true
+   }
+   catch (error) {
+     console.error('[Live2D] Failed to load model:', error)
+@@ -447,6 +459,8 @@ async function loadModel() {
+     await initExpressionController(internalModelRef.value).catch((err) => {
+       console.warn('[Model.vue] Expression controller initialization failed:', err)
+     })
++    if (modelLoaded)
++      emits('modelLoaded', loadingModelId)
+     modelLoadMutex.release()
+   }
+ }
+@@ -485,23 +499,62 @@ async function initExpressionController(internalModel?: PixiLive2DInternalModel)
+   await expressionController.initialise(expressionRefs, readExpFile)
+ }
+ 
+-async function setMotion(motionName: string, index?: number) {
++async function playMotion(motionName: string, index?: number) {
+   // TODO: motion? Not every Live2D model has motion, we do need to help users to set motion
+-  if (!model.value) {
+-    console.warn('Cannot set motion: model not loaded')
+-    return
+-  }
++  if (!model.value)
++    throw new Error('Cannot play Live2D motion: model not loaded')
+ 
+   console.info('Setting motion:', motionName, 'index:', index)
++  await requireLive2DMotionStarted(
++    () => model.value!.motion(motionName, index, MotionPriority.FORCE),
++    motionName,
++  )
++  console.info('Motion started successfully:', motionName)
++}
++
++async function setMotion(motionName: string, index?: number) {
+   try {
+-    await model.value.motion(motionName, index, MotionPriority.FORCE)
+-    console.info('Motion started successfully:', motionName)
++    await playMotion(motionName, index)
+   }
+   catch (error) {
+     console.error('Failed to start motion:', motionName, error)
+   }
+ }
+ 
++function setAvatarExpression(expressionId: string, intensity: number, durationMs: number) {
++  if (!model.value)
++    return false
++
++  if (expressionId.trim().toLowerCase() === 'neutral') {
++    const resetNative = expressionStore.expressions.size > 0
++    if (resetNative)
++      expressionStore.resetAll()
++    const resetSemantic = semanticExpressionController.set(
++      model.value.internalModel.coreModel,
++      expressionId,
++      intensity,
++      durationMs,
++    )
++    return resetNative || resetSemantic
++  }
++
++  const nativeResult = expressionStore.set(expressionId, intensity, durationMs / 1000)
++  if (nativeResult.success) {
++    semanticExpressionController.clear()
++    return true
++  }
++
++  const semanticResult = semanticExpressionController.set(
++    model.value.internalModel.coreModel,
++    expressionId,
++    intensity,
++    durationMs,
++  )
++  if (semanticResult)
++    expressionStore.resetAll()
++  return semanticResult
++}
++
+ const dropShadowColorComputer = ref<HTMLDivElement>()
+ const dropShadowAnimationId = ref(0)
+ 
+@@ -753,6 +806,7 @@ onUnmounted(() => {
+   resizeAnimation?.pause()
+   disposeShouldUpdateView?.()
+   expressionController.dispose()
++  semanticExpressionController.dispose()
+ })
+ 
+ function listMotionGroups() {
+@@ -761,6 +815,8 @@ function listMotionGroups() {
+ 
+ defineExpose({
+   setMotion,
++  playMotion,
++  setAvatarExpression,
+   listMotionGroups,
+   modelNormalizeParams,
+   initialModelHeight,
+diff --git a/packages/stage-ui-live2d/src/composables/live2d/avatar-semantics.test.ts b/packages/stage-ui-live2d/src/composables/live2d/avatar-semantics.test.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..72f41ada65ca483d4f92a050eb7123792e917c09
+--- /dev/null
++++ b/packages/stage-ui-live2d/src/composables/live2d/avatar-semantics.test.ts
+@@ -0,0 +1,121 @@
++import { describe, expect, it } from 'vitest'
++
++import {
++  createSemanticExpressionController,
++  requireLive2DMotionStarted,
++  resolveLive2DGesture,
++} from './avatar-semantics'
++
++function coreModel(parameterIds: string[]) {
++  const values = new Map<string, number>()
++  const parameters = {
++    ids: parameterIds,
++    minimumValues: parameterIds.map(id => id === 'ParamMouthForm' ? -1 : 0),
++    maximumValues: parameterIds.map(() => 1),
++    defaultValues: parameterIds.map(() => 0),
++  }
++  return {
++    getModel: () => ({ parameters }),
++    setParameterValueById(parameterId: string, value: number) {
++      values.set(parameterId, value)
++    },
++    values,
++  }
++}
++
++describe('avatar Live2D semantics', () => {
++  it('applies synthetic happy parameters as a final per-frame override', () => {
++    const model = coreModel(['ParamEyeLSmile', 'ParamEyeRSmile', 'ParamMouthForm', 'ParamCheek'])
++    const controller = createSemanticExpressionController()
++
++    expect(controller.set(model, 'happy', 0.75, 0)).toBe(true)
++    model.values.set('ParamMouthForm', -1)
++    controller.apply(model)
++
++    expect(model.values.get('ParamEyeLSmile')).toBe(0.75)
++    expect(model.values.get('ParamEyeRSmile')).toBe(0.75)
++    expect(model.values.get('ParamMouthForm')).toBe(0.75)
++    expect(model.values.get('ParamCheek')).toBeCloseTo(0.6)
++  })
++
++  it('resets synthetic parameters when neutral is requested', () => {
++    const model = coreModel(['ParamEyeLSmile', 'ParamMouthForm'])
++    const controller = createSemanticExpressionController()
++    controller.set(model, 'happy', 1, 0)
++    controller.apply(model)
++
++    expect(controller.set(model, 'neutral', 1, 0)).toBe(true)
++    controller.apply(model)
++
++    expect(model.values.get('ParamEyeLSmile')).toBe(0)
++    expect(model.values.get('ParamMouthForm')).toBe(0)
++  })
++
++  it('fails closed when an expression has no real model parameters', () => {
++    const model = coreModel(['ParamAngleX'])
++    const controller = createSemanticExpressionController()
++
++    expect(controller.set(model, 'happy', 1, 0)).toBe(false)
++    expect(controller.set(model, 'unknown', 1, 0)).toBe(false)
++  })
++
++  it('requires a mouth-form parameter plus another visible expression parameter', () => {
++    const controller = createSemanticExpressionController()
++
++    expect(controller.set(coreModel(['ParamMouthForm']), 'happy', 1, 0)).toBe(false)
++    expect(controller.set(coreModel(['ParamBrowLY']), 'happy', 1, 0)).toBe(false)
++  })
++
++  it('an unknown expression does not cancel the active reset timer', async () => {
++    const model = coreModel(['ParamEyeLSmile', 'ParamMouthForm'])
++    const controller = createSemanticExpressionController()
++
++    expect(controller.set(model, 'happy', 1, 1)).toBe(true)
++    controller.apply(model)
++    expect(controller.set(model, 'unknown', 1, 0)).toBe(false)
++    await new Promise(resolve => setTimeout(resolve, 10))
++    controller.apply(model)
++
++    expect(model.values.get('ParamEyeLSmile')).toBe(0)
++    expect(model.values.get('ParamMouthForm')).toBe(0)
++  })
++
++  it('maps the acceptance nod to Hiyori FlickDown', () => {
++    const motion = resolveLive2DGesture('nod', [
++      { motionName: 'Idle', motionIndex: 0, fileName: 'motion/hiyori_m01.motion3.json' },
++      { motionName: 'FlickDown', motionIndex: 0, fileName: 'motion/hiyori_m04.motion3.json' },
++    ], 'preset-live2d-1')
++
++    expect(motion).toEqual({
++      motionName: 'FlickDown',
++      motionIndex: 0,
++      fileName: 'motion/hiyori_m04.motion3.json',
++    })
++  })
++
++  it('does not invent aliases for unverified Hiyori motions', () => {
++    const motions = [
++      { motionName: 'FlickUp', motionIndex: 0, fileName: 'motion/hiyori_m03.motion3.json' },
++      { motionName: 'Flick', motionIndex: 0, fileName: 'motion/hiyori_m05.motion3.json' },
++    ]
++
++    expect(resolveLive2DGesture('wave', motions, 'preset-live2d-1')).toBeUndefined()
++    expect(resolveLive2DGesture('head_tilt', motions, 'preset-live2d-1')).toBeUndefined()
++  })
++
++  it('does not reuse the Hiyori nod alias for another model or motion file', () => {
++    const hiyoriMotion = [
++      { motionName: 'FlickDown', motionIndex: 0, fileName: 'motion/hiyori_m04.motion3.json' },
++    ]
++    const otherMotion = [
++      { motionName: 'FlickDown', motionIndex: 0, fileName: 'motion/other_m04.motion3.json' },
++    ]
++
++    expect(resolveLive2DGesture('nod', hiyoriMotion, 'display-model-custom')).toBeUndefined()
++    expect(resolveLive2DGesture('nod', otherMotion, 'preset-live2d-1')).toBeUndefined()
++  })
++
++  it('rejects motion acknowledgement when the SDK reports no start', async () => {
++    await expect(requireLive2DMotionStarted(async () => false, 'FlickDown')).rejects.toThrow('did not start')
++  })
++})
+diff --git a/packages/stage-ui-live2d/src/composables/live2d/avatar-semantics.ts b/packages/stage-ui-live2d/src/composables/live2d/avatar-semantics.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1f3bc324d6e9f1c8abba3c9885ddfe8c75855f86
+--- /dev/null
++++ b/packages/stage-ui-live2d/src/composables/live2d/avatar-semantics.ts
+@@ -0,0 +1,244 @@
++export interface Live2DCoreModelParameters {
++  ids: string[]
++  minimumValues: ArrayLike<number>
++  maximumValues: ArrayLike<number>
++  defaultValues: ArrayLike<number>
++}
++
++export interface Live2DCoreModelLike {
++  getModel(): { parameters: Live2DCoreModelParameters }
++  setParameterValueById(parameterId: string, value: number): void
++}
++
++export interface Live2DMotionDescriptor {
++  motionName: string
++  motionIndex: number
++  fileName: string
++}
++
++interface ActiveExpressionParameter {
++  parameterId: string
++  value: number
++  defaultValue: number
++}
++
++interface ActiveExpression {
++  coreModel: Live2DCoreModelLike
++  parameters: ActiveExpressionParameter[]
++}
++
++type SemanticParameterId
++  = | 'ParamEyeLSmile'
++    | 'ParamEyeRSmile'
++    | 'ParamMouthForm'
++    | 'ParamCheek'
++    | 'ParamBrowLY'
++    | 'ParamBrowRY'
++    | 'ParamBrowLAngle'
++    | 'ParamBrowRAngle'
++
++type SemanticExpressionTargets = Record<SemanticParameterId, number>
++
++const SEMANTIC_EXPRESSION_TARGETS: Record<string, SemanticExpressionTargets> = {
++  happy: expressionTargets({ eyeSmile: 1, mouthForm: 1, cheek: 0.8, browY: 0.25 }),
++  gentle_smile: expressionTargets({ eyeSmile: 0.55, mouthForm: 0.65, cheek: 0.4, browY: 0.15 }),
++  content: expressionTargets({ eyeSmile: 0.4, mouthForm: 0.45, cheek: 0.25, browY: 0.05 }),
++  attentive: expressionTargets({ eyeSmile: 0.05, mouthForm: 0.1, cheek: 0, browY: 0.35 }),
++  worried: expressionTargets({ eyeSmile: 0, mouthForm: -0.45, cheek: 0, browY: 0.25, browAngle: 0.25 }),
++  sad: expressionTargets({ eyeSmile: 0, mouthForm: -0.75, cheek: 0, browY: -0.2, browAngle: 0.35 }),
++  upset: expressionTargets({ eyeSmile: 0, mouthForm: -1, cheek: 0.1, browY: -0.4, browAngle: -0.35 }),
++}
++
++const SEMANTIC_PARAMETER_IDS = Object.keys(
++  expressionTargets({ eyeSmile: 0, mouthForm: 0, cheek: 0, browY: 0 }),
++) as SemanticParameterId[]
++
++const GESTURE_MOTION_ALIASES: Record<string, ReadonlyArray<{
++  group: string
++  index: number
++  fileName: string
++  modelIds: readonly string[]
++}>> = {
++  nod: [{
++    group: 'FlickDown',
++    index: 0,
++    fileName: 'hiyori_m04',
++    modelIds: ['preset-live2d-1', 'preset-live2d-2'],
++  }],
++}
++
++function expressionTargets(values: {
++  eyeSmile: number
++  mouthForm: number
++  cheek: number
++  browY: number
++  browAngle?: number
++}): SemanticExpressionTargets {
++  return {
++    ParamEyeLSmile: values.eyeSmile,
++    ParamEyeRSmile: values.eyeSmile,
++    ParamMouthForm: values.mouthForm,
++    ParamCheek: values.cheek,
++    ParamBrowLY: values.browY,
++    ParamBrowRY: values.browY,
++    ParamBrowLAngle: values.browAngle ?? 0,
++    ParamBrowRAngle: -(values.browAngle ?? 0),
++  }
++}
++
++function normalizeSemanticId(value: string): string {
++  return value.trim().toLowerCase().replace(/[\s-]+/g, '_')
++}
++
++function clamp(value: number, minimum: number, maximum: number): number {
++  return Math.min(maximum, Math.max(minimum, value))
++}
++
++function supportedParameterIndices(coreModel: Live2DCoreModelLike): Map<string, number> {
++  const ids = coreModel.getModel().parameters.ids
++  return new Map(ids.map((id, index) => [id, index]))
++}
++
++function supportsSemanticExpression(parameterIndices: ReadonlyMap<string, number>): boolean {
++  return parameterIndices.has('ParamMouthForm')
++    && ['ParamEyeLSmile', 'ParamEyeRSmile', 'ParamCheek', 'ParamBrowLY', 'ParamBrowRY']
++      .some(id => parameterIndices.has(id))
++}
++
++function motionFileStem(fileName: string): string {
++  return fileName.split(/[\\/]/).pop()?.replace(/\.motion3\.json$/i, '') ?? ''
++}
++
++export function createSemanticExpressionController() {
++  let active: ActiveExpression | undefined
++  let pendingReset: ActiveExpression | undefined
++  let resetTimer: ReturnType<typeof setTimeout> | undefined
++
++  function clearTimer() {
++    if (resetTimer !== undefined) {
++      clearTimeout(resetTimer)
++      resetTimer = undefined
++    }
++  }
++
++  function queueReset() {
++    if (active)
++      pendingReset = active
++    active = undefined
++  }
++
++  function set(coreModel: Live2DCoreModelLike, expressionId: string, intensity: number, durationMs: number): boolean {
++    if (!Number.isFinite(intensity) || intensity < 0 || intensity > 1 || !Number.isSafeInteger(durationMs) || durationMs < 0)
++      return false
++
++    const normalized = normalizeSemanticId(expressionId)
++    const parameterIndices = supportedParameterIndices(coreModel)
++    if (!supportsSemanticExpression(parameterIndices))
++      return false
++
++    if (normalized === 'neutral') {
++      clearTimer()
++      queueReset()
++      return true
++    }
++
++    const targets = SEMANTIC_EXPRESSION_TARGETS[normalized]
++    if (!targets)
++      return false
++
++    clearTimer()
++    const modelParameters = coreModel.getModel().parameters
++    const parameters: ActiveExpressionParameter[] = []
++    for (const parameterId of SEMANTIC_PARAMETER_IDS) {
++      const index = parameterIndices.get(parameterId)
++      if (index === undefined)
++        continue
++
++      const defaultValue = Number(modelParameters.defaultValues[index] ?? 0)
++      const targetValue = clamp(
++        targets[parameterId],
++        Number(modelParameters.minimumValues[index] ?? targets[parameterId]),
++        Number(modelParameters.maximumValues[index] ?? targets[parameterId]),
++      )
++      parameters.push({
++        parameterId,
++        value: defaultValue + (targetValue - defaultValue) * intensity,
++        defaultValue,
++      })
++    }
++    if (parameters.length === 0)
++      return false
++
++    pendingReset = undefined
++    const nextActive: ActiveExpression = { coreModel, parameters }
++    active = nextActive
++    if (durationMs > 0) {
++      resetTimer = setTimeout(() => {
++        if (active === nextActive)
++          queueReset()
++        resetTimer = undefined
++      }, durationMs)
++    }
++    return true
++  }
++
++  function apply(coreModel: Live2DCoreModelLike) {
++    if (pendingReset?.coreModel === coreModel) {
++      for (const parameter of pendingReset.parameters)
++        coreModel.setParameterValueById(parameter.parameterId, parameter.defaultValue)
++      pendingReset = undefined
++    }
++
++    if (active?.coreModel !== coreModel)
++      return
++    for (const parameter of active.parameters)
++      coreModel.setParameterValueById(parameter.parameterId, parameter.value)
++  }
++
++  function clear() {
++    clearTimer()
++    queueReset()
++  }
++
++  function dispose() {
++    clearTimer()
++    active = undefined
++    pendingReset = undefined
++  }
++
++  return { set, apply, clear, dispose }
++}
++
++export function resolveLive2DGesture(
++  gestureId: string,
++  availableMotions: readonly Live2DMotionDescriptor[],
++  modelId: string,
++): Live2DMotionDescriptor | undefined {
++  const normalized = normalizeSemanticId(gestureId)
++  const exact = availableMotions.find((motion) => {
++    const fileName = motionFileStem(motion.fileName)
++    return normalizeSemanticId(motion.motionName) === normalized || normalizeSemanticId(fileName) === normalized
++  })
++  if (exact)
++    return exact
++
++  for (const alias of GESTURE_MOTION_ALIASES[normalized] ?? []) {
++    const matched = availableMotions.find(motion =>
++      alias.modelIds.includes(modelId)
++      && motion.motionIndex === alias.index
++      && motion.motionName.toLowerCase() === alias.group.toLowerCase()
++      && normalizeSemanticId(motionFileStem(motion.fileName)) === normalizeSemanticId(alias.fileName),
++    )
++    if (matched)
++      return matched
++  }
++  return undefined
++}
++
++export async function requireLive2DMotionStarted(
++  startMotion: () => Promise<boolean>,
++  motionName: string,
++): Promise<void> {
++  if (!await startMotion())
++    throw new Error(`Live2D motion did not start: ${motionName}`)
++}
+diff --git a/packages/stage-ui-live2d/src/composables/live2d/index.ts b/packages/stage-ui-live2d/src/composables/live2d/index.ts
+index 5ffd0a61d672026592907fd2be95aafd9b47d8ae..1dcf78750aa3c389d798c554be2fc93e56c18943 100644
+--- a/packages/stage-ui-live2d/src/composables/live2d/index.ts
++++ b/packages/stage-ui-live2d/src/composables/live2d/index.ts
+@@ -1,4 +1,5 @@
+ export * from './animation'
++export * from './avatar-semantics'
+ export * from './beat-sync'
+ export * from './expression-controller'
+ export * from './eye-tracking'
 diff --git a/packages/stage-ui-three/src/components/ThreeScene.vue b/packages/stage-ui-three/src/components/ThreeScene.vue
-index 6c25082..967c5b9 100644
+index 6c25082de9ff95fb79e433de8b210a6dfae61b3d..6fa0621288325db0458ac147a84daf3985245864 100644
 --- a/packages/stage-ui-three/src/components/ThreeScene.vue
 +++ b/packages/stage-ui-three/src/components/ThreeScene.vue
-@@ -80,6 +80,8 @@ const props = withDefaults(defineProps<{
+@@ -80,6 +80,9 @@ const props = withDefaults(defineProps<{
  const emit = defineEmits<{
    (e: 'loadModelProgress', value: number): void
    (e: 'error', value: unknown): void
-+  (e: 'modelLoaded'): void
++  (e: 'modelLoading', modelSrc: string): void
++  (e: 'modelLoaded', modelSrc: string): void
 +  (e: 'framePresented'): void
  }>()
  
  type ModelPhase = 'no-model' | 'loading' | 'ready' | 'error'
-@@ -471,6 +473,7 @@ function onVRMModelLoaded(value: string) {
+@@ -459,6 +462,8 @@ const controlEnable = computed(() => {
+ function onVRMModelLoadStart(reason: VrmLifecycleReason) {
+   modelPhase.value = 'loading'
+   pendingSceneBootstrap.value = undefined
++  if (props.modelSrc)
++    emit('modelLoading', props.modelSrc)
+   beginSceneBindingCycle(toSceneLoadTransactionReason(reason))
+ }
+ 
+@@ -471,6 +476,7 @@ function onVRMModelLoaded(value: string) {
    pendingCommittedModelSrc.value = value
    pendingCommittedModelRevision.value = bindingRevision.value
    modelPhase.value = 'ready'
-+  emit('modelLoaded')
++  emit('modelLoaded', value)
    void completeSceneBinding(bindingRevision.value)
  }
  function onVRMModelError(error: unknown) {
-@@ -503,6 +506,7 @@ function onTresReady(context: TresContext) {
+@@ -503,6 +509,7 @@ function onTresReady(context: TresContext) {
  }
  
  function onTresRender() {
@@ -1049,7 +1725,7 @@ index 6c25082..967c5b9 100644
      return
  
 diff --git a/packages/stage-ui/src/components/scenes/Stage.vue b/packages/stage-ui/src/components/scenes/Stage.vue
-index 966f39b..48ddf44 100644
+index 966f39b3b849eec527661978c654aa2f0161f208..b1f8015fb009137955aa98eea82379f25564f0e5 100644
 --- a/packages/stage-ui/src/components/scenes/Stage.vue
 +++ b/packages/stage-ui/src/components/scenes/Stage.vue
 @@ -11,7 +11,7 @@ import { sleep } from '@moeru/std'
@@ -1057,11 +1733,11 @@ index 966f39b..48ddf44 100644
  import { wlipsyncProfile } from '@proj-airi/model-driver-lipsync/shared/wlipsync'
  import { createPlaybackManager, createSpeechPipeline, normalizeActPayload } from '@proj-airi/pipelines-audio'
 -import { Live2DScene, useLive2dParams } from '@proj-airi/stage-ui-live2d'
-+import { Live2DScene, useExpressionStore, useLive2dParams } from '@proj-airi/stage-ui-live2d'
++import { Live2DScene, resolveLive2DGesture, useLive2dParams } from '@proj-airi/stage-ui-live2d'
  import { SpineScene } from '@proj-airi/stage-ui-spine'
  import { ThreeScene } from '@proj-airi/stage-ui-three'
  import { animations } from '@proj-airi/stage-ui-three/assets/vrm'
-@@ -58,6 +58,20 @@ const props = withDefaults(defineProps<{
+@@ -58,6 +58,21 @@ const props = withDefaults(defineProps<{
  
  const componentState = defineModel<'pending' | 'loading' | 'mounted'>('state', { default: 'pending' })
  
@@ -1075,6 +1751,7 @@ index 966f39b..48ddf44 100644
 +const emit = defineEmits<{
 +  (e: 'avatarStageMounted', renderer: AvatarRenderer): void
 +  (e: 'avatarStageUnmounted'): void
++  (e: 'avatarModelLoading', renderer: AvatarRenderer, modelId: string): void
 +  (e: 'avatarModelLoaded', renderer: AvatarRenderer, modelId: string): void
 +  (e: 'avatarFramePresented'): void
 +}>()
@@ -1082,23 +1759,64 @@ index 966f39b..48ddf44 100644
  const { getDb } = useDuckDb()
  // const transformersProvider = createTransformers({ embedWorkerURL })
  
-@@ -160,6 +174,82 @@ const backgroundStore = useBackgroundStore()
+@@ -71,6 +86,7 @@ const {
+   stageViewControlsEnabled,
+   stageModelSelectedUrl,
+   stageModelSelected,
++  stageModelSelectedDisplayModel,
+   themeColorsHue,
+   themeColorsHueDynamic,
+ 
+@@ -116,6 +132,7 @@ type PresentEvent
+ const { post: postPresent } = useBroadcastChannel<PresentEvent, PresentEvent>({ name: 'airi-chat-present' })
+ 
+ viewUpdateCleanups.push(live2dStore.onShouldUpdateView(async () => {
++  emit('avatarStageUnmounted')
+   showStage.value = false
+   await settingsStore.updateStageModel()
+   setTimeout(() => {
+@@ -160,6 +177,101 @@ const backgroundStore = useBackgroundStore()
  const { activeBackgroundUrl } = storeToRefs(backgroundStore)
  
  const { currentMotion } = storeToRefs(useLive2dParams())
 +const live2dParams = useLive2dParams()
-+const expressionStore = useExpressionStore()
 +const proactiveLevel = ref(0)
 +
-+function notifyAvatarModelLoaded(renderer: AvatarRenderer) {
++function notifyAvatarModelLoading(renderer: AvatarRenderer, loadingIdentity: string) {
++  const modelMatches = renderer === 'live2d'
++    ? loadingIdentity === stageModelSelected.value
++    : loadingIdentity === stageModelSelectedUrl.value
++  if (modelMatches)
++    emit('avatarModelLoading', renderer, stageModelSelected.value)
++}
++
++function notifyAvatarModelLoaded(renderer: AvatarRenderer, loadedIdentity: string) {
++  const modelMatches = renderer === 'live2d'
++    ? loadedIdentity === stageModelSelected.value
++    : loadedIdentity === stageModelSelectedUrl.value
++  if (!modelMatches)
++    return
 +  emit('avatarStageMounted', renderer)
 +  emit('avatarModelLoaded', renderer, stageModelSelected.value)
 +}
 +
++watch(
++  [stageModelRenderer, stageModelSelectedDisplayModel],
++  ([renderer, model], [previousRenderer, previousModel]) => {
++    const rendererSupported = renderer === 'live2d' || renderer === 'vrm'
++    const previousRendererSupported = previousRenderer === 'live2d' || previousRenderer === 'vrm'
++    if (rendererSupported && model && (renderer !== previousRenderer || model.id !== previousModel?.id)) {
++      emit('avatarModelLoading', renderer, model.id)
++      return
++    }
++    if (!rendererSupported && previousRendererSupported)
++      emit('avatarStageUnmounted')
++  },
++)
++
 +async function applyAvatarExpression(expressionId: string, intensity: number, durationMs: number) {
 +  if (stageModelRenderer.value === 'live2d') {
-+    const result = expressionStore.set(expressionId, intensity, durationMs / 1000)
-+    if (!result.success)
++    if (!live2dSceneRef.value?.setAvatarExpression(expressionId, intensity, durationMs))
 +      throw new Error('Live2D expression is unavailable')
 +    return
 +  }
@@ -1115,16 +1833,10 @@ index 966f39b..48ddf44 100644
 +  if (stageModelRenderer.value !== 'live2d')
 +    throw new Error('avatar renderer does not support one-shot gestures')
 +
-+  const normalized = gestureId.toLowerCase()
-+  const mapped = Object.entries(live2dParams.motionMap)
-+    .find(([key]) => key.toLowerCase() === normalized)?.[1]
-+  const motion = live2dParams.availableMotions.find(item =>
-+    item.motionName.toLowerCase() === normalized || item.fileName.toLowerCase() === normalized,
-+  )
-+  const group = mapped || motion?.motionName
-+  if (!group)
++  const motion = resolveLive2DGesture(gestureId, live2dParams.availableMotions, stageModelSelected.value)
++  if (!motion || !live2dSceneRef.value)
 +    throw new Error('Live2D gesture is unavailable')
-+  currentMotion.value = { group, index: motion?.motionIndex }
++  await live2dSceneRef.value.playMotion(motion.motionName, motion.motionIndex)
 +}
 +
 +async function applyAvatarState(state: AvatarStateInput) {
@@ -1165,7 +1877,7 @@ index 966f39b..48ddf44 100644
  
  const emotionsQueue = createQueue<EmotionPayload>({
    handlers: [
-@@ -943,6 +1033,7 @@ async function captureFrame() {
+@@ -943,6 +1055,7 @@ async function captureFrame() {
  }
  
  onUnmounted(() => {
@@ -1173,7 +1885,7 @@ index 966f39b..48ddf44 100644
    resetLive2dLipSync()
    chatHookCleanups.forEach(dispose => dispose?.())
    viewUpdateCleanups.forEach(dispose => dispose?.())
-@@ -957,6 +1048,10 @@ onUnmounted(() => {
+@@ -957,6 +1070,10 @@ onUnmounted(() => {
  })
  
  defineExpose({
@@ -1184,47 +1896,23 @@ index 966f39b..48ddf44 100644
    canvasElement,
    captureFrame,
    readRenderTargetRegionAtClientPoint,
-@@ -998,6 +1093,8 @@ defineExpose({
+@@ -998,6 +1115,9 @@ defineExpose({
          :live2d-shadow-enabled="live2dShadowEnabled"
          :live2d-max-fps="live2dMaxFps"
          :live2d-render-scale="live2dRenderScale"
-+        @model-loaded="notifyAvatarModelLoaded('live2d')"
++        @model-loading="modelId => notifyAvatarModelLoading('live2d', modelId)"
++        @model-loaded="modelId => notifyAvatarModelLoaded('live2d', modelId)"
 +        @frame-presented="emit('avatarFramePresented')"
        />
        <ThreeScene
          v-if="stageModelRenderer === 'vrm' && showStage"
-@@ -1012,6 +1109,8 @@ defineExpose({
+@@ -1012,6 +1132,9 @@ defineExpose({
          :enable-orbit-controls="props.enableOrbitControls"
          :current-audio-source="currentAudioSource"
          @error="console.error"
-+        @model-loaded="notifyAvatarModelLoaded('vrm')"
++        @model-loading="modelSrc => notifyAvatarModelLoading('vrm', modelSrc)"
++        @model-loaded="modelSrc => notifyAvatarModelLoaded('vrm', modelSrc)"
 +        @frame-presented="emit('avatarFramePresented')"
        />
        <SpineScene
          v-if="stageModelRenderer === 'spine' && showStage"
-diff --git a/pnpm-lock.yaml b/pnpm-lock.yaml
-index 546772d..ffe8c6a 100644
---- a/pnpm-lock.yaml
-+++ b/pnpm-lock.yaml
-@@ -1175,9 +1175,6 @@ overrides:
- packageExtensionsChecksum: sha256-lLxz4me6BFXSsuohDen54RU9DmiItse34Xa+IWGtSzU=
- 
- patchedDependencies:
--  '@mediapipe/tasks-vision':
--    hash: 2014bd232d13f4bfac27f27d61105894bf54aca350379b2816fe05b6d3e27d66
--    path: patches/@mediapipe__tasks-vision.patch
-   '@xsai/generate-text@0.5.0-beta.2':
-     hash: 306bfb723913596b334140f0d6fa48063f336e3b44024efc1d72bf60d54b15e6
-     path: patches/@xsai__generate-text@0.5.0-beta.2.patch
-diff --git a/pnpm-workspace.yaml b/pnpm-workspace.yaml
-index 40590b4..2053b16 100644
---- a/pnpm-workspace.yaml
-+++ b/pnpm-workspace.yaml
-@@ -22,7 +22,6 @@ overrides:
-   string.prototype.matchall: npm:@nolyfill/string.prototype.matchall@^1.0.44
- 
- patchedDependencies:
--  '@mediapipe/tasks-vision': patches/@mediapipe__tasks-vision.patch
-   '@xsai/generate-text@0.5.0-beta.2': patches/@xsai__generate-text@0.5.0-beta.2.patch
-   '@xsai/shared-chat@0.5.0-beta.2': patches/@xsai__shared-chat@0.5.0-beta.2.patch
-   '@xsai/stream-text@0.5.0-beta.2': patches/@xsai__stream-text@0.5.0-beta.2.patch
