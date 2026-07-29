@@ -90,6 +90,13 @@ providers:
     connect_timeout_seconds: 3.0
     request_timeout_seconds: 3.0
     max_message_bytes: 1048576
+    launch:
+      enabled: false
+      executable_path: ""
+      expected_sha256: ""
+      expected_app_asar_sha256: ""
+      startup_timeout_seconds: 30.0
+      shutdown_timeout_seconds: 8.0
 
   action:
     enabled: false

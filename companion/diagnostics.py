@@ -30,6 +30,7 @@ from companion.providers.implementations.windows_readonly_action import (
 )
 from companion.security.storage_readiness import check_runtime_storage
 from companion.security.windows_credentials import configured_secret_sources
+from companion.services.avatar_stage_supervisor import AvatarStageSupervisor
 
 
 class DiagnosticStatus(StrEnum):
@@ -468,6 +469,26 @@ async def _optional_provider_checks(
     config: RuntimeConfig, *, online: bool
 ) -> list[DiagnosticCheck]:
     checks: list[DiagnosticCheck] = []
+    if config.avatar_stage_launch_config:
+        stage = AvatarStageSupervisor(config.avatar_stage_launch_config)
+        try:
+            stage.validate_installation()
+            checks.append(
+                DiagnosticCheck(
+                    "avatar.launch_installation",
+                    DiagnosticStatus.PASS,
+                    "Managed AIRI executable and app.asar match their pinned digests.",
+                )
+            )
+        except Exception as exc:
+            checks.append(
+                DiagnosticCheck(
+                    "avatar.launch_installation",
+                    DiagnosticStatus.FAIL,
+                    f"Managed AIRI installation check failed: {type(exc).__name__}.",
+                    "Install the approved AIRI build locally and pin airi.exe and app.asar.",
+                )
+            )
     if config.avatar_config:
         if not config.avatar_config.get_auth_token():
             sources = configured_secret_sources(
@@ -481,7 +502,7 @@ async def _optional_provider_checks(
                     f"Enabled avatar token is unavailable from {sources}.",
                 )
             )
-        elif online:
+        elif online and not config.avatar_stage_launch_config:
             avatar = WebSocketAvatarProvider(config.avatar_config)
             try:
                 checks.append(
@@ -490,12 +511,19 @@ async def _optional_provider_checks(
             finally:
                 await avatar.shutdown()
         else:
+            message = (
+                "Managed AIRI is not launched by doctor; connectivity was not tested."
+                if config.avatar_stage_launch_config
+                else "Avatar is enabled but connectivity was not tested."
+            )
             checks.append(
                 DiagnosticCheck(
                     "avatar.online",
                     DiagnosticStatus.WARN,
-                    "Avatar is enabled but connectivity was not tested.",
-                    "Run --doctor-online to verify the bridge.",
+                    message,
+                    "Run --accept-avatar to launch and verify the pinned renderer."
+                    if config.avatar_stage_launch_config
+                    else "Run --doctor-online to verify the bridge.",
                 )
             )
     else:

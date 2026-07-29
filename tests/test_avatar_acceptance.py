@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
 from argparse import Namespace
 
@@ -212,6 +214,165 @@ providers:
     assert payload["generated_at"]
     assert payload["checks"][-1]["code"] == "avatar.frame_presented"
     assert "Observe the stage now" in captured.err
+
+
+@pytest.mark.asyncio
+async def test_managed_avatar_acceptance_launches_and_cleans_stage(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    executable = tmp_path / "airi.exe"
+    content = b"MZmanaged-airi"
+    executable.write_bytes(content)
+    app_asar = tmp_path / "resources" / "app.asar"
+    app_asar.parent.mkdir()
+    app_asar_content = b"managed-airi-application"
+    app_asar.write_bytes(app_asar_content)
+    config_path = tmp_path / "avatar.yaml"
+    config_path.write_text(
+        f"""identity:
+  avatar_model_id: kurisu
+providers:
+  avatar:
+    enabled: true
+    type: websocket_bridge
+    url: ws://127.0.0.1:6121/ws
+    auth_token_env: COMPANION_AVATAR_TOKEN
+    launch:
+      enabled: true
+      executable_path: {executable.as_posix()}
+      expected_sha256: {hashlib.sha256(content).hexdigest()}
+      expected_app_asar_sha256: {hashlib.sha256(app_asar_content).hexdigest()}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("COMPANION_AVATAR_TOKEN", "test-token")
+    monkeypatch.setattr(
+        "companion.__main__.WebSocketAvatarProvider", AcceptanceAvatarProvider
+    )
+    calls: list[str] = []
+
+    class Stage:
+        def __init__(self, _config) -> None:
+            calls.append("init")
+
+        async def start(self, token: str) -> None:
+            assert token == "test-token"
+            calls.append("start")
+
+        async def wait_until_bridge_ready(self) -> None:
+            calls.append("ready")
+
+        async def shutdown(self) -> None:
+            calls.append("shutdown")
+
+    monkeypatch.setattr("companion.__main__.AvatarStageSupervisor", Stage)
+    args = Namespace(
+        config=config_path,
+        doctor=False,
+        doctor_online=False,
+        doctor_json=False,
+        doctor_voice_hardware=False,
+        accept_voice=False,
+        accept_voice_json=False,
+        accept_avatar=False,
+        accept_avatar_json=True,
+        backup_memory=None,
+        verify_memory_backup=None,
+        overwrite_backup=False,
+        log_level=None,
+        voice_input=False,
+        voice=False,
+        once=None,
+    )
+
+    assert await async_main(args) == 0
+    assert calls == ["init", "start", "ready", "shutdown"]
+    assert json.loads(capsys.readouterr().out)["passed"] is True
+
+
+@pytest.mark.asyncio
+async def test_managed_avatar_acceptance_cancellation_still_cleans_stage(
+    tmp_path, monkeypatch
+) -> None:
+    executable = tmp_path / "airi.exe"
+    content = b"MZmanaged-airi"
+    executable.write_bytes(content)
+    app_asar = tmp_path / "resources" / "app.asar"
+    app_asar.parent.mkdir()
+    app_asar_content = b"managed-airi-application"
+    app_asar.write_bytes(app_asar_content)
+    config_path = tmp_path / "avatar.yaml"
+    config_path.write_text(
+        f"""identity:
+  avatar_model_id: kurisu
+providers:
+  avatar:
+    enabled: true
+    type: websocket_bridge
+    url: ws://127.0.0.1:6121/ws
+    auth_token_env: COMPANION_AVATAR_TOKEN
+    launch:
+      enabled: true
+      executable_path: {executable.as_posix()}
+      expected_sha256: {hashlib.sha256(content).hexdigest()}
+      expected_app_asar_sha256: {hashlib.sha256(app_asar_content).hexdigest()}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("COMPANION_AVATAR_TOKEN", "test-token")
+    calls: list[str] = []
+
+    class Provider(AcceptanceAvatarProvider):
+        async def shutdown(self) -> None:
+            calls.append("provider.shutdown")
+
+    class Stage:
+        def __init__(self, _config) -> None:
+            return None
+
+        async def start(self, _token: str) -> None:
+            calls.append("stage.start")
+
+        async def wait_until_bridge_ready(self) -> None:
+            calls.append("stage.ready")
+
+        async def shutdown(self) -> None:
+            calls.append("stage.shutdown")
+
+    async def cancel_acceptance(*_args, **_kwargs):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("companion.__main__.WebSocketAvatarProvider", Provider)
+    monkeypatch.setattr("companion.__main__.AvatarStageSupervisor", Stage)
+    monkeypatch.setattr("companion.__main__.run_avatar_acceptance", cancel_acceptance)
+    args = Namespace(
+        config=config_path,
+        doctor=False,
+        doctor_online=False,
+        doctor_json=False,
+        doctor_voice_hardware=False,
+        accept_voice=False,
+        accept_voice_json=False,
+        accept_avatar=False,
+        accept_avatar_json=True,
+        backup_memory=None,
+        verify_memory_backup=None,
+        overwrite_backup=False,
+        log_level=None,
+        voice_input=False,
+        voice=False,
+        once=None,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await async_main(args)
+
+    assert calls == [
+        "stage.start",
+        "stage.ready",
+        "provider.shutdown",
+        "stage.shutdown",
+    ]
 
 
 @pytest.mark.asyncio

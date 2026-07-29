@@ -109,7 +109,11 @@ operations, actual model-loaded callbacks, successful render callbacks, and main
 Renderer-side loading now invalidates stale model evidence. The patch leaves AIRI's existing
 MediaPipe patched dependency and pnpm metadata unchanged, passes `git apply --check`, and supports a
 frozen filtered install of the pinned stage application plus its 31 dependency workspaces with pnpm
-`10.33.0`. A real end-to-end run and visual acceptance remain. AIRI's
+`10.33.0`. The Python runtime can now optionally supervise that Windows build: configuration pins
+both the Electron executable and `resources/app.asar`, child credentials are allowlisted, startup
+uses a suspended process assigned to a kill-on-close Job Object, and runtime/acceptance cleanup owns
+the process tree. Doctor validates the installation without launching a GUI. A real end-to-end run
+and visual acceptance remain. AIRI's
 remote plugin bootstrap is unfinished at the pinned upstream commit, so no undocumented remote API
 is claimed. See `docs/avatar_bridge_protocol.md`.
 
@@ -335,7 +339,8 @@ The action and perception features must remain disabled until their correspondin
   no credential-backed test has yet proven microphone capture, faster-whisper model loading,
   Azure streaming TTS, gapless playback, and barge-in latency together.
 - The pinned AIRI `v0.11.3` patch now includes concrete Live2D/VRM store and component-hook wiring,
-  but AIRI has not been launched with an injected avatar token and no real
+  and the runtime now has a pinned managed launcher, but the approved AIRI build hashes have not
+  been entered and AIRI has not been launched with an injected avatar token; no real
   `--accept-avatar-json` or human visual acceptance run has completed.
 - Natural runtime one-shot gestures remain unwired: `ExpressionMapper.gestures` is intentionally
   excluded from repeated affect-state synchronization, and only the explicit acceptance gesture

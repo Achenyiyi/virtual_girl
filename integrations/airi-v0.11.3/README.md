@@ -38,6 +38,11 @@ The bridge remains disabled unless `COMPANION_AVATAR_TOKEN` is injected into the
 Unsupported renderer operations fail closed; in particular, VRM one-shot gestures and proactive
 level changes are not reported as successful because AIRI v0.11.3 exposes no matching public API.
 
+For the companion's managed Windows launcher, build or install the unpacked application and pin
+both `airi.exe` and `resources/app.asar` in `providers.avatar.launch`. Pinning only the executable
+is insufficient because electron-builder packages the reviewed main/renderer bridge code inside
+`app.asar`.
+
 Run its checks with:
 
 ```powershell

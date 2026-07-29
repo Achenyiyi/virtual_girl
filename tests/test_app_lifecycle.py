@@ -293,6 +293,80 @@ async def test_orchestrator_internal_shutdown_failure_marks_app_unclean() -> Non
 
 
 @pytest.mark.asyncio
+async def test_managed_avatar_stage_starts_before_orchestrator_and_stops_after() -> None:
+    app = CompanionApp(RuntimeConfig())
+    calls: list[str] = []
+
+    class Stage:
+        shutdown_clean = True
+
+        async def start(self, token: str) -> None:
+            assert token == "bridge-token"
+            calls.append("stage.start")
+
+        async def wait_until_bridge_ready(self) -> None:
+            calls.append("stage.ready")
+
+        async def shutdown(self) -> None:
+            calls.append("stage.shutdown")
+
+    class AvatarConfig:
+        def get_auth_token(self) -> str:
+            return "bridge-token"
+
+    class Orchestrator(LifecycleComponent):
+        async def startup(self) -> bool:
+            calls.append("orchestrator.start")
+            return False
+
+    app._avatar_stage = Stage()
+    app._config.avatar_config = AvatarConfig()  # type: ignore[assignment]
+    app._orchestrator = Orchestrator("orchestrator.shutdown", calls)
+
+    assert not await app.start()
+    assert calls[-1] == "stage.shutdown"
+    await app.stop()
+
+    assert calls.index("stage.ready") < calls.index("orchestrator.start")
+    assert calls.index("orchestrator.shutdown") < len(calls) - 1
+    assert calls[-1] == "stage.shutdown"
+
+
+@pytest.mark.asyncio
+async def test_managed_avatar_launch_failure_cleans_up_before_return() -> None:
+    app = CompanionApp(RuntimeConfig())
+    calls: list[str] = []
+
+    class Stage:
+        shutdown_clean = False
+
+        async def start(self, _token: str) -> None:
+            calls.append("stage.start")
+            raise OSError("failed")
+
+        async def wait_until_bridge_ready(self) -> None:
+            raise AssertionError("readiness must not run after launch failure")
+
+        async def shutdown(self) -> None:
+            calls.append("stage.shutdown")
+
+    class AvatarConfig:
+        def get_auth_token(self) -> str:
+            return "bridge-token"
+
+    async def unexpected_startup() -> bool:
+        raise AssertionError("orchestrator must not start after AIRI launch failure")
+
+    app._avatar_stage = Stage()
+    app._config.avatar_config = AvatarConfig()  # type: ignore[assignment]
+    app._orchestrator.startup = unexpected_startup  # type: ignore[method-assign]
+
+    assert not await app.start()
+
+    assert calls == ["stage.start", "stage.shutdown"]
+
+
+@pytest.mark.asyncio
 async def test_once_failure_still_stops_application(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "companion.yaml"
     config_path.write_text(

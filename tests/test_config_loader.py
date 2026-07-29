@@ -142,6 +142,77 @@ def test_enabled_avatar_bridge_config_is_parsed(tmp_path) -> None:
     assert config.avatar_config.request_timeout_seconds == 1.5
 
 
+def test_managed_avatar_launch_is_parsed_relative_to_explicit_config(tmp_path) -> None:
+    path = tmp_path / "avatar.yaml"
+    path.write_text(
+        """providers:
+  avatar:
+    enabled: true
+    type: websocket_bridge
+    url: ws://127.0.0.1:6121/ws
+    auth_token_env: COMPANION_AVATAR_TOKEN
+    launch:
+      enabled: true
+      executable_path: stage/airi.exe
+      expected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      startup_timeout_seconds: 12
+      shutdown_timeout_seconds: 4
+""",
+        encoding="utf-8",
+    )
+
+    config = RuntimeConfig.from_yaml(path)
+
+    assert config.avatar_stage_launch_config is not None
+    assert config.avatar_stage_launch_config.executable_path == str(
+        (tmp_path / "stage" / "airi.exe").resolve()
+    )
+    assert config.avatar_stage_launch_config.expected_sha256 == "a" * 64
+    assert config.avatar_stage_launch_config.expected_app_asar_sha256 == "b" * 64
+    assert config.avatar_stage_launch_config.startup_timeout_seconds == 12
+    assert config.avatar_stage_launch_config.shutdown_timeout_seconds == 4
+
+
+@pytest.mark.parametrize(
+    "avatar_yaml",
+    [
+        """enabled: false
+    launch:
+      enabled: true
+      executable_path: airi.exe
+      expected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb""",
+        """enabled: true
+    type: websocket_bridge
+    url: ws://127.0.0.1:9999/ws
+    auth_token_env: COMPANION_AVATAR_TOKEN
+    launch:
+      enabled: true
+      executable_path: airi.exe
+      expected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb""",
+        """enabled: true
+    type: websocket_bridge
+    url: ws://127.0.0.1:6121/ws
+    auth_token_env: OTHER_TOKEN
+    launch:
+      enabled: true
+      executable_path: airi.exe
+      expected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb""",
+    ],
+)
+def test_managed_avatar_launch_rejects_unsafe_boundary(tmp_path, avatar_yaml) -> None:
+    path = tmp_path / "avatar.yaml"
+    path.write_text(
+        f"providers:\n  avatar:\n    {avatar_yaml}\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="managed avatar launch"):
+        RuntimeConfig.from_yaml(path)
+
+
 @pytest.mark.parametrize(
     "url",
     [

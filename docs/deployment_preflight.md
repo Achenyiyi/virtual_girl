@@ -145,6 +145,14 @@ level, renderer-consumed state sequence, and a newly presented frame. Its JSON o
 only check identifiers and pass/fail messages; it contains no token, model path, state payload,
 user content, screenshot, or raw exception text.
 
+For managed AIRI startup, enable `providers.avatar.launch` and configure the installed
+`airi.exe`, its SHA-256, and the SHA-256 of the adjacent `resources/app.asar`. Relative paths in an
+explicit production YAML resolve from that YAML's directory. Local doctor validates both pinned
+files without starting AIRI or opening a GUI. Runtime and `--accept-avatar` launch AIRI before
+bridge health checks and always stop it after the WebSocket provider disconnects. Managed launch
+requires `ws://127.0.0.1:6121/ws` and `COMPANION_AVATAR_TOKEN`; an existing listener is rejected so
+acceptance cannot accidentally pass against an unrelated stage.
+
 The avatar JSON report is necessary but not sufficient for visual release approval. While the gate
 runs, an operator must confirm the intended character/model is visible, the happy expression and
 nod are visibly applied, animation does not freeze, and there is no release-blocking clipping,
@@ -175,8 +183,8 @@ devices, network providers, or the single-instance boundary.
    Manager or temporary environment overrides.
 8. Run `python -m companion --accept-voice-json 1>voice-acceptance.json`; follow the stderr prompts
    and retain the passing JSON report with the release evidence.
-9. Start the pinned AIRI stage extension, run `--accept-avatar-json`, retain its passing report, and
-   record the visual sign-off described above.
+9. Enable managed launch for the pinned AIRI build (or supervise the same pinned files externally),
+   run `--accept-avatar-json`, retain its passing report, and record the visual sign-off above.
 10. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.
 
 An action provider timeout is a process-lifetime quarantine, not a retry signal. For execution and

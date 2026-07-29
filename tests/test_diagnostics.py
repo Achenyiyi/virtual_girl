@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from contextlib import closing
@@ -150,6 +151,137 @@ async def test_online_doctor_uses_provider_health_without_leaking_key(
     online_check = next(check for check in report.checks if check.code == "llm.online")
     assert online_check.status == DiagnosticStatus.PASS
     assert secret not in report.to_json()
+
+
+@pytest.mark.asyncio
+async def test_doctor_validates_managed_avatar_installation_without_launching(
+    tmp_path, monkeypatch
+) -> None:
+    executable = tmp_path / "airi.exe"
+    content = b"MZapproved-airi"
+    executable.write_bytes(content)
+    app_asar = tmp_path / "resources" / "app.asar"
+    app_asar.parent.mkdir()
+    app_asar_content = b"approved-airi-application"
+    app_asar.write_bytes(app_asar_content)
+    config_path = tmp_path / "companion.yaml"
+    config_path.write_text(
+        f"""providers:
+  llm:
+    type: cloud
+    cloud:
+      provider: openai_compatible
+      model: test-model
+      api_key_env: TEST_DOCTOR_LLM_KEY
+      base_url: https://example.invalid/v1/chat/completions
+  memory:
+    type: sqlite
+    db_path: memory.db
+  avatar:
+    enabled: true
+    type: websocket_bridge
+    url: ws://127.0.0.1:6121/ws
+    auth_token_env: COMPANION_AVATAR_TOKEN
+    launch:
+      enabled: true
+      executable_path: {executable.as_posix()}
+      expected_sha256: {hashlib.sha256(content).hexdigest()}
+      expected_app_asar_sha256: {hashlib.sha256(app_asar_content).hexdigest()}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TEST_DOCTOR_LLM_KEY", "configured-llm-credential")
+    monkeypatch.setenv("COMPANION_AVATAR_TOKEN", "configured-avatar-token")
+    monkeypatch.setattr(
+        "companion.services.avatar_stage_supervisor._is_remote_path",
+        lambda _path, *, platform: False,
+    )
+
+    def unexpected_start(*_args, **_kwargs):
+        raise AssertionError("doctor must not launch AIRI")
+
+    monkeypatch.setattr(
+        "companion.services.avatar_stage_supervisor.subprocess.Popen",
+        unexpected_start,
+    )
+
+    report = await run_diagnostics(RuntimeConfig.from_yaml(config_path), online=False)
+
+    check = next(
+        item for item in report.checks if item.code == "avatar.launch_installation"
+    )
+    assert check.status == DiagnosticStatus.PASS
+
+
+@pytest.mark.asyncio
+async def test_online_doctor_does_not_launch_or_connect_managed_avatar(
+    tmp_path, monkeypatch
+) -> None:
+    executable = tmp_path / "airi.exe"
+    content = b"MZapproved-airi"
+    executable.write_bytes(content)
+    app_asar = tmp_path / "resources" / "app.asar"
+    app_asar.parent.mkdir()
+    app_asar_content = b"approved-airi-application"
+    app_asar.write_bytes(app_asar_content)
+    config_path = tmp_path / "companion.yaml"
+    config_path.write_text(
+        f"""providers:
+  llm:
+    type: cloud
+    cloud:
+      provider: openai_compatible
+      model: test-model
+      api_key_env: TEST_DOCTOR_LLM_KEY
+      base_url: https://example.invalid/v1/chat/completions
+  memory:
+    type: sqlite
+    db_path: memory.db
+  avatar:
+    enabled: true
+    type: websocket_bridge
+    url: ws://127.0.0.1:6121/ws
+    auth_token_env: COMPANION_AVATAR_TOKEN
+    launch:
+      enabled: true
+      executable_path: {executable.as_posix()}
+      expected_sha256: {hashlib.sha256(content).hexdigest()}
+      expected_app_asar_sha256: {hashlib.sha256(app_asar_content).hexdigest()}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TEST_DOCTOR_LLM_KEY", "configured-llm-credential")
+    monkeypatch.setenv("COMPANION_AVATAR_TOKEN", "configured-avatar-token")
+    monkeypatch.setattr(
+        "companion.services.avatar_stage_supervisor._is_remote_path",
+        lambda _path, *, platform: False,
+    )
+
+    class HealthyLLM:
+        def __init__(self, _config) -> None:
+            return None
+
+        async def health_check(self):
+            from companion.providers.base import ProviderHealth
+
+            return ProviderHealth.HEALTHY
+
+        async def shutdown(self) -> None:
+            return None
+
+    def unexpected_avatar(*_args, **_kwargs):
+        raise AssertionError("online doctor must not connect managed AIRI")
+
+    monkeypatch.setattr("companion.diagnostics.CloudLLMProvider", HealthyLLM)
+    monkeypatch.setattr(
+        "companion.diagnostics.WebSocketAvatarProvider", unexpected_avatar
+    )
+
+    report = await run_diagnostics(RuntimeConfig.from_yaml(config_path), online=True)
+
+    check = next(item for item in report.checks if item.code == "avatar.online")
+    assert check.status == DiagnosticStatus.WARN
+    assert report.exit_code == 0
 
 
 @pytest.mark.asyncio
