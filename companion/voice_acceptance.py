@@ -8,8 +8,10 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from companion import __version__
 from companion.core.event_bus import EventBus
 from companion.events.base import BaseEvent
 from companion.events.conversation import ConversationTurnFailedEvent
@@ -54,6 +56,9 @@ class VoiceAcceptanceReport:
     def to_json(self) -> str:
         return json.dumps(
             {
+                "schema_version": 1,
+                "app_version": __version__,
+                "generated_at": datetime.now(UTC).isoformat(),
                 "exit_code": self.exit_code,
                 "passed": self.exit_code == 0,
                 "checks": [asdict(check) for check in self.checks],

@@ -166,7 +166,11 @@ async def test_voice_acceptance_proves_complete_and_interrupted_paths() -> None:
         "voice.interrupt_terminal",
         "voice.interrupt_latency",
     ]
-    assert json.loads(report.to_json())["passed"] is True
+    payload = json.loads(report.to_json())
+    assert payload["passed"] is True
+    assert payload["schema_version"] == 1
+    assert payload["app_version"]
+    assert payload["generated_at"]
     assert bus.subscriber_count == 0
 
 

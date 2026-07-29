@@ -154,6 +154,8 @@ not close the AIRI/Live2D/VRM release gate.
 
 ## Target-machine release sequence
 
+Follow `docs/release_process.md` for version, evidence, tag, provenance, and GitHub Release gates.
+
 1. Revoke any credential that was ever stored outside an environment secret or Credential Manager.
 2. Store only the rotated replacements using the Generic Credential targets above.
 3. Install `requirements.lock` with hashes and install the wheel with `--no-deps`.

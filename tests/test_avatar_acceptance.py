@@ -203,6 +203,9 @@ providers:
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
     assert payload["passed"] is True
+    assert payload["schema_version"] == 1
+    assert payload["app_version"]
+    assert payload["generated_at"]
     assert payload["checks"][-1]["code"] == "avatar.frame_presented"
     assert "Observe the stage now" in captured.err
 

@@ -7,8 +7,10 @@ import contextlib
 import json
 import time
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
+from companion import __version__
 from companion.providers.avatar import AvatarModel, AvatarState, BodyPose, FacialExpression
 from companion.providers.base import ProviderHealth
 from companion.providers.implementations.websocket_avatar import (
@@ -57,6 +59,9 @@ class AvatarAcceptanceReport:
     def to_json(self) -> str:
         return json.dumps(
             {
+                "schema_version": 1,
+                "app_version": __version__,
+                "generated_at": datetime.now(UTC).isoformat(),
                 "exit_code": self.exit_code,
                 "passed": self.exit_code == 0,
                 "checks": [asdict(check) for check in self.checks],
