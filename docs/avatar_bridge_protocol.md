@@ -145,12 +145,14 @@ unfinished remote-plugin API is not a production integration target. The impleme
 per-connection concurrency, Eventa forwarding boundary, strict renderer input validation, and a
 renderer-owned evidence state machine. Active peers close deterministically during shutdown.
 
-The remaining work is wiring the dependency callbacks to AIRI's real Live2D/VRM stores and
-component lifecycle. `notifyModelLoaded()` must be called only by the real model-loaded callback;
-`notifyPresentedFrame()` must be called only after a successful Pixi/VRM render; window visibility
-must come from the Electron main window. Therefore the current implementation makes the bridge
-boundary testable without manufacturing `stage.inspect` evidence, but does not yet close the real
-AIRI rendering gate.
+The pinned patch in `integrations/airi-v0.11.3` wires the dependency callbacks to AIRI's real
+Live2D/VRM stores and component lifecycle. `notifyModelLoaded()` is called by the real model-loaded
+callbacks, `notifyPresentedFrame()` follows successful Pixi/VRM render callbacks, and visibility is
+the conjunction of renderer visibility and Electron main-window visibility. Unsupported operations
+fail closed. The patch also removes AIRI's stale MediaPipe patched-dependency entry because the
+published package already contains that fix. It passes `git apply --check`; the stage app and its
+31 dependency workspaces build successfully with pnpm `10.33.0`, and post-build typechecking finds
+no errors in patch-modified files. Real runtime and visual acceptance remain open release gates.
 
 Research references:
 
