@@ -21,6 +21,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+from companion.airi_launcher import provision_avatar_token, run_airi
 from companion.audio.microphone import MicrophoneCapture, VoiceChatMode
 from companion.audio.player import SoundDeviceAudioOutput, SystemAudioOutput
 from companion.avatar_acceptance import (
@@ -29,7 +30,7 @@ from companion.avatar_acceptance import (
     run_avatar_acceptance,
     shutdown_avatar_acceptance_provider,
 )
-from companion.config_loader import RuntimeConfig
+from companion.config_loader import RuntimeConfig, write_default_config
 from companion.core.event_bus import EventBus
 from companion.core.expression_mapper import ExpressionMapper
 from companion.core.orchestrator import CompanionOrchestrator
@@ -453,6 +454,11 @@ class CompanionApp:
 
 async def async_main(args: argparse.Namespace) -> int:
     """Async main entry point."""
+    init_config = getattr(args, "init_config", None)
+    if init_config:
+        target = write_default_config(init_config)
+        print(f"Editable configuration created: {target}")
+        return 0
     if args.verify_memory_backup:
         version, legacy = MemoryService.verify_backup(args.verify_memory_backup)
         suffix = " (legacy v0; it will be registered on first startup)" if legacy else ""
@@ -466,6 +472,21 @@ async def async_main(args: argparse.Namespace) -> int:
     if getattr(args, "validate_config", False):
         print("Configuration is valid.")
         return 0
+    if getattr(args, "provision_avatar_token", False):
+        created = provision_avatar_token(config)
+        print(
+            "Avatar bridge credential created in Windows Credential Manager."
+            if created
+            else "Avatar bridge credential is already configured; no change was made."
+        )
+        return 0
+    launch_airi = getattr(args, "launch_airi", None)
+    if launch_airi:
+        airi_profile = getattr(args, "airi_profile", None)
+        if airi_profile is None:
+            raise ValueError("--launch-airi requires --airi-profile")
+        print("Starting AIRI with an isolated profile. Press Ctrl+C to stop it.")
+        return await run_airi(config, launch_airi, airi_profile)
     restore_memory_backup = getattr(args, "restore_memory_backup", None)
     if restore_memory_backup:
         memory_path = config.effective_memory_config().db_path
@@ -903,6 +924,12 @@ def main() -> None:
     parser.add_argument(
         "--config", "-c", type=Path, default=None, help="配置文件路径 (默认: 包内置配置)"
     )
+    parser.add_argument(
+        "--init-config",
+        type=Path,
+        default=None,
+        help="将包内置配置安全复制到指定的新文件后退出",
+    )
     parser.add_argument("--once", "-1", type=str, default=None, help="发送一条消息后退出")
     parser.add_argument(
         "--log-level",
@@ -957,6 +984,23 @@ def main() -> None:
         help="验收真实形象舞台并仅输出结构化 JSON 结果",
     )
     parser.add_argument(
+        "--provision-avatar-token",
+        action="store_true",
+        help="在 Windows Credential Manager 中创建缺失的随机形象桥接 Token",
+    )
+    parser.add_argument(
+        "--launch-airi",
+        type=Path,
+        default=None,
+        help="以前台方式安全启动本地 AIRI .exe 并仅注入形象桥接 Token",
+    )
+    parser.add_argument(
+        "--airi-profile",
+        type=Path,
+        default=None,
+        help="AIRI 独占的本地用户数据与缓存目录（至少保留 2 GiB）",
+    )
+    parser.add_argument(
         "--backup-memory",
         type=Path,
         default=None,
@@ -993,8 +1037,11 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if bool(args.launch_airi) != bool(args.airi_profile):
+        parser.error("--launch-airi 和 --airi-profile 必须一起使用")
     maintenance_modes = sum(
         (
+            bool(args.init_config),
             bool(args.validate_config),
             any(
                 (
@@ -1006,6 +1053,8 @@ def main() -> None:
             ),
             bool(args.accept_voice or args.accept_voice_json),
             bool(args.accept_avatar or args.accept_avatar_json),
+            bool(args.provision_avatar_token),
+            bool(args.launch_airi),
             bool(args.backup_memory),
             bool(args.verify_memory_backup),
             bool(args.restore_memory_backup),
@@ -1013,8 +1062,9 @@ def main() -> None:
     )
     if maintenance_modes > 1:
         parser.error(
-            "validate-config、doctor、accept-voice、accept-avatar、backup-memory、"
-            "verify-memory-backup 和 restore-memory-backup 模式不能组合使用"
+            "init-config、validate-config、doctor、accept-voice、accept-avatar、"
+            "provision-avatar-token、launch-airi、backup-memory、verify-memory-backup "
+            "和 restore-memory-backup 模式不能组合使用"
         )
     if args.accept_voice and args.accept_voice_json:
         parser.error("--accept-voice 和 --accept-voice-json 只能选择一个")
@@ -1027,6 +1077,8 @@ def main() -> None:
         args.voice_input = True
     try:
         exit_code = asyncio.run(async_main(args))
+    except KeyboardInterrupt:
+        exit_code = 130
     except (OSError, ValueError, sqlite3.DatabaseError) as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         exit_code = 2

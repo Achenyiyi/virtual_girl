@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from companion.__main__ import CompanionApp, _configure_cli_streams, async_main
+from companion.__main__ import CompanionApp, _configure_cli_streams, async_main, main
 from companion.config_loader import RuntimeConfig
 from companion.providers.implementations.cloud_llm import CloudLLMConfig
 
@@ -50,6 +50,20 @@ def test_cli_streams_use_utf8_for_multilingual_output(monkeypatch) -> None:
         {"encoding": "utf-8", "errors": "backslashreplace"},
         {"encoding": "utf-8", "errors": "backslashreplace"},
     ]
+
+
+def test_cli_interrupt_exits_without_an_error_traceback(monkeypatch) -> None:
+    async def interrupt(_args) -> int:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("companion.__main__._configure_cli_streams", lambda: None)
+    monkeypatch.setattr("companion.__main__.async_main", interrupt)
+    monkeypatch.setattr("companion.__main__.sys.argv", ["companion"])
+
+    with pytest.raises(SystemExit) as exc_info:
+        main()
+
+    assert exc_info.value.code == 130
 
 
 @pytest.mark.asyncio

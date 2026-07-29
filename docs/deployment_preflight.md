@@ -24,6 +24,18 @@ Relative data/log/audit paths in the packaged default resolve under
 resolve from that file's directory. An explicit missing config file is an error and never silently
 falls back to defaults.
 
+The repository does not ship an editable `production.yaml`. Export the exact packaged template to
+a new file; the command creates missing parent directories and refuses to overwrite an existing
+file:
+
+```powershell
+python -m companion --init-config E:\VirtualCompanion\production.yaml
+python -m companion --config E:\VirtualCompanion\production.yaml --validate-config
+```
+
+On a low-capacity system drive, place this configuration and its relative runtime paths on a local
+high-capacity volume. Keep the live profile off UNC, mapped, synced, and removable locations.
+
 ## Doctor commands
 
 Run from the exact Python environment used to start the release:
@@ -35,8 +47,8 @@ python -m companion --doctor-online --voice-input
 python -m companion --doctor-json --voice-input
 python -m companion --accept-voice
 python -m companion --accept-voice-json 1>voice-acceptance.json
-python -m companion --config production.yaml --accept-avatar
-python -m companion --config production.yaml --accept-avatar-json 1>avatar-acceptance.json
+python -m companion --config E:\VirtualCompanion\production.yaml --accept-avatar
+python -m companion --config E:\VirtualCompanion\production.yaml --accept-avatar-json 1>avatar-acceptance.json
 ```
 
 `--doctor` performs no LLM/TTS network calls. `--doctor-online` validates configured remote
@@ -64,6 +76,35 @@ Never put a secret in YAML, `.env`, a command argument, a key file, or a credent
 After rotation, delete the superseded Generic Credential and create its replacement before running
 `--doctor-online`. The runtime reads only the configured Generic Credential; it does not enumerate
 the user's credential vault.
+
+After enabling the avatar provider in the exported YAML, the runtime can provision only the missing
+Avatar bridge credential itself:
+
+```powershell
+python -m companion --config E:\VirtualCompanion\production.yaml --provision-avatar-token
+```
+
+Provisioning uses a cryptographically random token, is idempotent, never prints the value, and
+refuses to run while a temporary `COMPANION_AVATAR_TOKEN` override is present. Rotate or delete an
+existing Avatar credential manually rather than using provisioning as an implicit replacement.
+
+## AIRI launcher boundary
+
+Build the patched, pinned AIRI application first. Then launch its local absolute `.exe` with a
+dedicated profile on a local volume that has at least 2 GiB free:
+
+```powershell
+python -m companion --config E:\VirtualCompanion\production.yaml `
+  --launch-airi E:\VirtualCompanion\AIRI\AIRI.exe `
+  --airi-profile E:\VirtualCompanion\airi-profile
+```
+
+`--launch-airi` and `--airi-profile` are inseparable. The launcher directly executes the binary
+without a shell and supplies only an allowlisted Windows environment plus the Avatar token. It
+does not forward DeepSeek, Azure Speech, `NODE_OPTIONS`, or `ELECTRON_RUN_AS_NODE`. AIRI `userData`,
+roaming/local app data, and temporary files are redirected under the dedicated profile so Electron
+cache growth does not silently return to the system drive. Ctrl+C first requests graceful process
+termination and uses forced termination only after the bounded shutdown interval.
 
 ## Single-instance boundary
 
@@ -160,10 +201,10 @@ Configuration parsing rejects unknown fields at every supported nesting level. T
 field error as a deployment defect; correct the spelling or remove the unsupported option instead
 of attempting to bypass validation.
 
-Run `python -m companion --config production.yaml --validate-config` in packaging and deployment
-automation. It validates the complete supported schema, types, ranges, provider choices, endpoint
-rules, and safety constraints, then exits without reading credentials or touching runtime storage,
-devices, network providers, or the single-instance boundary.
+Run `python -m companion --config E:\VirtualCompanion\production.yaml --validate-config` in
+packaging and deployment automation. It validates the complete supported schema, types, ranges,
+provider choices, endpoint rules, and safety constraints, then exits without reading credentials
+or touching runtime storage, devices, network providers, or the single-instance boundary.
 
 1. Revoke any credential that was ever stored outside an environment secret or Credential Manager.
 2. Store only the rotated replacements using the Generic Credential targets above.
@@ -175,8 +216,9 @@ devices, network providers, or the single-instance boundary.
    Manager or temporary environment overrides.
 8. Run `python -m companion --accept-voice-json 1>voice-acceptance.json`; follow the stderr prompts
    and retain the passing JSON report with the release evidence.
-9. Start the pinned AIRI stage extension, run `--accept-avatar-json`, retain its passing report, and
-   record the visual sign-off described above.
+9. Provision the missing Avatar token, start the pinned AIRI `.exe` with `--launch-airi` and a
+   high-capacity `--airi-profile`, run `--accept-avatar-json` from another terminal, retain its
+   passing report, and record the visual sign-off described above.
 10. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.
 
 An action provider timeout is a process-lifetime quarantine, not a retry signal. For execution and

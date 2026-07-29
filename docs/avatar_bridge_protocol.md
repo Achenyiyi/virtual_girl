@@ -40,6 +40,20 @@ providers:
 
 Do not embed the token in the target name, URL, YAML, or extension configuration.
 
+For the Windows desktop build, create a missing random bridge token and launch AIRI through the
+runtime's credential-safe operator commands:
+
+```powershell
+python -m companion --config E:\VirtualCompanion\production.yaml --provision-avatar-token
+python -m companion --config E:\VirtualCompanion\production.yaml `
+  --launch-airi E:\VirtualCompanion\AIRI\AIRI.exe `
+  --airi-profile E:\VirtualCompanion\airi-profile
+```
+
+The profile must be an absolute dedicated directory on a local Windows volume with at least 2 GiB
+free. The launcher redirects Electron user data, app data, caches, and temporary files there and
+does not forward the companion's LLM or TTS credentials to AIRI.
+
 When enabled, an unreachable or unhealthy stage, a failed model validation/load, or an
 initial state-sync failure prevents companion startup. Headless mode remains available by
 leaving `enabled: false`.

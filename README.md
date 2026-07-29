@@ -91,6 +91,13 @@ python -m companion --voice-input
 `.env`、key 文件、命令参数或启动脚本。设置与轮换步骤见
 [`docs/deployment_preflight.md`](docs/deployment_preflight.md)。
 
+先从 wheel 内置模板生成一份不会覆盖现有文件的生产配置，再按机器实际路径编辑：
+
+```powershell
+python -m companion --init-config E:\VirtualCompanion\production.yaml
+python -m companion --config E:\VirtualCompanion\production.yaml --validate-config
+```
+
 配置文件采用严格字段校验。未知字段或拼写错误会在任何 Provider 启动前直接报错，避免安全、
 超时、审计或主动策略选项被静默忽略并退回默认值。
 
@@ -128,7 +135,7 @@ python -m companion --backup-memory D:\CompanionBackups\latest.db --overwrite-ba
 
 ```powershell
 # 只校验字段、类型、范围和安全约束，不访问凭据、存储、设备或 Provider
-python -m companion --config production.yaml --validate-config
+python -m companion --config E:\VirtualCompanion\production.yaml --validate-config
 
 # 本地核心检查
 python -m companion --doctor
@@ -148,8 +155,17 @@ python -m companion --doctor-json --voice-input
 # 轮换凭据注入后的真实语音上线验收；交互提示走 stderr，结果写入 JSON
 python -m companion --accept-voice-json 1>voice-acceptance.json
 
-# AIRI/Live2D/VRM 扩展启动后，验收模型加载、状态应用和真实渲染帧推进
-python -m companion --config production.yaml --accept-avatar-json 1>avatar-acceptance.json
+# 形象桥接首次启用后，幂等创建随机 Token；已有凭据不会被轮换
+python -m companion --config E:\VirtualCompanion\production.yaml --provision-avatar-token
+
+# 用至少保留 2 GiB 的本地独占 profile 启动 AIRI，不向子进程传递 LLM/TTS 凭据
+python -m companion --config E:\VirtualCompanion\production.yaml `
+  --launch-airi E:\VirtualCompanion\AIRI\AIRI.exe `
+  --airi-profile E:\VirtualCompanion\airi-profile
+
+# AIRI/Live2D/VRM 扩展启动后，在另一终端验收真实渲染帧推进
+python -m companion --config E:\VirtualCompanion\production.yaml `
+  --accept-avatar-json 1>avatar-acceptance.json
 ```
 
 语音上线验收要求一轮真实麦克风到流式播放完整成功，再在第二轮播放期间通过新的 VAD
@@ -162,8 +178,9 @@ speech-start 边沿立即打断；默认门槛为首音频 900 ms、打断 300 m
 [`docs/avatar_bridge_protocol.md`](docs/avatar_bridge_protocol.md) 和上线预检文档。
 
 形象舞台默认关闭。桥接协议、鉴权环境变量和 AIRI 当前适配状态见
-[`docs/avatar_bridge_protocol.md`](docs/avatar_bridge_protocol.md)。在真实舞台扩展完成前，不要把
-`providers.avatar.enabled` 设为 `true`。
+[`docs/avatar_bridge_protocol.md`](docs/avatar_bridge_protocol.md)。仅在应用了固定 AIRI patch、
+设置了真实模型 ID、已准备 Avatar bridge 凭据并准备执行真实验收时启用
+`providers.avatar.enabled`；当前仍不能视为已通过上线门禁。
 
 Windows 行动能力同样默认关闭。目前只提供三个不可变、无参数的只读诊断能力；启用方式、隐私
 影响和明确不支持的操作见
