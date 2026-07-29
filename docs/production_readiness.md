@@ -102,10 +102,11 @@ Avatar implementation status: the Python runtime now owns a versioned, authentic
 bridge with bounded messages and timeouts, concurrent request correlation, model validation/load,
 full affect-derived state snapshots, proactive-level synchronization, reconnect, and clean
 shutdown. It is disabled by default and fails startup closed when explicitly enabled but unhealthy.
-The AIRI `v0.11.3` protocol core is implemented and tested under `integrations/airi-v0.11.3`, but
-the Electron/Eventa renderer adapter and a real Live2D/VRM end-to-end run remain. AIRI's remote
-plugin bootstrap is unfinished at the pinned upstream commit, so no undocumented remote API is
-claimed. See `docs/avatar_bridge_protocol.md`.
+The AIRI `v0.11.3` protocol core, loopback H3/CrossWS server, Eventa forwarding boundary, and
+renderer-owned evidence state machine are implemented and tested under `integrations/airi-v0.11.3`.
+The concrete Live2D/VRM store and render-hook wiring plus a real end-to-end run remain. AIRI's
+remote plugin bootstrap is unfinished at the pinned upstream commit, so no undocumented remote API
+is claimed. See `docs/avatar_bridge_protocol.md`.
 
 Avatar acceptance status: the release CLI now has an LLM-independent `--accept-avatar` gate. A
 production stage extension must expose renderer-owned inspection evidence showing the configured
@@ -327,9 +328,10 @@ The action and perception features must remain disabled until their correspondin
 - Local voice modules and default devices now pass doctor in the isolated release environment, but
   no credential-backed test has yet proven microphone capture, faster-whisper model loading,
   Azure streaming TTS, gapless playback, and barge-in latency together.
-- The Python avatar bridge and pinned AIRI `v0.11.3` protocol core are locally tested, but AIRI
-  still needs its Electron/Eventa renderer adapter, followed by a real Live2D/VRM rendering and
-  emotion-synchronization test. AIRI's inspected remote-plugin bootstrap is not a stable target.
+- The Python avatar bridge plus the pinned AIRI `v0.11.3` loopback server, Eventa boundary, and
+  renderer-owned evidence core are locally tested. AIRI still needs concrete Live2D/VRM store and
+  component-hook wiring, followed by real rendering and emotion-synchronization acceptance. AIRI's
+  inspected remote-plugin bootstrap is not a stable target.
 - The real Windows read-only provider is wired and validated, but file changes, messages,
   application control, input automation, installation, and other mutating actions remain
   unavailable. They require a separate OS isolation boundary and target-device acceptance tests.
