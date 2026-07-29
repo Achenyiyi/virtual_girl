@@ -86,8 +86,9 @@ authoritative event persistence, causal fact references, atomic memory rebuild, 
 time-versioned preference keys, single-use action confirmation, provider timeouts, strict
 LLM readiness status, unknown no-data telemetry, and standards-compliant WAV generation.
 
-Active milestone: rotate the exposed local credential, validate the interruptible voice path and
-mutating-action isolation, and implement the AIRI-side stage extension.
+Active milestone: confirm revocation of the exposed credential, validate the interruptible voice
+path, and implement the AIRI-side stage extension. Mutating actions remain out of release scope
+until a separate OS isolation boundary exists.
 
 Voice implementation status: the code path now includes optional local faster-whisper ASR,
 contextual runtime generation, network-streamed Azure PCM, gapless sounddevice playback,
@@ -101,9 +102,10 @@ Avatar implementation status: the Python runtime now owns a versioned, authentic
 bridge with bounded messages and timeouts, concurrent request correlation, model validation/load,
 full affect-derived state snapshots, proactive-level synchronization, reconnect, and clean
 shutdown. It is disabled by default and fails startup closed when explicitly enabled but unhealthy.
-The remaining renderer gate is an AIRI-side extension and a real Live2D/VRM end-to-end run; AIRI's
-remote plugin bootstrap is unfinished at the inspected upstream commit, so no undocumented Eventa
-wire format is hard-coded. See `docs/avatar_bridge_protocol.md`.
+The AIRI `v0.11.3` protocol core is implemented and tested under `integrations/airi-v0.11.3`, but
+the Electron/Eventa renderer adapter and a real Live2D/VRM end-to-end run remain. AIRI's remote
+plugin bootstrap is unfinished at the pinned upstream commit, so no undocumented remote API is
+claimed. See `docs/avatar_bridge_protocol.md`.
 
 Avatar acceptance status: the release CLI now has an LLM-independent `--accept-avatar` gate. A
 production stage extension must expose renderer-owned inspection evidence showing the configured
@@ -237,7 +239,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 74 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 392 tests passed with 79.87%
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 393 tests passed with 79.87%
   total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 83%, voice
   pipeline 85%, cloud LLM 63%, cloud TTS 81%, avatar acceptance 78%, action service 82%, and the
   action audit store 94%.
@@ -266,9 +268,11 @@ The action and perception features must remain disabled until their correspondin
   the persisted SQLite hash chain. Boundary tests proved `open_app`, parameter injection, forged
   risk/method values, and unknown actions cannot reach provider execution.
 - On the target machine's isolated release environment, doctor found faster-whisper, NumPy,
-  sounddevice, a usable default microphone, and a usable default output device. It currently fails
-  only the required DeepSeek and Azure credential checks, as expected before rotated credentials
-  are injected.
+  sounddevice, a usable default microphone, and a usable default output device. A separate online
+  doctor resolved DeepSeek from `VirtualCompanion/DeepSeek` and completed the provider health check
+  without exposing the credential. This proves current credential usability, not revocation of any
+  previously exposed key. Voice preflight currently fails only because
+  `VirtualCompanion/AzureSpeech` is absent.
 - The explicit hardware doctor first downloaded/loaded the configured faster-whisper `base` model
   in 34.3 seconds. With the cached model, the final implementation loaded it in 2.9 seconds,
   completed a real CTranslate2 in-memory silence inference in 0.2 seconds, captured 15 microphone
@@ -323,16 +327,15 @@ The action and perception features must remain disabled until their correspondin
 - Local voice modules and default devices now pass doctor in the isolated release environment, but
   no credential-backed test has yet proven microphone capture, faster-whisper model loading,
   Azure streaming TTS, gapless playback, and barge-in latency together.
-- The Python avatar bridge is complete and locally integration-tested, but AIRI still needs a thin
-  stage extension implementing the documented contract, followed by a real Live2D/VRM rendering
-  and emotion-synchronization test. AIRI's currently inspected remote-plugin bootstrap is not a
-  stable implementation target.
+- The Python avatar bridge and pinned AIRI `v0.11.3` protocol core are locally tested, but AIRI
+  still needs its Electron/Eventa renderer adapter, followed by a real Live2D/VRM rendering and
+  emotion-synchronization test. AIRI's inspected remote-plugin bootstrap is not a stable target.
 - The real Windows read-only provider is wired and validated, but file changes, messages,
   application control, input automation, installation, and other mutating actions remain
   unavailable. They require a separate OS isolation boundary and target-device acceptance tests.
 - The current system Python has an unrelated pre-existing `paddlex`/PyYAML version conflict; the
-  project's isolated hash-locked release environment passes `pip check`. Azure/DeepSeek
-  environment variables are not present, so hardware- and credential-backed end-to-end testing
-  remains pending.
+  project's isolated hash-locked release environment passes `pip check`. Environment overrides are
+  not required because production credentials use Credential Manager. DeepSeek online health now
+  passes there; Azure credential-backed voice acceptance remains pending.
 - Dependency hashes were generated and verified on Windows/Python 3.12. Cross-platform releases
   are not claimed; regenerate and verify the lock on every newly supported OS/Python target.

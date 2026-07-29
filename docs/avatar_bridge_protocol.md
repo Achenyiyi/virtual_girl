@@ -138,16 +138,20 @@ snapshot rather than a partial patch.
 
 ## AIRI integration status
 
-As inspected at AIRI commit `a42e3ae0b51000c552d7cd19e6c20fa10918a614`, AIRI provides a
-plugin protocol, a WebSocket remote channel, and Live2D expression tools. However,
-`setupRemotePluginScope()` is still empty and the expression tools are not registered as a
-stable remote API. Therefore AIRI currently needs a thin extension that implements this v1
-contract and translates it to the local stage APIs. Pin that extension to a tested AIRI release
-until AIRI publishes a stable remote interface.
+The integration is pinned to AIRI `v0.11.3` at commit
+`dbf812488829a61cc2e95909e021b215704d066c`. Its `setupRemotePluginScope()` remains empty, so the
+unfinished remote-plugin API is not a production integration target. The protocol core in
+`integrations/airi-v0.11.3` now implements strict envelope parsing, bounded message handling,
+authenticated version negotiation, method routing, and sanitized failures. The remaining work is
+an Electron-main WebSocket endpoint and an Eventa renderer adapter that translates this contract
+to AIRI's real Live2D/VRM stores and renderer lifecycle. In particular, `stage.inspect` evidence
+must come from applied renderer state and presented frames rather than request-handler counters.
 
 Research references:
 
-- <https://github.com/moeru-ai/airi/blob/a42e3ae0b51000c552d7cd19e6c20fa10918a614/packages/plugin-protocol/README.md>
-- <https://github.com/moeru-ai/airi/blob/a42e3ae0b51000c552d7cd19e6c20fa10918a614/packages/plugin-sdk/src/channels/remote/websocket/index.ts>
-- <https://github.com/moeru-ai/airi/blob/a42e3ae0b51000c552d7cd19e6c20fa10918a614/packages/plugin-sdk/src/plugin/remote/index.ts>
-- <https://github.com/moeru-ai/airi/blob/a42e3ae0b51000c552d7cd19e6c20fa10918a614/packages/stage-ui-live2d/src/tools/expression-tools.ts>
+- <https://github.com/moeru-ai/airi/blob/dbf812488829a61cc2e95909e021b215704d066c/packages/plugin-sdk/src/plugin/remote/index.ts>
+- <https://github.com/moeru-ai/airi/blob/dbf812488829a61cc2e95909e021b215704d066c/apps/stage-tamagotchi/src/main/index.ts>
+- <https://github.com/moeru-ai/airi/blob/dbf812488829a61cc2e95909e021b215704d066c/apps/stage-tamagotchi/src/renderer/App.vue>
+- <https://github.com/moeru-ai/airi/blob/dbf812488829a61cc2e95909e021b215704d066c/packages/stage-ui/src/stores/display-models.ts>
+- <https://github.com/moeru-ai/airi/blob/dbf812488829a61cc2e95909e021b215704d066c/packages/stage-ui-live2d/src/components/scenes/live2d/Canvas.vue>
+- <https://github.com/moeru-ai/airi/blob/dbf812488829a61cc2e95909e021b215704d066c/packages/stage-ui-live2d/src/stores/expression-store.ts>
