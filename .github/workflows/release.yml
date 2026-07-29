@@ -68,9 +68,57 @@ jobs:
             dist/*.tar.gz
             dist/SHA256SUMS
 
-      - name: Publish immutable GitHub release
+      - name: Publish complete immutable GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${{ github.ref_name }}" dist/* --repo "$env:GITHUB_REPOSITORY" --verify-tag --title "Virtual Companion ${{ github.ref_name }}" --generate-notes
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.Substring(1)
+          $expected = @(
+            "SHA256SUMS",
+            "virtual_companion-$version.tar.gz",
+            "virtual_companion-$version-py3-none-any.whl"
+          ) | Sort-Object
+          try {
+            $existingJson = gh release view $tag --repo "$env:GITHUB_REPOSITORY" --json isDraft,isImmutable,assets 2>$null
+            if ($LASTEXITCODE -eq 0) {
+              $existing = $existingJson | ConvertFrom-Json
+              $existingAssets = @($existing.assets | ForEach-Object { $_.name }) | Sort-Object
+              if (-not $existing.isDraft -and $existing.isImmutable -and
+                  -not (Compare-Object $expected $existingAssets)) {
+                Write-Host "Complete immutable release already exists; nothing to publish."
+                exit 0
+              }
+              if ($existing.isImmutable) {
+                throw "An immutable release already exists with an invalid state or asset set"
+              }
+              gh release delete $tag --repo "$env:GITHUB_REPOSITORY" --yes
+              if ($LASTEXITCODE -ne 0) { throw "Existing mutable release cleanup failed" }
+            }
+            gh release create $tag dist/* --repo "$env:GITHUB_REPOSITORY" --verify-tag --draft --title "Virtual Companion $tag" --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw "Draft release creation failed" }
+            $draft = gh release view $tag --repo "$env:GITHUB_REPOSITORY" --json isDraft,assets | ConvertFrom-Json
+            $draftAssets = @($draft.assets | ForEach-Object { $_.name }) | Sort-Object
+            if (-not $draft.isDraft -or (Compare-Object $expected $draftAssets)) {
+              throw "Draft release asset set is incomplete"
+            }
+            gh release edit $tag --repo "$env:GITHUB_REPOSITORY" --draft=false --latest
+            if ($LASTEXITCODE -ne 0) { throw "Draft release publication failed" }
+            $release = $null
+            for ($attempt = 1; $attempt -le 5; $attempt++) {
+              $release = gh release view $tag --repo "$env:GITHUB_REPOSITORY" --json isDraft,isImmutable,assets | ConvertFrom-Json
+              if ($release.isImmutable) { break }
+              if ($attempt -lt 5) { Start-Sleep -Seconds 2 }
+            }
+            $publishedAssets = @($release.assets | ForEach-Object { $_.name }) | Sort-Object
+            if ($release.isDraft -or -not $release.isImmutable -or (Compare-Object $expected $publishedAssets)) {
+              throw "Published release is mutable or its asset set changed"
+            }
+          } catch {
+            $existing = gh release view $tag --repo "$env:GITHUB_REPOSITORY" --json isImmutable 2>$null | ConvertFrom-Json
+            if ($existing -and -not $existing.isImmutable) {
+              gh release delete $tag --repo "$env:GITHUB_REPOSITORY" --yes
+            }
+            throw "Release publication failed closed. Enable release immutability in repository Settings, verify the tag assets, and rerun the workflow. $($_.Exception.Message)"
+          }

@@ -56,8 +56,13 @@ The version in `pyproject.toml`, `companion.__version__`, Git tag, and built whe
 the evidence commit and wait for its push-triggered `CI` run to pass before creating the tag. The
 tagged commit must already be on `main` with that successful CI run. The Release
 workflow rebuilds from the tag, verifies archives and checksums, creates GitHub build-provenance
-attestations, then publishes the wheel, sdist, and `SHA256SUMS`. Do not create or move a release tag
-to bypass a failed gate; fix the evidence or source and create a new version.
+attestations, creates a draft Release with the wheel, sdist, and `SHA256SUMS`, then publishes it.
+It verifies the exact asset set while the Release is still a removable draft, then publishes and
+immediately requires GitHub to report the Release as immutable with the same assets. If repository
+release immutability is disabled, it removes the mutable Release and fails while preserving the
+protected tag for a safe rerun. Reruns accept an already-published Release only when GitHub reports
+it immutable and its asset set is exact. Do not create or move a release tag to bypass a failed
+gate; fix the evidence or source and create a new version.
 
 After publication, verify provenance and checksums before target-machine installation:
 
@@ -67,6 +72,8 @@ Get-FileHash virtual_companion-0.1.0-py3-none-any.whl -Algorithm SHA256
 ```
 
 Repository administrators must keep `main` protected: require the `quality` status check, require
-pull requests for non-administrative changes, and block force pushes and deletion. Tag protection
-or an equivalent ruleset should restrict `v*` creation to release administrators where the GitHub
-plan supports it.
+pull requests for non-administrative changes, and block force pushes and deletion. The repository
+ruleset named `Protect release tags` must remain active for `refs/tags/v*`, with no bypass actors
+and update, deletion, and non-fast-forward rules. In repository Settings, the Releases section must
+have `Enable release immutability` selected before running a release; this protects assets and the
+associated tag after publication and generates a GitHub release attestation.

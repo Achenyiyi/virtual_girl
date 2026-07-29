@@ -72,6 +72,10 @@ experience, and fails closed when a required dependency is unavailable.
 - [x] Ruff and mypy pass for production code; critical production paths meet agreed coverage.
 - [x] Public releases require matching source/tag/wheel versions, prior green main CI, real voice
       and avatar evidence, human/security sign-off, checksums, and GitHub provenance attestations.
+- [x] A no-bypass repository ruleset prevents `v*` release tags from being updated or deleted;
+      release publication fails closed unless GitHub marks the complete asset set immutable.
+- [x] GitHub CodeQL default setup covers Python and Actions, and Dependabot vulnerability alerts
+      and security updates are enabled.
 
 ## Current status
 
@@ -301,6 +305,20 @@ The action and perception features must remain disabled until their correspondin
 
 - `deepseek_key.txt` is ignored and never read by the application, but the credential it once
   contained must be revoked/rotated outside this repository before release.
+- The repository owner reports that a DeepSeek credential is now stored in Windows Credential
+  Manager. Release sign-off must still confirm that every previously exposed key was revoked and
+  that the stored credential is a newly rotated replacement before marking this gate complete.
+- The repository owner enabled `Enable release immutability` on 2026-07-29. GitHub currently
+  exposes this as a web setting rather than a public REST or GraphQL read field, so the first real
+  Release must still prove it through GitHub's `isImmutable` result. The workflow fails closed and
+  removes any accidentally mutable Release.
+- The initial CodeQL default-setup analysis completed successfully on 2026-07-29. Its two
+  clear-text-logging findings were addressed by keeping configured credential source identifiers
+  out of terminal messages; a subsequent analysis must confirm that no high-severity alert remains.
+- Dependabot vulnerability alerts and security updates are enabled. The initial dependency-graph
+  job exposed an incompatible `requirements.txt` indirection and that compatibility wrapper was
+  removed; a subsequent main-branch graph job must confirm successful ingestion of `pyproject.toml`
+  and the audited `requirements.lock`.
 - Local voice modules and default devices now pass doctor in the isolated release environment, but
   no credential-backed test has yet proven microphone capture, faster-whisper model loading,
   Azure streaming TTS, gapless playback, and barge-in latency together.

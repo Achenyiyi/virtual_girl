@@ -55,7 +55,6 @@ from companion.security.single_instance import (
     SingleInstanceGuard,
 )
 from companion.security.storage_readiness import check_runtime_storage
-from companion.security.windows_credentials import configured_secret_sources
 from companion.services.action_service import ActionService
 from companion.services.proactive_scheduler import ProactiveScheduler, SchedulerConfig
 from companion.services.voice_pipeline import VoicePipeline
@@ -188,12 +187,9 @@ class CompanionApp:
                 logger = logging.getLogger(__name__)
                 logger.info("LLM API key found for %s", llm_config.provider)
             else:
-                sources = configured_secret_sources(
-                    env_name=llm_config.api_key_env,
-                    credential_target=llm_config.credential_target,
-                )
                 print(
-                    f"{Colors.YELLOW}⚠ 未找到 LLM API Key。请配置 {sources}。"
+                    f"{Colors.YELLOW}⚠ 未找到 LLM API Key。"
+                    "请通过环境变量或 Windows Credential Manager 配置。"
                     f"{Colors.RESET}"
                 )
 
@@ -313,8 +309,11 @@ class CompanionApp:
             return False
         api_key = llm_config.get_api_key() if llm_config else ""
         if not api_key:
-            key_source = llm_config.credential_source()
-            print(f"{Colors.YELLOW}⚠ 未检测到 API Key（来源: {key_source}）。{Colors.RESET}")
+            print(
+                f"{Colors.YELLOW}⚠ 未检测到 API Key。"
+                "请检查环境变量或 Windows Credential Manager。"
+                f"{Colors.RESET}"
+            )
             return False
 
         # Validate API key format (basic check)

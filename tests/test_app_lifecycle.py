@@ -8,6 +8,7 @@ import pytest
 
 from companion.__main__ import CompanionApp, _configure_cli_streams, async_main
 from companion.config_loader import RuntimeConfig
+from companion.providers.implementations.cloud_llm import CloudLLMConfig
 
 _REAL_APP_STOP = CompanionApp.stop
 
@@ -49,6 +50,33 @@ def test_cli_streams_use_utf8_for_multilingual_output(monkeypatch) -> None:
         {"encoding": "utf-8", "errors": "backslashreplace"},
         {"encoding": "utf-8", "errors": "backslashreplace"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_missing_llm_key_messages_do_not_expose_configured_source(
+    monkeypatch, capsys
+) -> None:
+    source_marker = "PRIVATE_CREDENTIAL_SOURCE_MARKER"
+    config = RuntimeConfig(
+        llm_config=CloudLLMConfig(
+            provider="openai_compatible",
+            model="test-model",
+            api_key_env=source_marker,
+            base_url="https://example.invalid/v1/chat/completions",
+        )
+    )
+    monkeypatch.setattr(CloudLLMConfig, "get_api_key", lambda _self: "")
+    app = CompanionApp(config)
+
+    async def healthy_startup() -> bool:
+        return True
+
+    monkeypatch.setattr(app._orchestrator, "startup", healthy_startup)
+    assert not await app.start()
+
+    output = capsys.readouterr().out
+    assert source_marker not in output
+    assert "Windows Credential Manager" in output
 
 
 class LifecycleComponent:
