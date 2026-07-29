@@ -1,0 +1,13 @@
+{
+  "name": "virtual-companion-airi-bridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "24.0.15",
+    "typescript": "5.9.2"
+  }
+}
