@@ -59,6 +59,75 @@ test('waits for the real model-loaded hook before acknowledging load', async () 
   assert.deepEqual(await runtime.handle({ method: 'model.load', params: { model_id: 'kurisu' } }), { loaded: true })
 })
 
+test('accepts a matching model that loaded before the bridge request', async () => {
+  let selections = 0
+  const runtime = new AvatarRendererRuntime(dependencies({
+    selectModel: async () => { selections += 1 },
+  }))
+  runtime.notifyStageMounted('live2d')
+  runtime.notifyModelLoaded('live2d', 'kurisu')
+
+  assert.deepEqual(await runtime.handle({ method: 'model.load', params: { model_id: 'kurisu' } }), { loaded: true })
+  assert.equal(selections, 0)
+  assert.equal((await runtime.handle({ method: 'stage.inspect', params: {} })).model_id, 'kurisu')
+})
+
+test('ignores an unsolicited model-loaded callback for another model', async () => {
+  const runtime = new AvatarRendererRuntime(dependencies())
+  runtime.notifyStageMounted('live2d')
+  runtime.notifyModelLoaded('live2d', 'kurisu')
+
+  runtime.notifyModelLoaded('live2d', 'mayuri')
+
+  const inspection = await runtime.handle({ method: 'stage.inspect', params: {} })
+  assert.equal(inspection.model_id, 'kurisu')
+  assert.equal(inspection.model_loaded, true)
+})
+
+test('fails a pending model load when the stage unmounts', async () => {
+  const runtime = new AvatarRendererRuntime(dependencies())
+  runtime.notifyStageMounted('live2d')
+
+  const loading = runtime.handle({ method: 'model.load', params: { model_id: 'kurisu' } })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  runtime.notifyStageUnmounted()
+
+  assert.deepEqual(await loading, { loaded: false })
+  assert.deepEqual(await runtime.handle({ method: 'health', params: {} }), { status: 'unhealthy' })
+})
+
+test('invalidates old model evidence while the renderer loads another model', async () => {
+  const runtime = new AvatarRendererRuntime(dependencies())
+  runtime.notifyStageMounted('live2d')
+  runtime.notifyModelLoaded('live2d', 'kurisu')
+
+  runtime.notifyModelLoading('live2d', 'mayuri')
+  let inspection = await runtime.handle({ method: 'stage.inspect', params: {} })
+  assert.equal(inspection.model_id, 'mayuri')
+  assert.equal(inspection.model_loaded, false)
+  await assert.rejects(runtime.handle({ method: 'state.update', params: { state } }), /not ready/)
+
+  runtime.notifyModelLoaded('live2d', 'kurisu')
+  inspection = await runtime.handle({ method: 'stage.inspect', params: {} })
+  assert.equal(inspection.model_id, 'mayuri')
+  assert.equal(inspection.model_loaded, false)
+
+  runtime.notifyModelLoaded('live2d', 'mayuri')
+  inspection = await runtime.handle({ method: 'stage.inspect', params: {} })
+  assert.equal(inspection.model_loaded, true)
+})
+
+test('a renderer-side model switch cancels a conflicting bridge load', async () => {
+  const runtime = new AvatarRendererRuntime(dependencies())
+  runtime.notifyStageMounted('live2d')
+
+  const loading = runtime.handle({ method: 'model.load', params: { model_id: 'kurisu' } })
+  await new Promise(resolve => setTimeout(resolve, 0))
+  runtime.notifyModelLoading('live2d', 'mayuri')
+
+  assert.deepEqual(await loading, { loaded: false })
+})
+
 test('advances rendered state only from a presented-frame hook', async () => {
   let runtime!: AvatarRendererRuntime
   runtime = new AvatarRendererRuntime(dependencies({
@@ -161,4 +230,22 @@ test('does not acknowledge a superseded concurrent model load', async () => {
   assert.deepEqual(await second, { loaded: true })
   assert.deepEqual(await first, { loaded: false })
   assert.deepEqual(selected, ['kurisu', 'mayuri'])
+})
+
+test('ignores a stale model-loaded callback while a different model is pending', async () => {
+  let runtime!: AvatarRendererRuntime
+  runtime = new AvatarRendererRuntime(dependencies({
+    listModels: async () => [
+      { id: 'kurisu', name: 'Kurisu', renderer: 'live2d' },
+      { id: 'mayuri', name: 'Mayuri', renderer: 'live2d' },
+    ],
+    selectModel: async () => {
+      queueMicrotask(() => runtime.notifyModelLoaded('live2d', 'kurisu'))
+      queueMicrotask(() => runtime.notifyModelLoaded('live2d', 'mayuri'))
+    },
+  }))
+  runtime.notifyStageMounted('live2d')
+
+  assert.deepEqual(await runtime.handle({ method: 'model.load', params: { model_id: 'mayuri' } }), { loaded: true })
+  assert.equal((await runtime.handle({ method: 'stage.inspect', params: {} })).model_id, 'mayuri')
 })

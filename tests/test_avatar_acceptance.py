@@ -40,6 +40,7 @@ class AcceptanceAvatarProvider:
         self.arousal = 0.5
         self.proactive_level = 0
         self.gesture_id = ""
+        self.state_gesture_ids: list[str | None] = []
 
     async def health_check(self) -> ProviderHealth:
         return ProviderHealth.HEALTHY
@@ -77,6 +78,7 @@ class AcceptanceAvatarProvider:
 
     async def update_state(self, state) -> None:
         self.state_sequence += 1
+        self.state_gesture_ids.append(state.pose.gesture_id)
         if self.preapply_frame_only:
             self.frame_sequence += 1
         self.expression_id = state.expression.expression_id
@@ -130,6 +132,8 @@ async def test_avatar_acceptance_requires_frame_after_state_application() -> Non
 
     assert report.checks[-2].passed
     assert not report.checks[-1].passed
+    assert provider.state_gesture_ids == [None]
+    assert provider.gesture_sequence == 1
 
 
 @pytest.mark.asyncio

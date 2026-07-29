@@ -50,9 +50,7 @@ Runtime dependencies are pinned to the same H3/CrossWS versions used by AIRI v0.
 must be started only when explicitly enabled, with its token injected by the launcher rather than
 stored in AIRI configuration or logs.
 
-The patch removes AIRI's stale `@mediapipe/tasks-vision` patched-dependency entry because the
-published `0.10.34` package already contains that exports-map fix and pnpm otherwise rejects the
-already-applied patch. With the repository-declared pnpm `10.33.0`, a filtered installation of the
-stage app and its 31 dependency workspaces succeeds, and the complete filtered build passes. The
-post-build typecheck reports no errors in files changed by this patch; unrelated upstream workspace
-typecheck errors remain outside this integration patch.
+The patch leaves AIRI's existing `@mediapipe/tasks-vision` patched dependency and pnpm metadata
+unchanged. With the repository-declared pnpm `10.33.0`, a frozen filtered installation of the stage
+app and its 31 dependency workspaces succeeds with that upstream patch still enabled. Validation
+must distinguish bridge-file errors from unrelated upstream workspace typecheck failures.

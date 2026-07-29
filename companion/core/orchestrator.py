@@ -617,7 +617,6 @@ class CompanionOrchestrator:
             return True
         affect = self.state.affect
         snapshot = self._expression_mapper.map(affect)
-        gesture = max(snapshot.gestures, key=lambda item: item.priority, default=None)
         avatar_state = AvatarState(
             expression=FacialExpression(
                 expression_id=snapshot.facial.expression_id,
@@ -628,8 +627,11 @@ class CompanionOrchestrator:
                 cheek_raise=snapshot.facial.cheek_raise,
             ),
             pose=BodyPose(
-                gesture_id=gesture.gesture_id if gesture else None,
-                gesture_intensity=gesture.intensity if gesture else 0.5,
+                # Full-state sync owns durable posture only. Repeating a one-shot
+                # gesture on every affect refresh makes the avatar twitch and can
+                # block startup when a model lacks that optional motion.
+                gesture_id=None,
+                gesture_intensity=0.5,
             ),
             valence=affect.valence,
             arousal=affect.arousal,

@@ -219,6 +219,7 @@ async def test_orchestrator_pushes_authoritative_affect_snapshot(monkeypatch) ->
         assert stage.states[-1]["valence"] == pytest.approx(state.affect.valence)
         assert stage.states[-1]["arousal"] == pytest.approx(state.affect.arousal)
         assert stage.states[-1]["expression"]["expression_id"] != ""
+        assert stage.states[-1]["pose"]["gesture_id"] is None
         assert stage.proactive_levels
         await orchestrator.shutdown()
 

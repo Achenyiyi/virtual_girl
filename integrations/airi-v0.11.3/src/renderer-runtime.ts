@@ -86,6 +86,8 @@ export class AvatarRendererRuntime {
 
   private readonly modelWaiters = new Set<() => void>()
   private modelLoadGeneration = 0
+  private activeModelLoad?: { modelId: string, renderer: SupportedRenderer }
+  private pendingModelLoad?: { generation: number, modelId: string, renderer: SupportedRenderer }
 
   constructor(dependencies: RendererRuntimeDependencies) {
     this.dependencies = dependencies
@@ -107,6 +109,8 @@ export class AvatarRendererRuntime {
   }
 
   notifyStageMounted(renderer: SupportedRenderer): void {
+    if (this.state.renderer && this.state.renderer !== renderer)
+      this.state.modelLoaded = false
     this.state.renderer = renderer
     this.state.stageMounted = true
   }
@@ -114,15 +118,45 @@ export class AvatarRendererRuntime {
   notifyStageUnmounted(): void {
     this.state.stageMounted = false
     this.state.modelLoaded = false
+    this.activeModelLoad = undefined
+    this.pendingModelLoad = undefined
+    this.modelLoadGeneration += 1
+    this.resolveModelWaiters()
+  }
+
+  notifyModelLoading(renderer: SupportedRenderer, modelId: string): void {
+    const supersedesPending = this.pendingModelLoad
+      && (renderer !== this.pendingModelLoad.renderer || modelId !== this.pendingModelLoad.modelId)
+
+    this.activeModelLoad = { renderer, modelId }
+    this.state.renderer = renderer
+    this.state.modelId = modelId
+    this.state.modelLoaded = false
+
+    if (supersedesPending) {
+      this.pendingModelLoad = undefined
+      this.modelLoadGeneration += 1
+      this.resolveModelWaiters()
+    }
   }
 
   notifyModelLoaded(renderer: SupportedRenderer, modelId: string): void {
-    if (!this.state.stageMounted || renderer !== this.state.renderer || modelId !== this.state.modelId)
+    if (!this.state.stageMounted || renderer !== this.state.renderer)
       return
+    if (!this.activeModelLoad && !this.pendingModelLoad && this.state.modelId && modelId !== this.state.modelId)
+      return
+    if (this.activeModelLoad
+      && (renderer !== this.activeModelLoad.renderer || modelId !== this.activeModelLoad.modelId))
+      return
+    if (this.pendingModelLoad
+      && (renderer !== this.pendingModelLoad.renderer || modelId !== this.pendingModelLoad.modelId))
+      return
+    this.state.renderer = renderer
+    this.state.modelId = modelId
     this.state.modelLoaded = true
-    for (const resolve of this.modelWaiters)
-      resolve()
-    this.modelWaiters.clear()
+    this.activeModelLoad = undefined
+    this.pendingModelLoad = undefined
+    this.resolveModelWaiters()
   }
 
   notifyPresentedFrame(): void {
@@ -167,12 +201,33 @@ export class AvatarRendererRuntime {
       return { loaded: false }
 
     const generation = ++this.modelLoadGeneration
+    this.resolveModelWaiters()
+    if (this.state.stageMounted
+      && this.state.modelLoaded
+      && this.state.modelId === model.id
+      && this.state.renderer === model.renderer) {
+      this.activeModelLoad = undefined
+      this.pendingModelLoad = undefined
+      return { loaded: true }
+    }
+
+    this.activeModelLoad = { modelId: model.id, renderer: model.renderer }
+    this.pendingModelLoad = { generation, modelId: model.id, renderer: model.renderer }
     this.state.modelId = model.id
     this.state.renderer = model.renderer
     this.state.modelLoaded = false
-    await this.dependencies.selectModel(model.id)
-    if (!this.state.modelLoaded)
-      await this.waitForModelLoad(this.dependencies.modelLoadTimeoutMs ?? 3_000)
+    try {
+      await this.dependencies.selectModel(model.id)
+      if (generation !== this.modelLoadGeneration)
+        return { loaded: false }
+      if (!this.state.modelLoaded)
+        await this.waitForModelLoad(this.dependencies.modelLoadTimeoutMs ?? 3_000)
+    }
+    catch (error) {
+      if (this.pendingModelLoad?.generation === generation)
+        this.pendingModelLoad = undefined
+      throw error
+    }
     return {
       loaded: generation === this.modelLoadGeneration
         && this.state.modelId === model.id
@@ -258,6 +313,12 @@ export class AvatarRendererRuntime {
       }, timeoutMs)
       this.modelWaiters.add(done)
     })
+  }
+
+  private resolveModelWaiters(): void {
+    for (const resolve of this.modelWaiters)
+      resolve()
+    this.modelWaiters.clear()
   }
 
   private requireRendererReady(): void {

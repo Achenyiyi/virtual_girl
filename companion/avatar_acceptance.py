@@ -160,7 +160,7 @@ async def run_avatar_acceptance(
 
         expected = AvatarState(
             expression=FacialExpression("happy", intensity=0.73, eye_open=0.91),
-            pose=BodyPose(gesture_id="nod", gesture_intensity=0.67),
+            pose=BodyPose(),
             valence=0.61,
             arousal=0.72,
             energy=0.64,
@@ -299,7 +299,7 @@ def _matches_expected(
         and inspection.gesture_sequence >= baseline.gesture_sequence
         and inspection.proactive_sequence >= baseline.proactive_sequence
         and inspection.expression_id == expected.expression.expression_id
-        and inspection.last_gesture_id == expected.pose.gesture_id
+        and inspection.last_gesture_id == "nod"
         and inspection.proactive_level == 3
         and _close(inspection.valence, expected.valence)
         and _close(inspection.arousal, expected.arousal)
