@@ -8,7 +8,14 @@ import zipfile
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 
-FORBIDDEN_PARTS = {"data", "tests", "__pycache__", ".git", ".venv"}
+FORBIDDEN_PARTS = {
+    "data",
+    "tests",
+    "release-evidence",
+    "__pycache__",
+    ".git",
+    ".venv",
+}
 FORBIDDEN_SUFFIXES = {".db", ".key", ".pem", ".pyc", ".pyo"}
 REQUIRED_WHEEL_SUFFIXES = {
     "companion/__init__.py",

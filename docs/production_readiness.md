@@ -70,6 +70,8 @@ experience, and fails closed when a required dependency is unavailable.
       cloud startup, and is cleared only after every runtime/provider shutdown succeeds.
 - [x] Unit, integration, recovery, security, and packaged-wheel suites pass in Windows CI.
 - [x] Ruff and mypy pass for production code; critical production paths meet agreed coverage.
+- [x] Public releases require matching source/tag/wheel versions, prior green main CI, real voice
+      and avatar evidence, human/security sign-off, checksums, and GitHub provenance attestations.
 
 ## Current status
 
@@ -230,10 +232,10 @@ The action and perception features must remain disabled until their correspondin
 ## Verification evidence (2026-07-29)
 
 - `ruff check companion tests scripts`: passed.
-- `mypy companion scripts`: passed in strict mode for 72 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 370 tests passed with 79.82%
+- `mypy companion scripts`: passed in strict mode for 74 source files.
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 385 tests passed with 79.83%
   total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 83%, voice
-  pipeline 85%, cloud LLM 63%, cloud TTS 81%, avatar acceptance 77%, action service 82%, and the
+  pipeline 85%, cloud LLM 63%, cloud TTS 81%, avatar acceptance 78%, action service 82%, and the
   action audit store 94%.
 - Windows Credential Manager integration passed focused resolution, precedence, validation, and
   native missing-target tests. Environment overrides take precedence; absent or unreadable Generic

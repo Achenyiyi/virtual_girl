@@ -32,6 +32,9 @@ jobs:
       - name: Check dependency consistency
         run: python -m pip check
 
+      - name: Verify source version consistency
+        run: python scripts/verify_release_version.py
+
       - name: Lint
         run: ruff check companion tests scripts
 

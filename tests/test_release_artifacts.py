@@ -18,6 +18,7 @@ def test_rejects_unsafe_archive_path() -> None:
         "virtual_companion/data/memory.db",
         "virtual_companion/deepseek_key.txt",
         "virtual_companion/tests/test_runtime.py",
+        "virtual_companion/release-evidence/v1.0.0/voice-acceptance.json",
     ],
 )
 def test_rejects_private_release_content(name: str) -> None:
