@@ -140,12 +140,17 @@ snapshot rather than a partial patch.
 
 The integration is pinned to AIRI `v0.11.3` at commit
 `dbf812488829a61cc2e95909e021b215704d066c`. Its `setupRemotePluginScope()` remains empty, so the
-unfinished remote-plugin API is not a production integration target. The protocol core in
-`integrations/airi-v0.11.3` now implements strict envelope parsing, bounded message handling,
-authenticated version negotiation, method routing, and sanitized failures. The remaining work is
-an Electron-main WebSocket endpoint and an Eventa renderer adapter that translates this contract
-to AIRI's real Live2D/VRM stores and renderer lifecycle. In particular, `stage.inspect` evidence
-must come from applied renderer state and presented frames rather than request-handler counters.
+unfinished remote-plugin API is not a production integration target. The implementation in
+`integrations/airi-v0.11.3` now provides the authenticated loopback H3/CrossWS server, bounded
+per-connection concurrency, Eventa forwarding boundary, strict renderer input validation, and a
+renderer-owned evidence state machine. Active peers close deterministically during shutdown.
+
+The remaining work is wiring the dependency callbacks to AIRI's real Live2D/VRM stores and
+component lifecycle. `notifyModelLoaded()` must be called only by the real model-loaded callback;
+`notifyPresentedFrame()` must be called only after a successful Pixi/VRM render; window visibility
+must come from the Electron main window. Therefore the current implementation makes the bridge
+boundary testable without manufacturing `stage.inspect` evidence, but does not yet close the real
+AIRI rendering gate.
 
 Research references:
 
