@@ -49,7 +49,7 @@ jobs:
 
       - name: Scan release sources for secrets
         run: |
-          detect-secrets scan companion config docs scripts README.md pyproject.toml requirements.lock requirements.txt MANIFEST.in .github > secret-scan.json
+          detect-secrets scan companion config docs scripts README.md pyproject.toml requirements.lock MANIFEST.in .github > secret-scan.json
           python -c "import json; d=json.load(open('secret-scan.json', encoding='utf-8')); n=sum(map(len, d.get('results', {}).values())); print(f'secret candidates: {n}'); raise SystemExit(n > 0)"
 
       - name: Audit runtime dependencies

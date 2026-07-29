@@ -1,3 +1,0 @@
-# Compatibility entry point for tooling that expects requirements.txt.
-# pyproject.toml is the dependency source; requirements.lock is the audited install set.
--r requirements.lock
