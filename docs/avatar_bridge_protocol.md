@@ -150,6 +150,10 @@ snapshot rather than a partial patch.
 - A later request reconnects and performs a fresh authenticated handshake.
 - Runtime dialogue continues after a post-start rendering failure, while reporting the error;
   presentation failure must not corrupt conversation or memory.
+- Full-state updates never carry one-shot gestures. After a conversation turn is durably completed,
+  the runtime may issue one separate `gesture.trigger` selected by priority. Global and per-gesture
+  cooldowns prevent twitching, and a failed gesture is temporarily quarantined without failing the
+  completed turn.
 - Shutdown closes the WebSocket and reader task. A shut-down provider cannot reconnect.
 
 ## AIRI integration status
@@ -166,9 +170,12 @@ Live2D/VRM stores and component lifecycle. Renderer-side loading invalidates sta
 `notifyModelLoaded()` is called by the real model-loaded callbacks, `notifyPresentedFrame()` follows
 successful Pixi/VRM render callbacks, and visibility is the conjunction of renderer visibility and
 Electron main-window visibility. Unsupported operations fail closed. The patch leaves AIRI's
-existing MediaPipe patched dependency and pnpm metadata unchanged. It passes `git apply --check`,
-and a frozen filtered install of the stage app plus its 31 dependency workspaces succeeds with pnpm
-`10.33.0`. Real runtime and visual acceptance remain open release gates.
+existing MediaPipe patched dependency and pnpm metadata unchanged. When
+`COMPANION_AVATAR_TOKEN` enables companion-managed mode, the same patch disables updater startup
+network access plus manual check, download, install, and channel controls; the About page reports
+the disabled state. It passes `git apply --check`, and a frozen filtered install of the stage app
+plus its 31 dependency workspaces succeeds with pnpm `10.33.0`. The patched upstream updater suite
+passes with 31 tests. Real runtime and visual acceptance remain open release gates.
 
 Research references:
 

@@ -87,8 +87,8 @@ time-versioned preference keys, single-use action confirmation, provider timeout
 LLM readiness status, unknown no-data telemetry, and standards-compliant WAV generation.
 
 Active milestone: confirm revocation of the exposed credential, validate the interruptible voice
-path, and implement the AIRI-side stage extension. Mutating actions remain out of release scope
-until a separate OS isolation boundary exists.
+path, and complete target-machine AIRI/voice acceptance. Mutating actions remain out of release
+scope until a separate OS isolation boundary exists.
 
 Voice implementation status: the code path now includes optional local faster-whisper ASR,
 contextual runtime generation, network-streamed Azure PCM, gapless sounddevice playback,
@@ -112,10 +112,18 @@ frozen filtered install of the pinned stage application plus its 31 dependency w
 `10.33.0`. The Python runtime can now optionally supervise that Windows build: configuration pins
 both the Electron executable and `resources/app.asar`, child credentials are allowlisted, startup
 uses a suspended process assigned to a kill-on-close Job Object, and runtime/acceptance cleanup owns
-the process tree. Doctor validates the installation without launching a GUI. A real end-to-end run
-and visual acceptance remain. AIRI's
+the process tree. Managed bridge mode also disables AIRI's startup update check and every manual
+check/download/install path, preventing the reviewed pinned build from replacing itself with an
+unreviewed upstream release. Doctor validates the installation without launching a GUI. A real
+end-to-end run and visual acceptance remain. AIRI's
 remote plugin bootstrap is unfinished at the pinned upstream commit, so no undocumented remote API
 is claimed. See `docs/avatar_bridge_protocol.md`.
+
+Natural gesture status: each successfully committed text or voice turn may now trigger at most one
+affect-derived one-shot gesture. Scheduling uses monotonic global and per-gesture cooldowns, skips a
+recently repeated gesture in favor of the next eligible suggestion, and quarantines a failed motion
+for five minutes. Startup and full-state synchronization never trigger one-shot gestures, and an
+unsupported model motion is logged without changing the already-completed dialogue result.
 
 Avatar acceptance status: the release CLI now has an LLM-independent `--accept-avatar` gate. A
 production stage extension must expose renderer-owned inspection evidence showing the configured
@@ -321,8 +329,9 @@ The action and perception features must remain disabled until their correspondin
 - `deepseek_key.txt` is ignored and never read by the application, but the credential it once
   contained must be revoked/rotated outside this repository before release.
 - The repository owner reports that a DeepSeek credential is now stored in Windows Credential
-  Manager. Release sign-off must still confirm that every previously exposed key was revoked and
-  that the stored credential is a newly rotated replacement before marking this gate complete.
+  Manager, and the credential-backed online doctor succeeds without exposing its value. Release
+  sign-off must still confirm that every key previously exposed in conversation or files was revoked
+  and that the stored credential is a later replacement before marking this gate complete.
 - The repository owner enabled `Enable release immutability` on 2026-07-29. GitHub currently
   exposes this as a web setting rather than a public REST or GraphQL read field, so the first real
   Release must still prove it through GitHub's `isImmutable` result. The workflow fails closed and
@@ -342,9 +351,8 @@ The action and perception features must remain disabled until their correspondin
   and the runtime now has a pinned managed launcher, but the approved AIRI build hashes have not
   been entered and AIRI has not been launched with an injected avatar token; no real
   `--accept-avatar-json` or human visual acceptance run has completed.
-- Natural runtime one-shot gestures remain unwired: `ExpressionMapper.gestures` is intentionally
-  excluded from repeated affect-state synchronization, and only the explicit acceptance gesture
-  currently exercises `gesture.trigger`.
+- Natural runtime one-shot gestures are wired with cooldown, deduplication, and failure quarantine,
+  but the target Live2D model must still be visually accepted for its supported motion names.
 - Human security review and production sign-off remain pending.
 - The real Windows read-only provider is wired and validated, but file changes, messages,
   application control, input automation, installation, and other mutating actions remain

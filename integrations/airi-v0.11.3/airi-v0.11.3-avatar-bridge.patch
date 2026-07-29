@@ -1,3 +1,15 @@
+diff --git a/apps/stage-tamagotchi/src/main/index.ts b/apps/stage-tamagotchi/src/main/index.ts
+index 2eaa6db30d2b93e3652e23feffb8ca5cd87e2b74..d1be902a97bd6f94b9a6f6c836a1742b82904dda 100644
+--- a/apps/stage-tamagotchi/src/main/index.ts
++++ b/apps/stage-tamagotchi/src/main/index.ts
+@@ -135,6 +135,7 @@ app.whenReady().then(async () => {
+   const autoUpdater = injeca.provide('services:auto-updater', {
+     dependsOn: { appConfig },
+     build: ({ dependsOn }) => setupAutoUpdater({
++      disabled: Boolean(process.env.COMPANION_AVATAR_TOKEN?.trim()),
+       getStoredUpdateLane: () => dependsOn.appConfig.get()?.updateChannel,
+       setStoredUpdateLane: (lane) => {
+         const currentConfig = dependsOn.appConfig.get()
 diff --git a/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/eventa-adapter.ts b/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/eventa-adapter.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..082ad245075ce5157070bae197de1fad405c49c7
@@ -232,6 +244,74 @@ index 0000000000000000000000000000000000000000..a7c181daed824dc815f57354fbd1cdf9
 +    return value.size
 +  return Number.MAX_SAFE_INTEGER
 +}
+diff --git a/apps/stage-tamagotchi/src/main/services/electron/auto-updater.test.ts b/apps/stage-tamagotchi/src/main/services/electron/auto-updater.test.ts
+index 48254d965cee3effda4445ac2a6f70c94f6bd6fe..712bd47a83f7b50c792e75e0ebb16093525baf41 100644
+--- a/apps/stage-tamagotchi/src/main/services/electron/auto-updater.test.ts
++++ b/apps/stage-tamagotchi/src/main/services/electron/auto-updater.test.ts
+@@ -278,6 +278,24 @@ describe('setupAutoUpdater', () => {
+     expect(updaterState.instance.allowPrerelease).toBe(false)
+   })
+ 
++  it('disables every update operation without network access in managed mode', async () => {
++    const fetchSpy = mockGitHubReleasesFetch()
++    const { setupAutoUpdater } = await import('./auto-updater')
++    const service = setupAutoUpdater({ disabled: true })
++
++    await service.checkForUpdates()
++    await service.downloadUpdate()
++    await service.quitAndInstall()
++    await service.setPreferredUpdateLane('stable')
++
++    expect(service.state).toEqual({ status: 'disabled' })
++    expect(fetchSpy).not.toHaveBeenCalled()
++    expect(updaterState.instance.checkForUpdates).not.toHaveBeenCalled()
++    expect(updaterState.instance.downloadUpdate).not.toHaveBeenCalled()
++    expect(updaterState.instance.quitAndInstall).not.toHaveBeenCalled()
++    expect(updaterState.instance.setFeedURL).not.toHaveBeenCalled()
++  })
++
+   it('uses silent relaunch install on Windows only', async () => {
+     stdEnvState.isWindows = true
+     const { setupAutoUpdater } = await import('./auto-updater')
+diff --git a/apps/stage-tamagotchi/src/main/services/electron/auto-updater.ts b/apps/stage-tamagotchi/src/main/services/electron/auto-updater.ts
+index cb21c32e11f38ff5993759d63d5b71c73e833477..e097abd9c5e70f15c57a3ef2f82e77075ad155de 100644
+--- a/apps/stage-tamagotchi/src/main/services/electron/auto-updater.ts
++++ b/apps/stage-tamagotchi/src/main/services/electron/auto-updater.ts
+@@ -262,6 +262,7 @@ export interface AutoUpdater {
+ export interface AutoUpdaterOptions {
+   getStoredUpdateLane?: () => UpdateLane | undefined
+   setStoredUpdateLane?: (lane: UpdateLane | undefined) => void
++  disabled?: boolean
+ }
+ 
+ function isPrereleaseVersion(version: string) {
+@@ -269,6 +270,26 @@ function isPrereleaseVersion(version: string) {
+ }
+ 
+ export function setupAutoUpdater(options: AutoUpdaterOptions = {}): AutoUpdater {
++  if (options.disabled) {
++    void cleanupStaleUpdateFiles()
++    const state: AutoUpdaterState = { status: 'disabled' }
++    return {
++      state,
++      async checkForUpdates() {},
++      async downloadUpdate() {},
++      async quitAndInstall() {},
++      getPreferredUpdateLane: () => undefined,
++      async setPreferredUpdateLane() {},
++      subscribe(callback) {
++        try {
++          callback(state)
++        }
++        catch {}
++        return () => {}
++      },
++    }
++  }
++
+   const semaphore = new Semaphore(1)
+   const appVersion = app.getVersion()
+   const isPrereleaseBuild = isPrereleaseVersion(appVersion)
 diff --git a/apps/stage-tamagotchi/src/main/windows/main/index.ts b/apps/stage-tamagotchi/src/main/windows/main/index.ts
 index 0f452fc8a559ca96c133864e0d9b4c2b71c5e5b4..391755b48d2e6110bc12889d2e156baaa8931cd8 100644
 --- a/apps/stage-tamagotchi/src/main/windows/main/index.ts
@@ -279,6 +359,31 @@ index 0f452fc8a559ca96c133864e0d9b4c2b71c5e5b4..391755b48d2e6110bc12889d2e156baa
    /**
     * This is a know issue (or expected behavior maybe) to Electron.
     * We don't use this approach on Linux because it's not working.
+diff --git a/apps/stage-tamagotchi/src/renderer/pages/about.vue b/apps/stage-tamagotchi/src/renderer/pages/about.vue
+index b7272dd167e87c731456785d0b813591b043166b..e159d067cac3dd61a3376997e2dfa3b66cf8825b 100644
+--- a/apps/stage-tamagotchi/src/renderer/pages/about.vue
++++ b/apps/stage-tamagotchi/src/renderer/pages/about.vue
+@@ -286,7 +286,7 @@ onMounted(() => {
+ 
+             <FieldSelect
+               :model-value="selectedUpdateChannel"
+-              :disabled="isUpdateChannelUpdating || isBusy"
++              :disabled="isDisabled || isUpdateChannelUpdating || isBusy"
+               :label="t('tamagotchi.stage.about.update.lane.label')"
+               :description="t('tamagotchi.stage.about.update.lane.description')"
+               :placeholder="t('tamagotchi.stage.about.update.lane.placeholder')"
+@@ -371,7 +371,10 @@ onMounted(() => {
+ 
+               <!-- State: Idle, Checking, Error, Disabled, Not Available -->
+               <div v-else :class="['flex flex-col gap-4']">
+-                <div v-if="isError" :class="['flex flex-col gap-2']">
++                <div v-if="isDisabled" :class="['text-sm text-neutral-500 dark:text-neutral-400']">
++                  Updates are disabled while AIRI is managed by Virtual Companion.
++                </div>
++                <div v-else-if="isError" :class="['flex flex-col gap-2']">
+                   <ContainerError
+                     :message="updaterErrorMessage"
+                     height-preset="sm"
 diff --git a/apps/stage-tamagotchi/src/renderer/pages/index.vue b/apps/stage-tamagotchi/src/renderer/pages/index.vue
 index aadea7902387c0321926225fed1452ac10166620..1f2dc222bd9a6f14ba4fe7575d5976819e5cc58b 100644
 --- a/apps/stage-tamagotchi/src/renderer/pages/index.vue
