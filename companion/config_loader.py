@@ -30,6 +30,7 @@ from companion.providers.implementations.windows_readonly_action import (
 )
 from companion.schemas.identity import IdentityCore
 from companion.services.action_service import ActionServiceConfig
+from companion.services.avatar_stage_supervisor import AvatarStageLaunchConfig
 from companion.services.voice_pipeline import VoicePipelineConfig
 
 logger = logging.getLogger(__name__)
@@ -108,16 +109,24 @@ _CONFIG_SCHEMA: ConfigSchema = {
             "batch": _fields("provider", "model", "device", "compute_type", "cpu_threads"),
         },
         "memory": _fields("type", "db_path", "wal_mode", "fts_enabled"),
-        "avatar": _fields(
-            "enabled",
-            "type",
-            "url",
-            "auth_token_env",
-            "credential_target",
-            "connect_timeout_seconds",
-            "request_timeout_seconds",
-            "max_message_bytes",
-        ),
+        "avatar": {
+            "enabled": None,
+            "type": None,
+            "url": None,
+            "auth_token_env": None,
+            "credential_target": None,
+            "connect_timeout_seconds": None,
+            "request_timeout_seconds": None,
+            "max_message_bytes": None,
+            "launch": _fields(
+                "enabled",
+                "executable_path",
+                "expected_sha256",
+                "expected_app_asar_sha256",
+                "startup_timeout_seconds",
+                "shutdown_timeout_seconds",
+            ),
+        },
         "action": _fields(
             "enabled",
             "type",
@@ -159,6 +168,7 @@ class RuntimeConfig:
     tts_config: CloudTTSConfig | None = None
     asr_config: FasterWhisperConfig | None = None
     avatar_config: WebSocketAvatarConfig | None = None
+    avatar_stage_launch_config: AvatarStageLaunchConfig | None = None
     action_provider_config: WindowsReadOnlyActionConfig | None = None
     action_service_config: ActionServiceConfig | None = None
     action_audit_db_path: str = ""
@@ -336,7 +346,10 @@ class RuntimeConfig:
 
         # ── Avatar bridge ────────────────────────────────────────────
         avatar_raw = _section(providers_raw, "avatar")
-        if _boolean(avatar_raw.get("enabled", False), "providers.avatar.enabled"):
+        avatar_enabled = _boolean(
+            avatar_raw.get("enabled", False), "providers.avatar.enabled"
+        )
+        if avatar_enabled:
             if avatar_raw.get("type") != "websocket_bridge":
                 raise ValueError("enabled avatar provider type must be 'websocket_bridge'")
             cfg.avatar_config = WebSocketAvatarConfig(
@@ -350,6 +363,41 @@ class RuntimeConfig:
                     avatar_raw.get("request_timeout_seconds", 3.0)
                 ),
                 max_message_bytes=int(avatar_raw.get("max_message_bytes", 1_048_576)),
+            )
+        launch_raw = _section(avatar_raw, "launch")
+        if _boolean(
+            launch_raw.get("enabled", False), "providers.avatar.launch.enabled"
+        ):
+            if not avatar_enabled or cfg.avatar_config is None:
+                raise ValueError("managed avatar launch requires the avatar provider")
+            if cfg.avatar_config.url != "ws://127.0.0.1:6121/ws":
+                raise ValueError(
+                    "managed avatar launch requires url 'ws://127.0.0.1:6121/ws'"
+                )
+            if cfg.avatar_config.auth_token_env != "COMPANION_AVATAR_TOKEN":
+                raise ValueError(
+                    "managed avatar launch requires auth_token_env "
+                    "'COMPANION_AVATAR_TOKEN'"
+                )
+            executable_path = str(launch_raw.get("executable_path", "")).strip()
+            if not executable_path:
+                raise ValueError(
+                    "managed avatar launch executable_path must not be empty"
+                )
+            cfg.avatar_stage_launch_config = AvatarStageLaunchConfig(
+                executable_path=_resolve_runtime_path(
+                    executable_path, runtime_root
+                ),
+                expected_sha256=str(launch_raw.get("expected_sha256", "")),
+                expected_app_asar_sha256=str(
+                    launch_raw.get("expected_app_asar_sha256", "")
+                ),
+                startup_timeout_seconds=float(
+                    launch_raw.get("startup_timeout_seconds", 30.0)
+                ),
+                shutdown_timeout_seconds=float(
+                    launch_raw.get("shutdown_timeout_seconds", 8.0)
+                ),
             )
 
         # ── Windows read-only actions ─────────────────────────────────

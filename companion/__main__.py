@@ -56,6 +56,7 @@ from companion.security.single_instance import (
 )
 from companion.security.storage_readiness import check_runtime_storage
 from companion.services.action_service import ActionService
+from companion.services.avatar_stage_supervisor import AvatarStageSupervisor
 from companion.services.proactive_scheduler import ProactiveScheduler, SchedulerConfig
 from companion.services.voice_pipeline import VoicePipeline
 from companion.voice_acceptance import (
@@ -198,6 +199,11 @@ class CompanionApp:
         self._avatar = (
             WebSocketAvatarProvider(config.avatar_config) if config.avatar_config else None
         )
+        self._avatar_stage = (
+            AvatarStageSupervisor(config.avatar_stage_launch_config)
+            if config.avatar_stage_launch_config
+            else None
+        )
         self._action_provider = (
             WindowsReadOnlyActionProvider(config.action_provider_config)
             if config.action_provider_config
@@ -295,17 +301,39 @@ class CompanionApp:
                 logging.getLogger(__name__).exception("Action audit readiness check failed")
                 print(f"{Colors.RED}✗ 行动审计存储不可用，启动已中止。{Colors.RESET}")
                 return False
-        if not await self._orchestrator.startup():
+        if self._avatar_stage:
+            avatar_config = self._config.avatar_config
+            token = avatar_config.get_auth_token() if avatar_config else ""
+            try:
+                await self._avatar_stage.start(token)
+                await self._avatar_stage.wait_until_bridge_ready()
+            except asyncio.CancelledError:
+                await self._cleanup_managed_avatar_after_failed_start()
+                raise
+            except Exception:
+                logging.getLogger(__name__).exception("Managed avatar stage startup failed")
+                print(f"{Colors.RED}✗ AIRI 舞台无法安全启动，启动已中止。{Colors.RESET}")
+                await self._cleanup_managed_avatar_after_failed_start()
+                return False
+        try:
+            orchestrator_ready = await self._orchestrator.startup()
+        except BaseException:
+            await self._cleanup_managed_avatar_after_failed_start()
+            raise
+        if not orchestrator_ready:
             print(f"{Colors.RED}✗ 必需服务未就绪，启动已中止。{Colors.RESET}")
+            await self._cleanup_managed_avatar_after_failed_start()
             return False
 
         if not self._llm:
             print(f"{Colors.YELLOW}⚠ LLM 未配置。请设置 API Key 后重试。{Colors.RESET}")
+            await self._cleanup_managed_avatar_after_failed_start()
             return False
 
         llm_config = self._config.llm_config
         if llm_config is None:
             print(f"{Colors.YELLOW}⚠ LLM 未配置。请设置 API Key 后重试。{Colors.RESET}")
+            await self._cleanup_managed_avatar_after_failed_start()
             return False
         api_key = llm_config.get_api_key() if llm_config else ""
         if not api_key:
@@ -314,6 +342,7 @@ class CompanionApp:
                 "请检查环境变量或 Windows Credential Manager。"
                 f"{Colors.RESET}"
             )
+            await self._cleanup_managed_avatar_after_failed_start()
             return False
 
         # Validate API key format (basic check)
@@ -329,6 +358,15 @@ class CompanionApp:
             print(f"{Colors.DIM}  模型: {provider}/{model}{Colors.RESET}")
         print()
         return True
+
+    async def _cleanup_managed_avatar_after_failed_start(self) -> None:
+        if not self._avatar_stage:
+            return
+        if self._avatar:
+            await self._stop_component(
+                "avatar bridge after failed startup", self._avatar.shutdown()
+            )
+        await self._stop_managed_avatar_stage()
 
     async def chat(self, message: str, speak: bool = False) -> dict[str, Any]:
         """Send a message and get a response.
@@ -414,7 +452,29 @@ class CompanionApp:
             )
         )
         late_results[0] = late_results[0] and self._orchestrator.shutdown_clean
-        self._shutdown_clean = all((*early_results, bus_clean, *late_results))
+        stage_clean = True
+        if self._avatar_stage:
+            stage_clean = await self._stop_managed_avatar_stage()
+        self._shutdown_clean = all(
+            (*early_results, bus_clean, *late_results, stage_clean)
+        )
+
+    async def _stop_managed_avatar_stage(self) -> bool:
+        if not self._avatar_stage:
+            return True
+        try:
+            await self._avatar_stage.shutdown()
+            return self._avatar_stage.shutdown_clean
+        except asyncio.CancelledError:
+            logging.getLogger(__name__).warning(
+                "Shutdown of managed avatar stage was cancelled"
+            )
+            return False
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Error shutting down managed avatar stage"
+            )
+            return False
 
     @staticmethod
     async def _stop_component(name: str, operation: Any) -> bool:
@@ -529,19 +589,45 @@ async def async_main(args: argparse.Namespace) -> int:
                     )
                 else:
                     provider = WebSocketAvatarProvider(config.avatar_config)
+                    stage = (
+                        AvatarStageSupervisor(config.avatar_stage_launch_config)
+                        if config.avatar_stage_launch_config
+                        else None
+                    )
                     try:
-                        print(
-                            "Observe the stage now: confirm the intended model, happy expression, "
-                            "and nod gesture are visibly correct.",
-                            file=sys.stderr,
-                        )
-                        avatar_report = await run_avatar_acceptance(
-                            provider,
-                            model_id=config.identity.avatar_model_id,
-                            visual_hold_seconds=3.0,
-                        )
+                        try:
+                            if stage:
+                                await stage.start(config.avatar_config.get_auth_token())
+                                await stage.wait_until_bridge_ready()
+                            print(
+                                "Observe the stage now: confirm the intended model, happy "
+                                "expression, and nod gesture are visibly correct.",
+                                file=sys.stderr,
+                            )
+                            avatar_report = await run_avatar_acceptance(
+                                provider,
+                                model_id=config.identity.avatar_model_id,
+                                visual_hold_seconds=3.0,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            code = "avatar.launch" if stage else "avatar.runtime"
+                            message = (
+                                "Managed AIRI stage launch failed"
+                                if stage
+                                else "Avatar acceptance failed"
+                            )
+                            avatar_report = failed_avatar_acceptance_report(
+                                code,
+                                f"{message}: {type(exc).__name__}.",
+                            )
                     finally:
-                        await shutdown_avatar_acceptance_provider(provider)
+                        try:
+                            await shutdown_avatar_acceptance_provider(provider)
+                        finally:
+                            if stage:
+                                await stage.shutdown()
             finally:
                 with contextlib.suppress(OSError):
                     instance_guard.release()

@@ -36,9 +36,25 @@ providers:
     connect_timeout_seconds: 3.0
     request_timeout_seconds: 3.0
     max_message_bytes: 1048576
+    launch:
+      enabled: true
+      executable_path: C:/VirtualCompanion/AIRI/airi.exe
+      expected_sha256: <64-hex-sha256-of-airi.exe>
+      expected_app_asar_sha256: <64-hex-sha256-of-resources/app.asar>
+      startup_timeout_seconds: 30.0
+      shutdown_timeout_seconds: 8.0
 ```
 
 Do not embed the token in the target name, URL, YAML, or extension configuration.
+
+Managed launch is optional and Windows-only. It is deliberately restricted to the exact loopback
+endpoint and `COMPANION_AVATAR_TOKEN`, accepts no command-line arguments or shell command, strips
+unrelated credentials/proxy/debug variables from the child environment, and refuses to attach to
+an already-listening endpoint. Both `airi.exe` and `resources/app.asar` must match pinned SHA-256
+digests because Electron stores the reviewed bridge code in the ASAR rather than the executable
+shell. The process starts suspended, joins a kill-on-close Windows Job Object, then resumes; normal
+shutdown requests `WM_CLOSE` before terminating the owned process tree. Leave
+`launch.enabled: false` when AIRI is supervised externally.
 
 When enabled, an unreachable or unhealthy stage, a failed model validation/load, or an
 initial state-sync failure prevents companion startup. Headless mode remains available by
