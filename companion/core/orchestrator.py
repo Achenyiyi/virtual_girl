@@ -13,11 +13,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 from typing import Any, Literal
 
 from companion.conversation import ConversationHistory, TurnEntry
 from companion.core.event_bus import EventBus
-from companion.core.expression_mapper import ExpressionMapper
+from companion.core.expression_mapper import ExpressionMapper, GestureSuggestion
 from companion.core.policy_gate import PolicyGate
 from companion.core.state_manager import StateManager
 from companion.events.base import generate_ulid
@@ -38,6 +39,9 @@ from companion.providers.perception import PerceptionProvider
 from companion.providers.tts import TTSProvider
 
 logger = logging.getLogger(__name__)
+_GESTURE_COOLDOWN_SECONDS = 8.0
+_GESTURE_REPEAT_COOLDOWN_SECONDS = 30.0
+_GESTURE_FAILURE_COOLDOWN_SECONDS = 300.0
 TurnFailureStage = Literal[
     "configuration",
     "asr",
@@ -94,6 +98,10 @@ class CompanionOrchestrator:
         self._prompt_builder: PromptBuilder = PromptBuilder()
         self._expression_mapper = ExpressionMapper()
         self._text_turn_lock = asyncio.Lock()
+        self._monotonic: Callable[[], float] = time.monotonic
+        self._last_gesture_attempt_at = float("-inf")
+        self._gesture_last_success_at: dict[str, float] = {}
+        self._gesture_retry_after: dict[str, float] = {}
 
     # ── Provider setters (for late binding / testing) ─────────────────
 
@@ -111,6 +119,7 @@ class CompanionOrchestrator:
 
     def set_avatar(self, provider: AvatarProvider) -> None:
         self._avatar = provider
+        self._reset_gesture_scheduler()
 
     def set_action(self, provider: ActionProvider) -> None:
         self._action = provider
@@ -133,6 +142,7 @@ class CompanionOrchestrator:
         logger.info("Companion orchestrator starting up...")
         self._running = False
         self._session_id = f"sess_{generate_ulid()}"
+        self._reset_gesture_scheduler()
 
         # Health-check all providers and aggregate results
         health_results: dict[str, str] = {}
@@ -251,10 +261,11 @@ class CompanionOrchestrator:
         """Run one text turn against a stable history and sequence number."""
         if not turn_id:
             turn_id = f"turn_{generate_ulid()}"
-        if not self._session_id:
-            self._session_id = session_id or f"sess_{generate_ulid()}"
-        if session_id:
+        if session_id and session_id != self._session_id:
             self._session_id = session_id
+            self._reset_gesture_scheduler()
+        elif not self._session_id:
+            self._session_id = f"sess_{generate_ulid()}"
 
         self._turn_sequence += 1
         t_start = time.time()
@@ -496,6 +507,7 @@ class CompanionOrchestrator:
         await self._extract_and_store_facts(user_text, source_event_id)
         self.state.apply_time_decay(3.0)
         await self._sync_avatar_state(strict=False)
+        await self._trigger_avatar_gesture()
 
     async def cancel_turn(self, turn_id: str) -> bool:
         """Cancel generation delegated through this orchestrator."""
@@ -647,3 +659,56 @@ class CompanionOrchestrator:
             else:
                 logger.exception("Avatar state sync failed; dialogue will continue")
             return False
+
+    async def _trigger_avatar_gesture(self) -> None:
+        """Trigger at most one optional gesture after a completed dialogue turn."""
+        if not self._avatar:
+            return
+
+        now = self._monotonic()
+        if now - self._last_gesture_attempt_at < _GESTURE_COOLDOWN_SECONDS:
+            return
+
+        suggestions = sorted(
+            self._expression_mapper.map(self.state.affect).gestures,
+            key=lambda suggestion: suggestion.priority,
+            reverse=True,
+        )
+        selected = self._select_gesture(suggestions, now)
+        if selected is None:
+            return
+
+        self._last_gesture_attempt_at = now
+        try:
+            await self._avatar.trigger_gesture(selected.gesture_id, selected.intensity)
+        except Exception as exc:
+            self._gesture_retry_after[selected.gesture_id] = (
+                now + _GESTURE_FAILURE_COOLDOWN_SECONDS
+            )
+            logger.warning(
+                "Avatar gesture %s failed with %s; suppressing retries for this session window",
+                selected.gesture_id,
+                type(exc).__name__,
+            )
+            return
+
+        self._gesture_last_success_at[selected.gesture_id] = now
+
+    def _select_gesture(
+        self, suggestions: list[GestureSuggestion], now: float
+    ) -> GestureSuggestion | None:
+        for suggestion in suggestions:
+            if now < self._gesture_retry_after.get(suggestion.gesture_id, float("-inf")):
+                continue
+            last_success = self._gesture_last_success_at.get(
+                suggestion.gesture_id, float("-inf")
+            )
+            if now - last_success < _GESTURE_REPEAT_COOLDOWN_SECONDS:
+                continue
+            return suggestion
+        return None
+
+    def _reset_gesture_scheduler(self) -> None:
+        self._last_gesture_attempt_at = float("-inf")
+        self._gesture_last_success_at.clear()
+        self._gesture_retry_after.clear()

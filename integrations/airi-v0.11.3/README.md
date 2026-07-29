@@ -35,8 +35,12 @@ git apply C:\path\to\virtual_girl\integrations\airi-v0.11.3\airi-v0.11.3-avatar-
 ```
 
 The bridge remains disabled unless `COMPANION_AVATAR_TOKEN` is injected into the AIRI process.
-Unsupported renderer operations fail closed; in particular, VRM one-shot gestures and proactive
-level changes are not reported as successful because AIRI v0.11.3 exposes no matching public API.
+When that token is present, AIRI's updater is also disabled before it can perform its startup check;
+manual check, channel change, download, and install calls become no-ops, and the About page reports
+that Virtual Companion manages the build. This preserves the reviewed executable and `app.asar`
+hash boundary. Unsupported renderer operations fail closed; in particular, VRM one-shot gestures
+and proactive level changes are not reported as successful because AIRI v0.11.3 exposes no matching
+public API.
 
 For the companion's managed Windows launcher, build or install the unpacked application and pin
 both `airi.exe` and `resources/app.asar` in `providers.avatar.launch`. Pinning only the executable
@@ -49,6 +53,13 @@ Run its checks with:
 npm ci --ignore-scripts
 npm test
 npm run typecheck
+```
+
+To verify the updater guard in a pinned upstream checkout after the filtered workspace install:
+
+```powershell
+corepack pnpm --filter @proj-airi/electron-eventa build
+corepack pnpm exec vitest run apps/stage-tamagotchi/src/main/services/electron/auto-updater.test.ts
 ```
 
 Runtime dependencies are pinned to the same H3/CrossWS versions used by AIRI v0.11.3. The server
