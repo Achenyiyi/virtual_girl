@@ -106,6 +106,7 @@ python -m companion --voice-input
 ```powershell
 python -m companion --backup-memory D:\CompanionBackups\memory-2026-07-29.db
 python -m companion --verify-memory-backup D:\CompanionBackups\memory-2026-07-29.db
+python -m companion --restore-memory-backup D:\CompanionBackups\memory-2026-07-29.db
 
 # 仅在明确需要替换同名备份时
 python -m companion --backup-memory D:\CompanionBackups\latest.db --overwrite-backup

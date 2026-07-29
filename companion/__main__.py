@@ -464,6 +464,26 @@ async def async_main(args: argparse.Namespace) -> int:
         return 0
     # Load config for every operation that uses runtime settings.
     config = RuntimeConfig.from_yaml(args.config)
+    restore_memory_backup = getattr(args, "restore_memory_backup", None)
+    if restore_memory_backup:
+        memory_path = config.effective_memory_config().db_path
+        check_runtime_storage(memory_path)
+        instance_guard = SingleInstanceGuard.for_memory_path(memory_path)
+        try:
+            instance_guard.acquire()
+        except InstanceAlreadyRunningError as exc:
+            print(f"Memory restore unavailable: {exc}", file=sys.stderr)
+            return 1
+        try:
+            restored, rollback = MemoryService.restore_from_backup(
+                restore_memory_backup, memory_path
+            )
+        finally:
+            instance_guard.release()
+        print(f"Memory restored and verified: {restored}")
+        if rollback is not None:
+            print(f"Previous memory files preserved for rollback: {rollback}")
+        return 0
     if args.doctor or args.doctor_online or args.doctor_json:
         report = await run_diagnostics(
             config,
@@ -942,6 +962,12 @@ def main() -> None:
         help="只读校验记忆备份的完整性和结构后退出",
     )
     parser.add_argument(
+        "--restore-memory-backup",
+        type=Path,
+        default=None,
+        help="离线校验并原子恢复 SQLite 记忆，同时保留原文件回滚副本",
+    )
+    parser.add_argument(
         "--overwrite-backup",
         action="store_true",
         help="允许 --backup-memory 原子替换已有目标文件",
@@ -974,12 +1000,13 @@ def main() -> None:
             bool(args.accept_avatar or args.accept_avatar_json),
             bool(args.backup_memory),
             bool(args.verify_memory_backup),
+            bool(args.restore_memory_backup),
         )
     )
     if maintenance_modes > 1:
         parser.error(
             "doctor、accept-voice、accept-avatar、backup-memory 和 "
-            "verify-memory-backup 模式不能组合使用"
+            "verify-memory-backup 和 restore-memory-backup 模式不能组合使用"
         )
     if args.accept_voice and args.accept_voice_json:
         parser.error("--accept-voice 和 --accept-voice-json 只能选择一个")
@@ -992,7 +1019,7 @@ def main() -> None:
         args.voice_input = True
     try:
         exit_code = asyncio.run(async_main(args))
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, sqlite3.DatabaseError) as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         exit_code = 2
     sys.exit(exit_code)

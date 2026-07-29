@@ -30,6 +30,8 @@ experience, and fails closed when a required dependency is unavailable.
 - [x] Rebuild is atomic: failure leaves the previous derived memory intact.
 - [x] Live memory can be backed up consistently, verified independently, and protected from
       accidental overwrite before upgrade or repair.
+- [x] Offline restore validates the source, checkpoints the stopped live WAL, atomically publishes
+      the replacement, and preserves the prior file set for rollback.
 
 ### Computer actions
 
@@ -220,6 +222,8 @@ backups remain readable. Shared-connection access is serialized with same-task t
 re-entry: concurrent first use creates one connection, rebuilds exclude ordinary reads/writes,
 failed or cancelled rebuilds roll back before queued work proceeds, and online backups hold the
 database boundary until their worker has finished even if the caller is cancelled.
+Offline restore uses the same profile mutex, full integrity/schema validation before and after
+copy, a checkpointed live generation, atomic replacement, and a timestamped rollback directory.
 
 The action and perception features must remain disabled until their corresponding gates pass.
 
@@ -227,7 +231,7 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 72 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 364 tests passed with 79.69%
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 370 tests passed with 79.82%
   total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 83%, voice
   pipeline 85%, cloud LLM 63%, cloud TTS 81%, avatar acceptance 77%, action service 82%, and the
   action audit store 94%.

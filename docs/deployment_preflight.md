@@ -224,6 +224,7 @@ Create a verified backup before upgrades, configuration migrations, or any repai
 ```powershell
 python -m companion --backup-memory D:\CompanionBackups\memory-before-upgrade.db
 python -m companion --verify-memory-backup D:\CompanionBackups\memory-before-upgrade.db
+python -m companion --restore-memory-backup D:\CompanionBackups\memory-before-upgrade.db
 ```
 
 The backup uses SQLite's online backup API, so WAL state is included consistently without copying
@@ -239,6 +240,14 @@ data, and legacy markerless backups remain verifiable. The doctor and runtime re
 structurally incomplete, or future-version databases before changing their schema or journal mode.
 Treat a future-version rejection as a binary rollback problem: restore the matching application
 version or a verified compatible backup; never lower `user_version` manually.
+
+`--restore-memory-backup` is an offline, single-instance operation. It performs a full SQLite
+integrity and ownership/schema check on the source, copies and verifies a private temporary file,
+checkpoints the stopped live WAL, preserves the previous database files in a timestamped hidden
+rollback directory beside the live database, and then publishes the replacement atomically. It
+rejects an active runtime and removes an unpublished replacement after failure. Keep the reported
+rollback directory until the restored runtime has passed doctor and a representative conversation;
+do not manually mix its `.db`, `-wal`, or `-shm` files with another generation.
 
 Maintenance operations are isolated from live memory traffic. A rebuild holds the shared database
 operation boundary until commit or rollback, including cancellation; queued dialogue writes run

@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import sqlite3
 import time
 from collections.abc import AsyncIterator, Callable
@@ -1001,10 +1002,77 @@ class MemoryService(MemoryProvider):
             raise FileNotFoundError(f"memory backup does not exist: {backup_path}")
         uri = backup_path.as_uri() + "?mode=ro"
         with closing(sqlite3.connect(uri, uri=True, timeout=5.0)) as connection:
-            quick_check = connection.execute("PRAGMA quick_check").fetchone()
-            if not quick_check or quick_check[0] != "ok":
+            integrity_check = connection.execute("PRAGMA integrity_check").fetchone()
+            if not integrity_check or integrity_check[0] != "ok":
                 raise sqlite3.DatabaseError("memory backup integrity check failed")
             return MemoryService.validate_connection_schema(connection, allow_legacy=True)
+
+    @staticmethod
+    def restore_from_backup(
+        backup: str | Path, destination: str | Path
+    ) -> tuple[Path, Path | None]:
+        """Atomically replace offline memory while preserving the previous file set."""
+        source = Path(backup).expanduser().resolve()
+        target = Path(destination).expanduser().resolve()
+        if str(destination) == ":memory:":
+            raise ValueError("in-memory databases cannot be restored from a release file")
+        if source == target:
+            raise ValueError("restore source must differ from the live database")
+        MemoryService.verify_backup(source)
+        target.parent.mkdir(parents=True, exist_ok=True)
+
+        temporary = target.with_name(
+            f".{target.name}.{os.getpid()}.{secrets.token_hex(8)}.restore.tmp"
+        )
+        rollback_dir: Path | None = None
+        archived: list[tuple[Path, Path]] = []
+        sidecars = [target, Path(f"{target}-wal"), Path(f"{target}-shm")]
+        target_existed = target.exists()
+        try:
+            shutil.copyfile(source, temporary)
+            with temporary.open("r+b") as restored_file:
+                os.fsync(restored_file.fileno())
+            MemoryService.verify_backup(temporary)
+
+            if target.exists():
+                MemoryService._checkpoint_offline_database(target)
+            existing = [path for path in sidecars if path.exists()]
+            if existing:
+                timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+                rollback_dir = target.with_name(
+                    f".{target.name}.pre-restore-{timestamp}-{secrets.token_hex(4)}"
+                )
+                rollback_dir.mkdir()
+                for path in existing:
+                    archived_path = rollback_dir / path.name
+                    shutil.copy2(path, archived_path)
+                    archived.append((path, archived_path))
+
+            for sidecar in sidecars[1:]:
+                sidecar.unlink(missing_ok=True)
+            os.replace(temporary, target)
+            MemoryService.verify_backup(target)
+            return target, rollback_dir
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            if not target_existed:
+                target.unlink(missing_ok=True)
+            if archived:
+                for original, archived_path in archived:
+                    shutil.copy2(archived_path, original)
+            raise
+
+    @staticmethod
+    def _checkpoint_offline_database(path: Path) -> None:
+        if not path.is_file():
+            return
+        uri = path.as_uri() + "?mode=rw"
+        with closing(sqlite3.connect(uri, uri=True, timeout=5.0)) as connection:
+            result = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            if not result or int(result[0]) != 0:
+                raise sqlite3.OperationalError(
+                    "memory database is busy and cannot be restored safely"
+                )
 
     @staticmethod
     def validate_connection_schema(
