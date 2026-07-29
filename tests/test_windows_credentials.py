@@ -8,6 +8,9 @@ from companion.security.windows_credentials import (
     _decode_credential_blob,
     configured_secret_sources,
     resolve_secret,
+    windows_credential_exists,
+    write_windows_credential,
+    write_windows_credential_if_missing,
 )
 
 
@@ -83,3 +86,22 @@ def test_unsafe_credential_references_are_rejected(env_name, target) -> None:
 def test_windows_credential_blob_requires_utf16() -> None:
     assert _decode_credential_blob("rotated-secret".encode("utf-16-le")) == "rotated-secret"
     assert _decode_credential_blob(b"\xff") == ""
+
+
+def test_windows_credential_write_rejects_empty_values() -> None:
+    with pytest.raises(ValueError, match="must not be empty"):
+        write_windows_credential("VirtualCompanion/Test", "")
+
+
+def test_windows_credential_exists_rejects_unsafe_targets() -> None:
+    with pytest.raises(ValueError, match="target is invalid"):
+        windows_credential_exists("bad\ntarget")
+
+
+def test_create_only_credential_write_validates_before_native_access() -> None:
+    with pytest.raises(ValueError, match="must not be empty"):
+        write_windows_credential_if_missing("VirtualCompanion/Test", "")
+    with pytest.raises(ValueError, match="username is invalid"):
+        write_windows_credential_if_missing(
+            "VirtualCompanion/Test", "secret", username="bad\nusername"
+        )

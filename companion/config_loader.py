@@ -39,6 +39,24 @@ DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "resources" / "default.y
 type ConfigSchema = dict[str, ConfigSchema | None]
 
 
+def write_default_config(destination: Path | str) -> Path:
+    """Create an editable copy of the packaged configuration without overwriting files."""
+    target = Path(destination).expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = DEFAULT_CONFIG_PATH.read_bytes()
+    try:
+        with target.open("xb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except FileExistsError:
+        raise FileExistsError(f"Configuration file already exists: {target}") from None
+    except BaseException:
+        target.unlink(missing_ok=True)
+        raise
+    return target
+
+
 def _fields(*names: str) -> ConfigSchema:
     return dict.fromkeys(names)
 

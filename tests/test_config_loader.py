@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from companion.config_loader import DEFAULT_CONFIG_PATH, RuntimeConfig
+from companion.config_loader import DEFAULT_CONFIG_PATH, RuntimeConfig, write_default_config
 from companion.providers.implementations.websocket_avatar import WebSocketAvatarConfig
 
 
@@ -111,6 +111,16 @@ def test_repository_config_template_matches_packaged_default() -> None:
     assert yaml.safe_load(repository_default.read_text(encoding="utf-8")) == yaml.safe_load(
         DEFAULT_CONFIG_PATH.read_text(encoding="utf-8")
     )
+
+
+def test_default_config_can_be_exported_without_overwriting(tmp_path) -> None:
+    target = tmp_path / "profile" / "production.yaml"
+
+    assert write_default_config(target) == target.resolve()
+    assert target.read_bytes() == DEFAULT_CONFIG_PATH.read_bytes()
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        write_default_config(target)
 
 
 def test_avatar_bridge_is_disabled_by_default() -> None:

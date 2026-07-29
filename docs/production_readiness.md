@@ -61,6 +61,9 @@ experience, and fails closed when a required dependency is unavailable.
 - [x] Runtime dependencies are locked and reproducible; package and clean-machine install pass.
 - [x] A credential-safe deployment doctor validates configuration, SQLite integrity, local voice
       modules/devices, and optionally remote provider health with deterministic exit codes.
+- [x] An operator workflow safely exports editable configuration, provisions only a missing random
+      Avatar token, and launches AIRI with a sanitized environment and isolated high-capacity
+      profile.
 - [x] Runtime logs and diagnostic histories have explicit memory/disk bounds and rotation.
 - [x] A Windows session-scoped single-instance boundary prevents duplicate runtimes from sharing
       one profile, microphone, playback device, or avatar stage.
@@ -137,6 +140,13 @@ retention) are now wired into runtime construction. Unsupported advertised provi
 from the default YAML and unsafe or unimplemented configuration fails closed. The new `--doctor`
 family provides human and JSON preflight reports without exposing credential values; online Azure
 health uses the read-only voices-list endpoint. See `docs/deployment_preflight.md`.
+
+Operator workflow status: `--init-config` exports the packaged YAML only to a new file;
+`--provision-avatar-token` idempotently creates only a missing random Windows Generic Credential;
+and `--launch-airi` requires a local absolute `.exe` plus a dedicated local profile with at least
+2 GiB free. The AIRI child receives a secret-minimized environment containing only the Avatar
+token, while Electron user data, caches, app data, and temporary files are redirected beneath that
+profile. This closes repeatable setup and low-system-disk isolation, not real renderer acceptance.
 
 Credential storage status: LLM, Azure TTS, and avatar token resolution now uses one constrained
 security boundary. A process environment value is an explicit temporary override; otherwise the
@@ -239,14 +249,17 @@ The action and perception features must remain disabled until their correspondin
 ## Verification evidence (2026-07-29)
 
 - `ruff check companion tests scripts`: passed.
-- `mypy companion scripts`: passed in strict mode for 74 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 393 tests passed with 79.87%
+- `mypy companion scripts`: passed in strict mode for 75 source files.
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 412 tests passed with 79.85%
   total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 83%, voice
-  pipeline 85%, cloud LLM 63%, cloud TTS 81%, avatar acceptance 78%, action service 82%, and the
-  action audit store 94%.
+  pipeline 85%, cloud LLM 63%, cloud TTS 81%, avatar acceptance 78%, AIRI launcher 88%, action
+  service 82%, and the action audit store 94%.
 - Windows Credential Manager integration passed focused resolution, precedence, validation, and
   native missing-target tests. Environment overrides take precedence; absent or unreadable Generic
   Credentials fail closed without enumerating the vault or exposing credential content.
+- The AIRI operator workflow passed configuration-export non-overwrite tests, create-only Avatar
+  credential provisioning, sanitized child-environment checks, 2 GiB local-profile readiness,
+  partial-directory cleanup, direct process execution, and bounded cancellation cleanup.
 - Configuration loading rejects unknown fields at every supported nesting level, preventing
   misspelled security, timeout, audit, provider, and proactive-policy options from silently falling
   back to defaults. The side-effect-free `--validate-config` command is enforced by both CI and the
@@ -282,14 +295,18 @@ The action and perception features must remain disabled until their correspondin
 - The single hash lock now covers runtime, voice, development, and release tooling. CI installs
   only that lock plus the project with `--no-deps`. There is no secondary `requirements.txt`
   dependency entry point.
-- `python -m build --no-isolation`: wheel and sdist built successfully. Automated archive checks
-  require the packaged YAML, metadata, and license; reject databases, tests, key-named files,
-  bytecode, unsafe archive paths, and runtime data; and emit `SHA256SUMS`.
+- `python -m build --no-isolation` under the hash-locked release environment: wheel and sdist built
+  successfully. The unrelated system Anaconda environment has setuptools 70.2.0 and cannot parse
+  the project's PEP 639 license expression; release builds must use the locked setuptools 83.0.0.
+  Automated archive checks require the packaged YAML, metadata, and license; reject databases,
+  tests, key-named files, bytecode, unsafe archive paths, and runtime data; and emit `SHA256SUMS`.
 - `pip-audit -r requirements.lock`: no known vulnerabilities in the complete locked dependency
   tree.
 - A fresh Python 3.12 virtual environment installed `requirements.lock` with `--require-hashes`,
   installed the wheel with `--no-deps`, passed `pip check`, imported `companion`,
   `faster_whisper`, `sounddevice`, and `numpy`, and completed a CLI help smoke test.
+- A second fresh E-drive virtual environment repeated the full hash-locked install and wheel-only
+  smoke after the operator changes, avoiding additional pressure on the system drive.
 - A wheel-only installation loaded its packaged default YAML from an unrelated empty working
   directory; the sdist excludes tests and includes the hash-locked runtime requirements.
 - A wheel-only installation created a live WAL-backed memory database in a previously missing
@@ -329,9 +346,13 @@ The action and perception features must remain disabled until their correspondin
   no credential-backed test has yet proven microphone capture, faster-whisper model loading,
   Azure streaming TTS, gapless playback, and barge-in latency together.
 - The Python avatar bridge plus the pinned AIRI `v0.11.3` loopback server, Eventa boundary, and
-  renderer-owned evidence core are locally tested. AIRI still needs concrete Live2D/VRM store and
-  component-hook wiring, followed by real rendering and emotion-synchronization acceptance. AIRI's
-  inspected remote-plugin bootstrap is not a stable target.
+  renderer-owned evidence core are locally tested. PR #5 contains the concrete Live2D/VRM wiring,
+  but the bundled Hiyori model does not expose expression `happy` or gesture `nod`; that semantic
+  mapping must be corrected and proven against real renderer state before avatar acceptance. PR #5
+  also remains unmerged, and real rendering/emotion synchronization plus visual sign-off are open.
+- The default runtime currently resolves under `%LOCALAPPDATA%` on a nearly full system drive.
+  Production configuration, memory/log/audit data, AIRI profile, and model caches must use a local
+  high-capacity volume before target-device acceptance and upgrade/rollback testing.
 - The real Windows read-only provider is wired and validated, but file changes, messages,
   application control, input automation, installation, and other mutating actions remain
   unavailable. They require a separate OS isolation boundary and target-device acceptance tests.

@@ -83,6 +83,11 @@ def _create_missing_parents(parent: Path, existing_parent: Path) -> list[Path]:
 
 
 def _is_remote_path(path: Path) -> bool:
+    return is_remote_path(path)
+
+
+def is_remote_path(path: Path) -> bool:
+    """Return whether a resolved path is a UNC path or mapped remote Windows volume."""
     if str(path).startswith("\\\\"):
         return True
     if sys.platform != "win32":
