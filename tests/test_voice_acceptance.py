@@ -307,11 +307,13 @@ async def test_voice_acceptance_rejects_premature_echo_signal() -> None:
 async def test_voice_acceptance_json_reports_startup_failure(
     monkeypatch,
 ) -> None:
+    original_stop = CompanionApp.stop
+
     async def not_ready(_self: CompanionApp) -> bool:
         return False
 
     async def stopped(_self: CompanionApp) -> None:
-        return None
+        await original_stop(_self)
 
     original_init = CompanionApp.__init__
 

@@ -9,6 +9,8 @@ import pytest
 from companion.__main__ import CompanionApp, async_main
 from companion.config_loader import RuntimeConfig
 
+_REAL_APP_STOP = CompanionApp.stop
+
 
 class LifecycleComponent:
     def __init__(
@@ -25,6 +27,7 @@ class LifecycleComponent:
         self.fail = fail
         self.entered = entered
         self.release = release
+        self.shutdown_clean = True
 
     async def stop(self) -> None:
         await self._close()
@@ -211,6 +214,18 @@ async def test_event_bus_drains_before_provider_shutdown() -> None:
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_internal_shutdown_failure_marks_app_unclean() -> None:
+    app = CompanionApp(RuntimeConfig())
+    calls: list[str] = []
+    _inject_lifecycle_components(app, calls)
+    app._orchestrator.shutdown_clean = False
+
+    await app.stop()
+
+    assert not app.shutdown_clean
+
+
+@pytest.mark.asyncio
 async def test_once_failure_still_stops_application(tmp_path, monkeypatch) -> None:
     config_path = tmp_path / "companion.yaml"
     config_path.write_text(
@@ -236,6 +251,7 @@ async def test_once_failure_still_stops_application(tmp_path, monkeypatch) -> No
 
     async def stop(_self) -> None:
         stopped.set()
+        await _REAL_APP_STOP(_self)
 
     monkeypatch.setattr(CompanionApp, "start", start)
     monkeypatch.setattr(CompanionApp, "chat", fail_chat)
@@ -282,6 +298,7 @@ async def test_startup_exception_still_stops_application(tmp_path, monkeypatch) 
 
     async def stop(_self) -> None:
         stopped.set()
+        await _REAL_APP_STOP(_self)
 
     monkeypatch.setattr(CompanionApp, "start", fail_start)
     monkeypatch.setattr(CompanionApp, "stop", stop)
@@ -330,6 +347,7 @@ async def test_microphone_shutdown_failure_still_stops_application(tmp_path, mon
 
     async def stop(_self) -> None:
         stopped.set()
+        await _REAL_APP_STOP(_self)
 
     class FailingMicrophone:
         def __init__(self, _config) -> None:

@@ -86,6 +86,7 @@ class CompanionOrchestrator:
         self._perception = perception_provider
 
         self._running = False
+        self._shutdown_clean = False
         self._session_id: str = ""
         self._history: ConversationHistory = ConversationHistory()
         self._turn_sequence: int = 0
@@ -122,6 +123,10 @@ class CompanionOrchestrator:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def shutdown_clean(self) -> bool:
+        return self._shutdown_clean
 
     async def startup(self) -> bool:
         """Initialize providers and return whether required services are ready."""
@@ -195,6 +200,8 @@ class CompanionOrchestrator:
         """Gracefully shutdown all providers."""
         logger.info("Companion orchestrator shutting down...")
         self._running = False
+        self._shutdown_clean = False
+        providers_clean = True
 
         for name, provider in [
             ("LLM", self._llm),
@@ -210,8 +217,10 @@ class CompanionOrchestrator:
                     await provider.shutdown()
                     logger.debug("%s provider shut down.", name)
                 except Exception:
+                    providers_clean = False
                     logger.exception("Error shutting down %s provider", name)
 
+        self._shutdown_clean = providers_clean
         logger.info("Companion orchestrator shut down.")
 
     # ── Fast Loop: Real-time dialogue ─────────────────────────────────

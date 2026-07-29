@@ -148,6 +148,48 @@ async def test_orchestrator_does_not_start_with_unhealthy_configured_action() ->
     assert not orchestrator.is_running
 
 
+@pytest.mark.asyncio
+async def test_orchestrator_shutdown_records_success() -> None:
+    orchestrator = CompanionOrchestrator(
+        StateManager(),
+        EventBus("test"),
+        PolicyGate(),
+        llm_provider=MockLLMProvider(),
+        memory_provider=MockMemoryProvider(),
+    )
+
+    await orchestrator.shutdown()
+
+    assert orchestrator.shutdown_clean
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_shutdown_failure_still_attempts_later_providers() -> None:
+    calls: list[str] = []
+
+    class FailingLLM(MockLLMProvider):
+        async def shutdown(self) -> None:
+            calls.append("llm")
+            raise RuntimeError("close failed")
+
+    class TrackingMemory(MockMemoryProvider):
+        async def shutdown(self) -> None:
+            calls.append("memory")
+
+    orchestrator = CompanionOrchestrator(
+        StateManager(),
+        EventBus("test"),
+        PolicyGate(),
+        llm_provider=FailingLLM(),
+        memory_provider=TrackingMemory(),
+    )
+
+    await orchestrator.shutdown()
+
+    assert calls == ["llm", "memory"]
+    assert not orchestrator.shutdown_clean
+
+
 def test_no_latency_data_is_unknown() -> None:
     health = TelemetryService().get_health_report()
     assert health["latency_ok"]

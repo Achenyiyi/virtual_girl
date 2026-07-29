@@ -64,6 +64,8 @@ experience, and fails closed when a required dependency is unavailable.
       one profile, microphone, playback device, or avatar stage.
 - [x] Runtime databases and logs require a genuinely writable local Windows volume with at least
       512 MiB free before providers start.
+- [x] An unclean-exit marker forces full SQLite integrity and ownership/schema validation before
+      cloud startup, and is cleared only after every runtime/provider shutdown succeeds.
 - [ ] Unit, integration, recovery, security, and end-to-end suites pass in CI.
 - [x] Ruff and mypy pass for production code; critical production paths meet agreed coverage.
 
@@ -225,8 +227,8 @@ The action and perception features must remain disabled until their correspondin
 ## Verification evidence (2026-07-29)
 
 - `ruff check companion tests scripts`: passed.
-- `mypy companion scripts`: passed in strict mode for 71 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 353 tests passed with 79.48%
+- `mypy companion scripts`: passed in strict mode for 72 source files.
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 363 tests passed with 79.69%
   total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 83%, voice
   pipeline 85%, cloud LLM 63%, cloud TTS 81%, avatar acceptance 77%, action service 82%, and the
   action audit store 94%.

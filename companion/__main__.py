@@ -15,6 +15,7 @@ import io
 import json
 import logging
 import os
+import sqlite3
 import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -47,6 +48,7 @@ from companion.providers.implementations.windows_readonly_action import (
     WindowsReadOnlyActionProvider,
 )
 from companion.security.action_audit import SQLiteActionAuditStore
+from companion.security.crash_recovery import CrashRecoveryGuard
 from companion.security.redaction import RedactingFormatter
 from companion.security.single_instance import (
     InstanceAlreadyRunningError,
@@ -153,6 +155,7 @@ class CompanionApp:
     def __init__(self, config: RuntimeConfig) -> None:
         self._config = config
         self._stop_task: asyncio.Task[None] | None = None
+        self._shutdown_clean = False
 
         # Core components
         self._state_mgr = StateManager()
@@ -272,6 +275,10 @@ class CompanionApp:
     def event_bus(self) -> EventBus:
         return self._bus
 
+    @property
+    def shutdown_clean(self) -> bool:
+        return self._shutdown_clean
+
     async def start(self) -> bool:
         """Start the companion. Returns True if LLM is available."""
         print(f"{Colors.BLUE}正在启动虚拟伴侣…{Colors.RESET}")
@@ -377,7 +384,7 @@ class CompanionApp:
             raise
 
     async def _stop_components(self) -> None:
-        await asyncio.gather(
+        early_results = await asyncio.gather(
             *(
                 self._stop_component(name, operation)
                 for name, operation in [
@@ -388,18 +395,22 @@ class CompanionApp:
             )
         )
         # Drain accepted events before closing the memory provider they persist to.
-        await self._stop_component("event bus", self._bus.shutdown())
+        bus_clean = await self._stop_component("event bus", self._bus.shutdown())
         components: list[tuple[str, Any]] = [
             ("orchestrator", self._orchestrator.shutdown()),
         ]
         if self._action_audit:
             components.append(("action audit", self._action_audit.shutdown()))
-        await asyncio.gather(
-            *(self._stop_component(name, operation) for name, operation in components)
+        late_results = list(
+            await asyncio.gather(
+                *(self._stop_component(name, operation) for name, operation in components)
+            )
         )
+        late_results[0] = late_results[0] and self._orchestrator.shutdown_clean
+        self._shutdown_clean = all((*early_results, bus_clean, *late_results))
 
     @staticmethod
-    async def _stop_component(name: str, operation: Any) -> None:
+    async def _stop_component(name: str, operation: Any) -> bool:
         task = asyncio.ensure_future(operation)
         try:
             done, _ = await asyncio.wait(
@@ -413,14 +424,17 @@ class CompanionApp:
                     _SHUTDOWN_STEP_TIMEOUT_SECONDS,
                     name,
                 )
-                return
+                return False
             await task
+            return True
         except asyncio.CancelledError:
             task.cancel()
             task.add_done_callback(CompanionApp._consume_task_result)
             logging.getLogger(__name__).warning("Shutdown of %s was cancelled", name)
+            return False
         except Exception:
             logging.getLogger(__name__).exception("Error shutting down %s", name)
+            return False
 
     @staticmethod
     def _consume_task_result(task: asyncio.Future[Any]) -> None:
@@ -568,12 +582,48 @@ async def async_main(args: argparse.Namespace) -> int:
         backup_count=config.log_backup_count,
     )
     app: CompanionApp | None = None
+    recovery_guard: CrashRecoveryGuard | None = None
     try:
         if quiet_output:
             with contextlib.redirect_stdout(io.StringIO()):
                 app = CompanionApp(config)
         else:
             app = CompanionApp(config)
+        if await app.memory.health_check() != ProviderHealth.HEALTHY:
+            if accept_voice:
+                memory_report = failed_voice_acceptance_report(
+                    "voice.memory_ready",
+                    "Memory database did not pass local readiness.",
+                )
+                print(
+                    memory_report.to_json()
+                    if quiet_output
+                    else render_voice_acceptance_report(memory_report)
+                )
+            return 1
+        recovery_guard = CrashRecoveryGuard.for_memory_path(memory_path)
+        try:
+            recovered_unclean_exit = recovery_guard.begin()
+        except (OSError, ValueError, sqlite3.DatabaseError) as exc:
+            if accept_voice:
+                recovery_report = failed_voice_acceptance_report(
+                    "voice.crash_recovery",
+                    f"Crash recovery validation failed: {type(exc).__name__}.",
+                )
+                print(
+                    recovery_report.to_json()
+                    if quiet_output
+                    else render_voice_acceptance_report(recovery_report)
+                )
+            else:
+                print(
+                    f"Crash recovery failed: {type(exc).__name__}", file=sys.stderr
+                )
+            return 1
+        if recovered_unclean_exit:
+            logging.getLogger(__name__).warning(
+                "Recovered an unclean prior runtime after full SQLite integrity validation"
+            )
         if quiet_output:
             with contextlib.redirect_stdout(io.StringIO()):
                 ready = await app.start()
@@ -794,6 +844,8 @@ async def async_main(args: argparse.Namespace) -> int:
         try:
             if app is not None:
                 await app.stop()
+                if app.shutdown_clean and recovery_guard is not None:
+                    recovery_guard.finish_clean()
         finally:
             try:
                 instance_guard.release()

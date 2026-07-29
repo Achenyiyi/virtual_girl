@@ -93,6 +93,15 @@ supported durability boundary. Keep the live profile under local application dat
 verified online backups to a separate disk or controlled sync destination. Low-space and
 permission failures are startup blockers, not warnings.
 
+The runtime also publishes a minimal generation marker beside the memory database after the local
+memory health check and before any cloud provider startup. If that marker remains after a crash or
+unclean shutdown, the next launch runs a full SQLite `PRAGMA integrity_check` and validates the
+companion ownership/schema before starting providers. The marker contains only a schema version,
+random run ID, process ID, and UTC start time; it contains no path, credential, model data, or user
+content. It is removed only after every top-level component and every orchestrated provider reports
+a clean shutdown. Preserve a leftover marker for diagnosis; do not delete it to bypass a failed
+recovery check. Restore a verified backup when integrity or schema validation fails.
+
 Exit codes:
 
 - `0`: every required requested check passed; warnings and disabled optional providers are allowed;
