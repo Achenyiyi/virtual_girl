@@ -167,12 +167,17 @@ export async function startAvatarBridgeServerFromEnvironment(options: {
   })
 }
 
-function closePeer(peer: Peer, code: number, reason: string): void {
+export function closePeer(peer: Peer, code: number, reason: string): void {
   try {
     peer.close(code, reason)
   }
   catch {
-    peer.close()
+    try {
+      peer.close()
+    }
+    catch {
+      // Closing a broken transport is best-effort; callers must keep shutting down.
+    }
   }
 }
 
