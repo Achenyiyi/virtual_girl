@@ -104,7 +104,12 @@ full affect-derived state snapshots, proactive-level synchronization, reconnect,
 shutdown. It is disabled by default and fails startup closed when explicitly enabled but unhealthy.
 The AIRI `v0.11.3` protocol core, loopback H3/CrossWS server, Eventa forwarding boundary, and
 renderer-owned evidence state machine are implemented and tested under `integrations/airi-v0.11.3`.
-The concrete Live2D/VRM store and render-hook wiring plus a real end-to-end run remain. AIRI's
+A pinned patch now wires Electron startup/shutdown, Eventa renderer invocation, Live2D/VRM state
+operations, actual model-loaded callbacks, successful render callbacks, and main-window visibility.
+The patch removes AIRI's stale MediaPipe patched-dependency entry, passes `git apply --check`, and
+the pinned stage application plus its 31 dependency workspaces build successfully with pnpm
+`10.33.0`. Post-build typechecking reports no errors in patch-modified files. A real end-to-end run
+and visual acceptance remain. AIRI's
 remote plugin bootstrap is unfinished at the pinned upstream commit, so no undocumented remote API
 is claimed. See `docs/avatar_bridge_protocol.md`.
 
@@ -113,7 +118,7 @@ production stage extension must expose renderer-owned inspection evidence showin
 Live2D/VRM model is loaded and visible, the full state was consumed by the render loop, the expected
 expression/gesture/proactive level was applied, and a later frame was presented. The inspection
 schema is strict and privacy-safe. This machine evidence intentionally does not claim pixel-level
-correctness; the gate remains open until the AIRI extension exists, the command passes against it,
+correctness; the gate remains open until the patched AIRI application builds, the command passes against it,
 and an operator signs off the visible model, animation, expression, textures, alpha, and clipping.
 
 Action implementation status: a real Windows provider now exposes only `check_system_status`,

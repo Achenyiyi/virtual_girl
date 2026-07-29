@@ -33,3 +33,14 @@ test('forwards every stage operation through the renderer invoke boundary', asyn
   ])
   assert.deepEqual(calls[2]?.params, { model_id: 'kurisu' })
 })
+
+test('combines renderer visibility with the real Electron main-window state', async () => {
+  let windowVisible = false
+  const adapter = createEventaStageAdapter(
+    async request => request.method === 'stage.inspect' ? { visible: true } : {},
+    () => windowVisible,
+  )
+  assert.equal((await adapter.inspectStage()).visible, false)
+  windowVisible = true
+  assert.equal((await adapter.inspectStage()).visible, true)
+})
