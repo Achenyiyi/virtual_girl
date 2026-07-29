@@ -116,9 +116,13 @@ jobs:
               throw "Published release is mutable or its asset set changed"
             }
           } catch {
-            $existing = gh release view $tag --repo "$env:GITHUB_REPOSITORY" --json isImmutable 2>$null | ConvertFrom-Json
-            if ($existing -and -not $existing.isImmutable) {
-              gh release delete $tag --repo "$env:GITHUB_REPOSITORY" --yes
+            $failure = $_.Exception.Message
+            $existingJson = gh release view $tag --repo "$env:GITHUB_REPOSITORY" --json isImmutable 2>$null
+            if ($LASTEXITCODE -eq 0 -and $existingJson) {
+              $existing = $existingJson | ConvertFrom-Json
+              if (-not $existing.isImmutable) {
+                gh release delete $tag --repo "$env:GITHUB_REPOSITORY" --yes
+              }
             }
-            throw "Release publication failed closed. Enable release immutability in repository Settings, verify the tag assets, and rerun the workflow. $($_.Exception.Message)"
+            throw "Release publication failed closed. Enable release immutability in repository Settings, verify the tag assets, and rerun the workflow. $failure"
           }

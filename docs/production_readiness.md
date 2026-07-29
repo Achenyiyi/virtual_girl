@@ -275,8 +275,8 @@ The action and perception features must remain disabled until their correspondin
   frames through the production stream, and opened the production playback stream with 20 ms of
   silence. Credential-backed Azure synthesis remains pending.
 - The single hash lock now covers runtime, voice, development, and release tooling. CI installs
-  only that lock plus the project with `--no-deps`; `requirements.txt` delegates to the lock
-  instead of maintaining a second dependency definition.
+  only that lock plus the project with `--no-deps`. There is no secondary `requirements.txt`
+  dependency entry point.
 - `python -m build --no-isolation`: wheel and sdist built successfully. Automated archive checks
   require the packaged YAML, metadata, and license; reject databases, tests, key-named files,
   bytecode, unsafe archive paths, and runtime data; and emit `SHA256SUMS`.
@@ -313,8 +313,9 @@ The action and perception features must remain disabled until their correspondin
   Release must still prove it through GitHub's `isImmutable` result. The workflow fails closed and
   removes any accidentally mutable Release.
 - The initial CodeQL default-setup analysis completed successfully on 2026-07-29. Its two
-  clear-text-logging findings were addressed by keeping configured credential source identifiers
-  out of terminal messages; a subsequent analysis must confirm that no high-severity alert remains.
+  clear-text-logging findings in the application startup path were addressed by keeping configured
+  credential source identifiers out of those terminal messages; a subsequent main analysis must
+  confirm that those high-severity alerts close.
 - Dependabot vulnerability alerts and security updates are enabled. The initial dependency-graph
   job exposed an incompatible `requirements.txt` indirection and that compatibility wrapper was
   removed; a subsequent main-branch graph job must confirm successful ingestion of `pyproject.toml`
