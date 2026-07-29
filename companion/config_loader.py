@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,6 +35,116 @@ from companion.services.voice_pipeline import VoicePipelineConfig
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "resources" / "default.yaml"
+
+type ConfigSchema = dict[str, ConfigSchema | None]
+
+
+def _fields(*names: str) -> ConfigSchema:
+    return dict.fromkeys(names)
+
+
+_CONFIG_SCHEMA: ConfigSchema = {
+    "identity": _fields(
+        "name",
+        "self_concept",
+        "origin_story",
+        "core_traits",
+        "speaking_style",
+        "speech_quirks",
+        "default_address_term",
+        "emotional_expression_range",
+        "values",
+        "hard_boundaries",
+        "interests",
+        "knowledge_domains",
+        "avatar_model_id",
+    ),
+    "providers": {
+        "llm": {
+            "type": None,
+            "cloud": _fields(
+                "provider",
+                "model",
+                "api_key",
+                "api_key_file",
+                "api_key_env",
+                "credential_target",
+                "base_url",
+                "max_retries",
+                "retry_delay_seconds",
+                "timeout_seconds",
+            ),
+        },
+        "tts": {
+            "type": None,
+            "sample_rate": None,
+            "providers": {
+                "cloud": _fields(
+                    "enabled",
+                    "provider",
+                    "voice",
+                    "api_key_env",
+                    "credential_target",
+                    "region",
+                    "timeout_seconds",
+                )
+            },
+        },
+        "asr": {
+            "capture": _fields(
+                "language",
+                "sample_rate",
+                "pre_roll_ms",
+                "max_speech_duration_ms",
+                "silence_duration_ms",
+                "max_turn_duration_ms",
+                "tts_chunk_timeout_seconds",
+                "playback_timeout_seconds",
+                "cleanup_timeout_seconds",
+                "interrupt_timeout_seconds",
+                "target_e2e_latency_ms",
+                "target_interrupt_latency_ms",
+            ),
+            "batch": _fields("provider", "model", "device", "compute_type", "cpu_threads"),
+        },
+        "memory": _fields("type", "db_path", "wal_mode", "fts_enabled"),
+        "avatar": _fields(
+            "enabled",
+            "type",
+            "url",
+            "auth_token_env",
+            "credential_target",
+            "connect_timeout_seconds",
+            "request_timeout_seconds",
+            "max_message_bytes",
+        ),
+        "action": _fields(
+            "enabled",
+            "type",
+            "sandbox_enabled",
+            "audit_db_path",
+            "timeout_seconds",
+            "max_concurrent_actions",
+            "max_pending_confirmations",
+            "confirmation_ttl_seconds",
+            "max_text_characters",
+        ),
+        "perception": {"enabled": None},
+    },
+    "policy": {
+        "quiet_hours": _fields("enabled", "start", "end"),
+        "proactive_budget": _fields(*(f"level_{level}_per_hour" for level in range(1, 5))),
+        "cooldown_seconds": _fields(*(f"level_{level}" for level in range(1, 5))),
+    },
+    "telemetry": {"enabled": None},
+    "dev": _fields(
+        "log_level",
+        "log_file",
+        "log_max_bytes",
+        "log_backup_count",
+        "event_log_retention",
+    ),
+}
 
 
 @dataclass
@@ -101,6 +212,7 @@ class RuntimeConfig:
         if not isinstance(loaded, dict):
             raise ValueError("Configuration root must be a YAML mapping")
         raw: dict[str, Any] = loaded
+        _validate_known_fields(raw, _CONFIG_SCHEMA)
 
         cfg = cls(raw=raw)
 
@@ -332,6 +444,23 @@ def _section(parent: dict[str, Any], key: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Configuration section '{key}' must be a mapping")
     return value
+
+
+def _validate_known_fields(
+    value: Mapping[Any, Any], schema: ConfigSchema, path: str = "configuration"
+) -> None:
+    """Reject typos instead of silently falling back to production defaults."""
+    unexpected = sorted(repr(key) for key in value if not isinstance(key, str) or key not in schema)
+    if unexpected:
+        raise ValueError(f"Unknown configuration field(s) in {path}: {', '.join(unexpected)}")
+    for key, nested_schema in schema.items():
+        if key not in value or nested_schema is None:
+            continue
+        nested_value = value[key]
+        nested_path = key if path == "configuration" else f"{path}.{key}"
+        if not isinstance(nested_value, dict):
+            raise ValueError(f"Configuration section '{nested_path}' must be a mapping")
+        _validate_known_fields(nested_value, nested_schema, nested_path)
 
 
 def _boolean(value: object, field_name: str) -> bool:

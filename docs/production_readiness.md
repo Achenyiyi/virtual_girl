@@ -233,13 +233,16 @@ The action and perception features must remain disabled until their correspondin
 
 - `ruff check companion tests scripts`: passed.
 - `mypy companion scripts`: passed in strict mode for 74 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 385 tests passed with 79.83%
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 391 tests passed with 79.86%
   total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 83%, voice
   pipeline 85%, cloud LLM 63%, cloud TTS 81%, avatar acceptance 78%, action service 82%, and the
   action audit store 94%.
 - Windows Credential Manager integration passed focused resolution, precedence, validation, and
   native missing-target tests. Environment overrides take precedence; absent or unreadable Generic
   Credentials fail closed without enumerating the vault or exposing credential content.
+- Configuration loading rejects unknown fields at every supported nesting level, preventing
+  misspelled security, timeout, audit, provider, and proactive-policy options from silently falling
+  back to defaults.
 - The Windows single-instance boundary passed same-process and real child-process contention tests,
   profile-path normalization, independent-profile, idempotent release, and pre-provider CLI exit
   cases. The named mutex discloses only a truncated SHA-256 digest.

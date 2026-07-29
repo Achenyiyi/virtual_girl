@@ -266,6 +266,28 @@ def test_non_mapping_yaml_is_rejected(tmp_path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("payload", "field"),
+    [
+        ({"providres": {}}, "providres"),
+        ({"providers": {"avater": {}}}, "providers.*avater"),
+        ({"providers": {"avatar": {"enabld": True}}}, "providers.avatar.*enabld"),
+        (
+            {"providers": {"action": {"sandbox_enable": True}}},
+            "providers.action.*sandbox_enable",
+        ),
+        ({"policy": {"quiet_hours": {"starts": "23:00"}}}, "policy.quiet_hours.*starts"),
+        ({"dev": {"log_backup_counts": 5}}, "dev.*log_backup_counts"),
+    ],
+)
+def test_unknown_configuration_fields_fail_closed(tmp_path, payload, field) -> None:
+    path = tmp_path / "unknown-field.yaml"
+    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=field):
+        RuntimeConfig.from_yaml(path)
+
+
+@pytest.mark.parametrize(
     "payload",
     [
         {"providers": []},

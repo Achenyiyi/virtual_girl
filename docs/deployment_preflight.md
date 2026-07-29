@@ -156,6 +156,10 @@ not close the AIRI/Live2D/VRM release gate.
 
 Follow `docs/release_process.md` for version, evidence, tag, provenance, and GitHub Release gates.
 
+Configuration parsing rejects unknown fields at every supported nesting level. Treat an unknown
+field error as a deployment defect; correct the spelling or remove the unsupported option instead
+of attempting to bypass validation.
+
 1. Revoke any credential that was ever stored outside an environment secret or Credential Manager.
 2. Store only the rotated replacements using the Generic Credential targets above.
 3. Install `requirements.lock` with hashes and install the wheel with `--no-deps`.
