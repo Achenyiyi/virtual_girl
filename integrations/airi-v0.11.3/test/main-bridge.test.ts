@@ -4,7 +4,7 @@ import test from 'node:test'
 
 import type { AvatarStageAdapter } from '../src/protocol.ts'
 
-import { startAvatarBridgeServer, startAvatarBridgeServerFromEnvironment } from '../src/main-bridge.ts'
+import { closePeer, startAvatarBridgeServer, startAvatarBridgeServerFromEnvironment } from '../src/main-bridge.ts'
 
 function adapter(overrides: Partial<AvatarStageAdapter> = {}): AvatarStageAdapter {
   return {
@@ -163,6 +163,19 @@ test('server shutdown closes active peers and is idempotent', async () => {
   await server.close()
   assert.equal((await closed).code, 1001)
   await server.close()
+})
+
+test('peer close failures remain best-effort', () => {
+  let attempts = 0
+  const peer = {
+    close() {
+      attempts += 1
+      throw new Error('transport already failed')
+    },
+  }
+
+  assert.doesNotThrow(() => closePeer(peer as never, 1001, 'bridge shutting down'))
+  assert.equal(attempts, 2)
 })
 
 test('rejects missing credentials and non-loopback bind addresses', async () => {

@@ -34,10 +34,10 @@ index 0000000..082ad24
 +}
 diff --git a/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/server.ts b/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/server.ts
 new file mode 100644
-index 0000000..a1df694
+index 0000000..a7c181d
 --- /dev/null
 +++ b/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/server.ts
-@@ -0,0 +1,189 @@
+@@ -0,0 +1,194 @@
 +import type { Peer } from 'crossws'
 +
 +import { plugin as crossWsPlugin } from 'crossws/server'
@@ -212,7 +212,12 @@ index 0000000..a1df694
 +    peer.close(code, reason)
 +  }
 +  catch {
-+    peer.close()
++    try {
++      peer.close()
++    }
++    catch {
++      // Closing a broken transport is best-effort; callers must keep shutting down.
++    }
 +  }
 +}
 +
@@ -1044,7 +1049,7 @@ index 6c25082..967c5b9 100644
      return
  
 diff --git a/packages/stage-ui/src/components/scenes/Stage.vue b/packages/stage-ui/src/components/scenes/Stage.vue
-index 966f39b..f132f82 100644
+index 966f39b..48ddf44 100644
 --- a/packages/stage-ui/src/components/scenes/Stage.vue
 +++ b/packages/stage-ui/src/components/scenes/Stage.vue
 @@ -11,7 +11,7 @@ import { sleep } from '@moeru/std'
@@ -1111,7 +1116,8 @@ index 966f39b..f132f82 100644
 +    throw new Error('avatar renderer does not support one-shot gestures')
 +
 +  const normalized = gestureId.toLowerCase()
-+  const mapped = live2dParams.motionMap[gestureId]
++  const mapped = Object.entries(live2dParams.motionMap)
++    .find(([key]) => key.toLowerCase() === normalized)?.[1]
 +  const motion = live2dParams.availableMotions.find(item =>
 +    item.motionName.toLowerCase() === normalized || item.fileName.toLowerCase() === normalized,
 +  )
@@ -1148,13 +1154,12 @@ index 966f39b..f132f82 100644
 +}
 +
 +async function applyAvatarProactiveLevel(level: number) {
-+  if (stageModelRenderer.value !== 'live2d')
-+    throw new Error('avatar renderer does not support proactive level')
-+
 +  proactiveLevel.value = level
-+  live2dParams.modelParameters = {
-+    ...live2dParams.modelParameters,
-+    breath: level / 4,
++  if (stageModelRenderer.value === 'live2d') {
++    live2dParams.modelParameters = {
++      ...live2dParams.modelParameters,
++      breath: level / 4,
++    }
 +  }
 +}
  
