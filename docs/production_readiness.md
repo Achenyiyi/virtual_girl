@@ -66,7 +66,7 @@ experience, and fails closed when a required dependency is unavailable.
       512 MiB free before providers start.
 - [x] An unclean-exit marker forces full SQLite integrity and ownership/schema validation before
       cloud startup, and is cleared only after every runtime/provider shutdown succeeds.
-- [ ] Unit, integration, recovery, security, and end-to-end suites pass in CI.
+- [x] Unit, integration, recovery, security, and packaged-wheel suites pass in Windows CI.
 - [x] Ruff and mypy pass for production code; critical production paths meet agreed coverage.
 
 ## Current status
@@ -79,8 +79,7 @@ time-versioned preference keys, single-use action confirmation, provider timeout
 LLM readiness status, unknown no-data telemetry, and standards-compliant WAV generation.
 
 Active milestone: rotate the exposed local credential, validate the interruptible voice path and
-mutating-action isolation, implement the AIRI-side stage extension, and obtain the first green
-remote CI run.
+mutating-action isolation, and implement the AIRI-side stage extension.
 
 Voice implementation status: the code path now includes optional local faster-whisper ASR,
 contextual runtime generation, network-streamed Azure PCM, gapless sounddevice playback,
@@ -280,8 +279,8 @@ The action and perception features must remain disabled until their correspondin
   in-memory, and accidental-overwrite cases are rejected by tests.
 - `.github/workflows/ci.yml` reproduces lint, type, coverage, secret, vulnerability, artifact,
   checksum, and isolated-wheel-install gates on Windows. Third-party Actions are pinned to full
-  immutable commit SHAs and the job has read-only repository permissions. It has not yet run on a
-  remote GitHub repository.
+  immutable commit SHAs and the job has read-only repository permissions. GitHub Actions run
+  `30410669222` passed every gate on the remote `main` branch and uploaded verified artifacts.
 - Git history now has a clean `main` baseline commit. Ignored local credentials, memory data,
   virtual environments, and build artifacts were excluded before staging.
 - Release-source `detect-secrets` reported zero candidates. `pip-audit` reported no known
@@ -306,7 +305,5 @@ The action and perception features must remain disabled until their correspondin
   project's isolated hash-locked release environment passes `pip check`. Azure/DeepSeek
   environment variables are not present, so hardware- and credential-backed end-to-end testing
   remains pending.
-- No Git remote is configured, so the checked-in GitHub Actions workflow cannot produce its first
-  remote green run until a repository URL and push authorization are provided.
 - Dependency hashes were generated and verified on Windows/Python 3.12. Cross-platform releases
   are not claimed; regenerate and verify the lock on every newly supported OS/Python target.
