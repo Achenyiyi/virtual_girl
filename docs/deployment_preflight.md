@@ -160,6 +160,11 @@ Configuration parsing rejects unknown fields at every supported nesting level. T
 field error as a deployment defect; correct the spelling or remove the unsupported option instead
 of attempting to bypass validation.
 
+Run `python -m companion --config production.yaml --validate-config` in packaging and deployment
+automation. It validates the complete supported schema, types, ranges, provider choices, endpoint
+rules, and safety constraints, then exits without reading credentials or touching runtime storage,
+devices, network providers, or the single-instance boundary.
+
 1. Revoke any credential that was ever stored outside an environment secret or Credential Manager.
 2. Store only the rotated replacements using the Generic Credential targets above.
 3. Install `requirements.lock` with hashes and install the wheel with `--no-deps`.

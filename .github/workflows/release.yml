@@ -49,6 +49,9 @@ jobs:
           python scripts/verify_release_version.py --tag "${{ github.ref_name }}"
           python scripts/verify_release_evidence.py --tag "${{ github.ref_name }}"
 
+      - name: Validate packaged production configuration
+        run: python -m companion --validate-config
+
       - name: Build and verify release artifacts
         shell: pwsh
         run: |

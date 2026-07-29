@@ -12,6 +12,27 @@ from companion.config_loader import RuntimeConfig
 _REAL_APP_STOP = CompanionApp.stop
 
 
+@pytest.mark.asyncio
+async def test_validate_config_exits_before_runtime_side_effects(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    config_path = tmp_path / "production.yaml"
+    config_path.write_text("dev:\n  log_level: INFO\n", encoding="utf-8")
+
+    def unexpected_storage_check(_path) -> None:
+        raise AssertionError("configuration validation must not inspect runtime storage")
+
+    monkeypatch.setattr("companion.__main__.check_runtime_storage", unexpected_storage_check)
+    args = Namespace(
+        config=config_path,
+        validate_config=True,
+        verify_memory_backup=None,
+    )
+
+    assert await async_main(args) == 0
+    assert capsys.readouterr().out.strip() == "Configuration is valid."
+
+
 def test_cli_streams_use_utf8_for_multilingual_output(monkeypatch) -> None:
     calls: list[dict[str, str]] = []
 
