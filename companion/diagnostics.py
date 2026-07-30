@@ -477,7 +477,8 @@ async def _optional_provider_checks(
                 DiagnosticCheck(
                     "avatar.launch_installation",
                     DiagnosticStatus.PASS,
-                    "Managed AIRI executable and app.asar match their pinned digests.",
+                    "Managed AIRI executable, app.asar, Godot sidecar, and VRM match their "
+                    "pinned digests.",
                 )
             )
         except Exception as exc:
@@ -486,7 +487,7 @@ async def _optional_provider_checks(
                     "avatar.launch_installation",
                     DiagnosticStatus.FAIL,
                     f"Managed AIRI installation check failed: {type(exc).__name__}.",
-                    "Install the approved AIRI build locally and pin airi.exe and app.asar.",
+                    "Install the approved AIRI build and VRM locally, then pin all four files.",
                 )
             )
     if config.avatar_config:

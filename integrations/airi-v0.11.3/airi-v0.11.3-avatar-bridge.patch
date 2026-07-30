@@ -1,8 +1,51 @@
 diff --git a/apps/stage-tamagotchi/src/main/index.ts b/apps/stage-tamagotchi/src/main/index.ts
-index 2eaa6db30d2b93e3652e23feffb8ca5cd87e2b74..d1be902a97bd6f94b9a6f6c836a1742b82904dda 100644
+index 2eaa6db30d2b93e3652e23feffb8ca5cd87e2b74..f0023f81f5d08d6e78be317a47251c08f4d869a8 100644
 --- a/apps/stage-tamagotchi/src/main/index.ts
 +++ b/apps/stage-tamagotchi/src/main/index.ts
-@@ -135,6 +135,7 @@ app.whenReady().then(async () => {
+@@ -13,7 +13,7 @@ import { electronApp, optimizer } from '@electron-toolkit/utils'
+ import { Format, LogLevel, setGlobalFormat, setGlobalHookPostLog, setGlobalLogLevel, useLogg } from '@guiiai/logg'
+ import { createContext } from '@moeru/eventa/adapters/electron/main'
+ import { initScreenCaptureForMain } from '@proj-airi/electron-screen-capture/main'
+-import { app, ipcMain, session } from 'electron'
++import { app, ipcMain, protocol, session } from 'electron'
+ import { noop } from 'es-toolkit'
+ import { createLoggLogger, injeca, lifecycle } from 'injeca'
+ import { isLinux } from 'std-env'
+@@ -29,6 +29,7 @@ import { emitAppBeforeQuit, emitAppReady, emitAppWindowAllClosed } from './libs/
+ import { setElectronMainDirname } from './libs/electron/location'
+ import { createI18n } from './libs/i18n'
+ import { createWindowAuthManagerService } from './services/airi/auth'
++import { installManagedAvatarProtocolFromEnvironment } from './services/airi/avatar-bridge/managed-avatar'
+ import { setupServerChannel } from './services/airi/channel-server'
+ import { setupGodotStageManager } from './services/airi/godot-stage'
+ import { setupBuiltInServer } from './services/airi/http-server'
+@@ -57,6 +58,11 @@ import { setupWidgetsWindowManager } from './windows/widgets'
+ // manage events within eventa's context system.
+ ipcMain.setMaxListeners(100)
+ 
++protocol.registerSchemesAsPrivileged([{
++  scheme: 'companion-avatar',
++  privileges: { secure: true, standard: true, supportFetchAPI: true, corsEnabled: true, stream: true },
++}])
++
+ setElectronMainDirname(dirname(fileURLToPath(import.meta.url)))
+ setGlobalFormat(Format.Pretty)
+ setGlobalLogLevel(LogLevel.Log)
+@@ -116,6 +122,13 @@ app.whenReady().then(async () => {
+   }
+ 
+   setupMediaPermissionHandlers(session.defaultSession)
++  const managedAvatar = await installManagedAvatarProtocolFromEnvironment({
++    COMPANION_AVATAR_TOKEN: process.env.COMPANION_AVATAR_TOKEN,
++    COMPANION_AVATAR_MODEL_PATH: process.env.COMPANION_AVATAR_MODEL_PATH,
++    COMPANION_AVATAR_MODEL_SHA256: process.env.COMPANION_AVATAR_MODEL_SHA256,
++    COMPANION_AVATAR_MODEL_ID: process.env.COMPANION_AVATAR_MODEL_ID,
++    COMPANION_AVATAR_MODEL_NAME: process.env.COMPANION_AVATAR_MODEL_NAME,
++  })
+ 
+   // Initialize file logger and register the hook
+   fileLogger = await setupFileLogger()
+@@ -135,6 +148,7 @@ app.whenReady().then(async () => {
    const autoUpdater = injeca.provide('services:auto-updater', {
      dependsOn: { appConfig },
      build: ({ dependsOn }) => setupAutoUpdater({
@@ -10,6 +53,14 @@ index 2eaa6db30d2b93e3652e23feffb8ca5cd87e2b74..d1be902a97bd6f94b9a6f6c836a1742b
        getStoredUpdateLane: () => dependsOn.appConfig.get()?.updateChannel,
        setStoredUpdateLane: (lane) => {
          const currentConfig = dependsOn.appConfig.get()
+@@ -225,6 +239,7 @@ app.whenReady().then(async () => {
+     dependsOn: { settingsWindow, chatWindow, widgetsManager, noticeWindow, beatSync, autoUpdater, serverChannel, godotStageManager, mcpStdioManager, i18n, onboardingWindowManager, windowAuthManager },
+     build: async ({ dependsOn }) => setupMainWindow({
+       ...dependsOn,
++      managedAvatar,
+       onWindowCreated: (window) => {
+         userFacingMainWindow = window
+       },
 diff --git a/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/eventa-adapter.ts b/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/eventa-adapter.ts
 new file mode 100644
 index 0000000000000000000000000000000000000000..082ad245075ce5157070bae197de1fad405c49c7
@@ -44,18 +95,124 @@ index 0000000000000000000000000000000000000000..082ad245075ce5157070bae197de1fad
 +    },
 +  }
 +}
+diff --git a/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/managed-avatar.ts b/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/managed-avatar.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..cde38e5ea0a73fc957f0fd14e1bfb0fce15bebfc
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/managed-avatar.ts
+@@ -0,0 +1,98 @@
++import { Buffer } from 'node:buffer'
++import { createHash } from 'node:crypto'
++import { open, realpath, stat } from 'node:fs/promises'
++import { resolve } from 'node:path'
++import { pathToFileURL } from 'node:url'
++
++import { net, protocol } from 'electron'
++
++export interface ManagedAvatarModel {
++  id: string
++  name: string
++  renderer: 'vrm'
++  url: string
++}
++
++export interface ManagedAvatarEnvironment {
++  COMPANION_AVATAR_TOKEN?: string
++  COMPANION_AVATAR_MODEL_PATH?: string
++  COMPANION_AVATAR_MODEL_SHA256?: string
++  COMPANION_AVATAR_MODEL_ID?: string
++  COMPANION_AVATAR_MODEL_NAME?: string
++}
++
++const MODEL_ID_PATTERN = /^[A-Z0-9][\w.-]{0,127}$/i
++const SHA256_PATTERN = /^[0-9a-f]{64}$/i
++const MAX_VRM_BYTES = 512 * 1024 * 1024
++const MANAGED_AVATAR_SCHEME = 'companion-avatar'
++
++export async function installManagedAvatarProtocolFromEnvironment(
++  environment: ManagedAvatarEnvironment,
++): Promise<ManagedAvatarModel | undefined> {
++  if (!environment.COMPANION_AVATAR_TOKEN?.trim())
++    return undefined
++
++  const configuredPath = environment.COMPANION_AVATAR_MODEL_PATH?.trim() ?? ''
++  const expectedSha256 = environment.COMPANION_AVATAR_MODEL_SHA256?.trim() ?? ''
++  const id = environment.COMPANION_AVATAR_MODEL_ID?.trim() ?? ''
++  const name = environment.COMPANION_AVATAR_MODEL_NAME?.trim() ?? ''
++  if (!configuredPath || !SHA256_PATTERN.test(expectedSha256) || !MODEL_ID_PATTERN.test(id))
++    throw new Error('managed avatar configuration is incomplete')
++  if (!name || name.length > 128)
++    throw new Error('managed avatar name is invalid')
++
++  const absolutePath = resolve(configuredPath)
++  const canonicalPath = await realpath(absolutePath)
++  if (canonicalPath.toLowerCase() !== absolutePath.toLowerCase()
++    || !canonicalPath.toLowerCase().endsWith('.vrm')) {
++    throw new Error('managed avatar must be a canonical .vrm path')
++  }
++  const metadata = await stat(canonicalPath)
++  if (!metadata.isFile() || metadata.size < 20 || metadata.size > MAX_VRM_BYTES)
++    throw new Error('managed avatar file size is invalid')
++  await validateVrm(canonicalPath, metadata.size, expectedSha256)
++
++  const route = `/${encodeURIComponent(id)}.vrm`
++  protocol.handle(MANAGED_AVATAR_SCHEME, (request) => {
++    const url = new URL(request.url)
++    if (url.hostname !== 'managed' || url.pathname !== route)
++      return new Response(null, { status: 404 })
++    return net.fetch(pathToFileURL(canonicalPath).href)
++  })
++
++  return { id, name, renderer: 'vrm', url: `${MANAGED_AVATAR_SCHEME}://managed${route}` }
++}
++
++async function validateVrm(path: string, size: number, expectedSha256: string): Promise<void> {
++  const file = await open(path, 'r')
++  try {
++    const header = Buffer.alloc(20)
++    if ((await file.read(header, 0, header.length, 0)).bytesRead !== header.length
++      || header.toString('ascii', 0, 4) !== 'glTF'
++      || header.readUInt32LE(4) !== 2
++      || header.readUInt32LE(8) !== size
++      || header.toString('ascii', 16, 20) !== 'JSON') {
++      throw new Error('managed avatar is not a valid GLB 2.0 file')
++    }
++    const jsonLength = header.readUInt32LE(12)
++    if (jsonLength < 2 || jsonLength > size - 20)
++      throw new Error('managed avatar JSON chunk is invalid')
++    const json = Buffer.alloc(jsonLength)
++    if ((await file.read(json, 0, jsonLength, 20)).bytesRead !== jsonLength)
++      throw new Error('managed avatar JSON chunk is truncated')
++    const document = JSON.parse(json.toString('utf8').replace(/[\0\s]+$/u, '')) as {
++      extensions?: Record<string, unknown>
++    }
++    if (!document.extensions?.VRM && !document.extensions?.VRMC_vrm)
++      throw new Error('managed avatar does not contain VRM metadata')
++
++    const digest = createHash('sha256')
++    for await (const chunk of file.createReadStream({ autoClose: false, start: 0 }))
++      digest.update(chunk)
++    if (digest.digest('hex') !== expectedSha256.toLowerCase())
++      throw new Error('managed avatar digest does not match')
++  }
++  finally {
++    await file.close()
++  }
++}
 diff --git a/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/server.ts b/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/server.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a7c181daed824dc815f57354fbd1cdf9eb7ca9a6
+index 0000000000000000000000000000000000000000..4322c21c5cc65973f34894900a9927096319cbfc
 --- /dev/null
 +++ b/apps/stage-tamagotchi/src/main/services/airi/avatar-bridge/server.ts
-@@ -0,0 +1,194 @@
+@@ -0,0 +1,196 @@
 +import type { Peer } from 'crossws'
++
++import type { AvatarStageAdapter } from '../../../../shared/avatar-bridge/protocol'
++
++import { Buffer } from 'node:buffer'
 +
 +import { plugin as crossWsPlugin } from 'crossws/server'
 +import { defineWebSocketHandler, H3, serve } from 'h3'
-+
-+import type { AvatarStageAdapter } from '../../../../shared/avatar-bridge/protocol'
 +
 +import {
 +  createAvatarBridgeSession,
@@ -76,7 +233,7 @@ index 0000000000000000000000000000000000000000..a7c181daed824dc815f57354fbd1cdf9
 +  host: string
 +  port: number
 +  url: string
-+  close(): Promise<void>
++  close: () => Promise<void>
 +}
 +
 +export interface AvatarBridgeEnvironment {
@@ -92,7 +249,7 @@ index 0000000000000000000000000000000000000000..a7c181daed824dc815f57354fbd1cdf9
 +    throw new Error('avatar bridge token is required')
 +
 +  const host = options.host ?? '127.0.0.1'
-+  const port = options.port ?? 6121
++  const port = options.port ?? 6122
 +  const maxMessageBytes = options.maxMessageBytes ?? 1_048_576
 +  const maxConcurrentRequests = options.maxConcurrentRequestsPerConnection ?? 32
 +  if (host !== '127.0.0.1' && host !== '::1')
@@ -313,10 +470,18 @@ index cb21c32e11f38ff5993759d63d5b71c73e833477..e097abd9c5e70f15c57a3ef2f82e7707
    const appVersion = app.getVersion()
    const isPrereleaseBuild = isPrereleaseVersion(appVersion)
 diff --git a/apps/stage-tamagotchi/src/main/windows/main/index.ts b/apps/stage-tamagotchi/src/main/windows/main/index.ts
-index 0f452fc8a559ca96c133864e0d9b4c2b71c5e5b4..391755b48d2e6110bc12889d2e156baaa8931cd8 100644
+index 0f452fc8a559ca96c133864e0d9b4c2b71c5e5b4..4a35d630785b84c5dd41d30678e3a9c386166818 100644
 --- a/apps/stage-tamagotchi/src/main/windows/main/index.ts
 +++ b/apps/stage-tamagotchi/src/main/windows/main/index.ts
-@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url'
+@@ -3,6 +3,7 @@ import type { InferOutput } from 'valibot'
+ 
+ import type { I18n } from '../../libs/i18n'
+ import type { WindowAuthManager } from '../../services/airi/auth'
++import type { ManagedAvatarModel } from '../../services/airi/avatar-bridge/managed-avatar'
+ import type { ServerChannel } from '../../services/airi/channel-server'
+ import type { GodotStageManager } from '../../services/airi/godot-stage'
+ import type { McpStdioManager } from '../../services/airi/mcp-servers'
+@@ -19,7 +20,7 @@ import { fileURLToPath } from 'node:url'
  import clickDragPlugin from 'electron-click-drag-plugin'
  
  import { is } from '@electron-toolkit/utils'
@@ -325,27 +490,45 @@ index 0f452fc8a559ca96c133864e0d9b4c2b71c5e5b4..391755b48d2e6110bc12889d2e156baa
  import { createContext } from '@moeru/eventa/adapters/electron/main'
  import { initScreenCaptureForWindow } from '@proj-airi/electron-screen-capture/main'
  import { defu } from 'defu'
-@@ -29,8 +29,10 @@ import { array, number, object, optional, string } from 'valibot'
+@@ -29,10 +30,12 @@ import { array, number, object, optional, string } from 'valibot'
  
  import icon from '../../../../resources/icon.png?asset'
  
 -import { electronStartDraggingWindow } from '../../../shared/eventa'
-+import { avatarRendererInvoke, electronStartDraggingWindow } from '../../../shared/eventa'
++import { avatarManagedModelGet, avatarRendererInvoke, electronStartDraggingWindow } from '../../../shared/eventa'
  import { onAppBeforeQuit } from '../../libs/bootkit/lifecycle'
-+import { createEventaStageAdapter } from '../../services/airi/avatar-bridge/eventa-adapter'
-+import { startAvatarBridgeServerFromEnvironment } from '../../services/airi/avatar-bridge/server'
  import { baseUrl, getElectronMainDirname, load } from '../../libs/electron/location'
  import { createConfig } from '../../libs/electron/persistence'
++import { createEventaStageAdapter } from '../../services/airi/avatar-bridge/eventa-adapter'
++import { startAvatarBridgeServerFromEnvironment } from '../../services/airi/avatar-bridge/server'
  import { protectPrivilegedWindowNavigation, transparentWindowConfig } from '../shared'
-@@ -190,6 +192,21 @@ export async function setupMainWindow(params: {
+ import { setupMainWindowElectronInvokes } from './rpc/index.electron'
  
-   await load(window, baseUrl(resolve(getElectronMainDirname(), '..', 'renderer')))
+@@ -62,6 +65,7 @@ export async function setupMainWindow(params: {
+   i18n: I18n
+   onboardingWindowManager: OnboardingWindowManager
+   windowAuthManager: WindowAuthManager
++  managedAvatar?: ManagedAvatarModel
+ }) {
+   const {
+     setup: setupConfig,
+@@ -188,8 +192,30 @@ export async function setupMainWindow(params: {
+     windowAuthManager: params.windowAuthManager,
+   })
  
 +  const { context: avatarBridgeContext } = createContext(ipcMain, window)
++  const cleanupManagedAvatarHandler = defineInvokeHandler(
++    avatarBridgeContext,
++    avatarManagedModelGet,
++    () => params.managedAvatar,
++  )
++
+   await load(window, baseUrl(resolve(getElectronMainDirname(), '..', 'renderer')))
+ 
 +  const invokeAvatarRenderer = defineInvoke(avatarBridgeContext, avatarRendererInvoke)
 +  const avatarBridgeServer = await startAvatarBridgeServerFromEnvironment({
 +    environment: {
-+      COMPANION_AVATAR_TOKEN: process.env.COMPANION_AVATAR_TOKEN,
++      COMPANION_AVATAR_TOKEN: env.COMPANION_AVATAR_TOKEN,
 +    },
 +    adapter: createEventaStageAdapter(
 +      invokeAvatarRenderer,
@@ -353,12 +536,63 @@ index 0f452fc8a559ca96c133864e0d9b4c2b71c5e5b4..391755b48d2e6110bc12889d2e156baa
 +    ),
 +  })
 +  onAppBeforeQuit(async () => {
++    cleanupManagedAvatarHandler()
 +    await avatarBridgeServer?.close()
 +  })
 +
    /**
     * This is a know issue (or expected behavior maybe) to Electron.
     * We don't use this approach on Linux because it's not working.
+diff --git a/apps/stage-tamagotchi/src/renderer/App.vue b/apps/stage-tamagotchi/src/renderer/App.vue
+index 70ccf8ae7616ad81eee7666d399b88f9ed3748fd..44610e51789c792ddd85102a17db7325671b6d85 100644
+--- a/apps/stage-tamagotchi/src/renderer/App.vue
++++ b/apps/stage-tamagotchi/src/renderer/App.vue
+@@ -10,7 +10,7 @@ import { useSharedAnalyticsStore } from '@proj-airi/stage-ui/stores/analytics'
+ import { useCharacterOrchestratorStore } from '@proj-airi/stage-ui/stores/character'
+ import { useChatSessionStore } from '@proj-airi/stage-ui/stores/chat/session-store'
+ import { usePluginHostInspectorStore } from '@proj-airi/stage-ui/stores/devtools/plugin-host-debug'
+-import { useDisplayModelsStore } from '@proj-airi/stage-ui/stores/display-models'
++import { DisplayModelFormat, useDisplayModelsStore } from '@proj-airi/stage-ui/stores/display-models'
+ import { useModsServerChannelStore } from '@proj-airi/stage-ui/stores/mods/api/channel-server'
+ import { useContextBridgeStore } from '@proj-airi/stage-ui/stores/mods/api/context-bridge'
+ import { useAiriCardStore } from '@proj-airi/stage-ui/stores/modules/airi-card'
+@@ -27,6 +27,7 @@ import { toast, Toaster } from 'vue-sonner'
+ import ResizeHandler from './components/ResizeHandler.vue'
+ 
+ import {
++  avatarManagedModelGet,
+   electronGetServerChannelConfig,
+   electronGodotStageGetStatus,
+   electronGodotStageStatusChanged,
+@@ -79,6 +80,7 @@ if (!isSpotlightWindowRoute)
+ function createFullStageRuntime() {
+   const contextBridgeStore = useContextBridgeStore()
+   const displayModelsStore = useDisplayModelsStore()
++  const getManagedAvatar = useElectronEventaInvoke(avatarManagedModelGet)
+   const serverChannelSettingsStore = useServerChannelSettingsStore()
+   const cardStore = useAiriCardStore()
+   const serverChannelStore = useModsServerChannelStore()
+@@ -201,6 +203,20 @@ function createFullStageRuntime() {
+       cardStore.initialize()
+ 
+       await displayModelsStore.loadDisplayModelsFromIndexedDB()
++      const managedAvatar = initialWindowRoutePath === '/'
++        ? await getManagedAvatar()
++        : undefined
++      if (managedAvatar) {
++        displayModelsStore.registerManagedDisplayModel({
++          id: managedAvatar.id,
++          format: DisplayModelFormat.VRM,
++          type: 'url',
++          url: managedAvatar.url,
++          name: managedAvatar.name,
++          importedAt: Number.MAX_SAFE_INTEGER,
++        })
++        settingsStore.stageModelSelected = managedAvatar.id
++      }
+       await settingsStore.initializeStageModel()
+       await settingsAudioDeviceStore.initialize()
+ 
 diff --git a/apps/stage-tamagotchi/src/renderer/pages/about.vue b/apps/stage-tamagotchi/src/renderer/pages/about.vue
 index b7272dd167e87c731456785d0b813591b043166b..e159d067cac3dd61a3376997e2dfa3b66cf8825b 100644
 --- a/apps/stage-tamagotchi/src/renderer/pages/about.vue
@@ -385,10 +619,10 @@ index b7272dd167e87c731456785d0b813591b043166b..e159d067cac3dd61a3376997e2dfa3b6
                      :message="updaterErrorMessage"
                      height-preset="sm"
 diff --git a/apps/stage-tamagotchi/src/renderer/pages/index.vue b/apps/stage-tamagotchi/src/renderer/pages/index.vue
-index aadea7902387c0321926225fed1452ac10166620..1f2dc222bd9a6f14ba4fe7575d5976819e5cc58b 100644
+index aadea7902387c0321926225fed1452ac10166620..15517d6701f34ff3197bdd085e59d69b7a340bf4 100644
 --- a/apps/stage-tamagotchi/src/renderer/pages/index.vue
 +++ b/apps/stage-tamagotchi/src/renderer/pages/index.vue
-@@ -3,10 +3,12 @@ import type { ModelSettingsRuntimeSnapshot } from '@proj-airi/stage-ui/component
+@@ -3,9 +3,11 @@ import type { ModelSettingsRuntimeSnapshot } from '@proj-airi/stage-ui/component
  
  import type { ModelSettingsRuntimeChannelEvent } from '../../shared/model-settings-runtime'
  
@@ -396,11 +630,10 @@ index aadea7902387c0321926225fed1452ac10166620..1f2dc222bd9a6f14ba4fe7575d597681
  import { errorMessageFrom, tryCatch } from '@moeru/std'
  import { electron } from '@proj-airi/electron-eventa'
  import {
-   useElectronEventaInvoke,
 +  useElectronEventaContext,
+   useElectronEventaInvoke,
    useElectronMouseAroundWindowBorder,
    useElectronMouseInElement,
-   useElectronMouseInWindow,
 @@ -24,6 +26,7 @@ import { WidgetStage } from '@proj-airi/stage-ui/components/scenes'
  import { useVoiceInputSession } from '@proj-airi/stage-ui/composables'
  import { useCanvasPixelIsTransparentAtPoint } from '@proj-airi/stage-ui/composables/canvas-alpha'
@@ -492,10 +725,11 @@ index aadea7902387c0321926225fed1452ac10166620..1f2dc222bd9a6f14ba4fe7575d597681
          <ControlsIsland ref="controlsIslandRef" />
 diff --git a/apps/stage-tamagotchi/src/shared/avatar-bridge/protocol.ts b/apps/stage-tamagotchi/src/shared/avatar-bridge/protocol.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..d49603370f34a085b0577592466fde22325b3bee
+index 0000000000000000000000000000000000000000..ff2310f6adf238518b2f95d48227d2320fb04d2d
 --- /dev/null
 +++ b/apps/stage-tamagotchi/src/shared/avatar-bridge/protocol.ts
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,161 @@
++import { Buffer } from 'node:buffer'
 +import { createHash, timingSafeEqual } from 'node:crypto'
 +
 +export const PROTOCOL_NAME = 'companion-avatar'
@@ -542,15 +776,15 @@ index 0000000000000000000000000000000000000000..d49603370f34a085b0577592466fde22
 +  }
 +
 +export interface AvatarStageAdapter {
-+  health(): Promise<Record<string, unknown>>
-+  listModels(): Promise<Record<string, unknown>>
-+  validateModel(params: Record<string, unknown>): Promise<Record<string, unknown>>
-+  loadModel(params: Record<string, unknown>): Promise<Record<string, unknown>>
-+  updateState(params: Record<string, unknown>): Promise<Record<string, unknown>>
-+  triggerExpression(params: Record<string, unknown>): Promise<Record<string, unknown>>
-+  triggerGesture(params: Record<string, unknown>): Promise<Record<string, unknown>>
-+  setProactiveLevel(params: Record<string, unknown>): Promise<Record<string, unknown>>
-+  inspectStage(): Promise<Record<string, unknown>>
++  health: () => Promise<Record<string, unknown>>
++  listModels: () => Promise<Record<string, unknown>>
++  validateModel: (params: Record<string, unknown>) => Promise<Record<string, unknown>>
++  loadModel: (params: Record<string, unknown>) => Promise<Record<string, unknown>>
++  updateState: (params: Record<string, unknown>) => Promise<Record<string, unknown>>
++  triggerExpression: (params: Record<string, unknown>) => Promise<Record<string, unknown>>
++  triggerGesture: (params: Record<string, unknown>) => Promise<Record<string, unknown>>
++  setProactiveLevel: (params: Record<string, unknown>) => Promise<Record<string, unknown>>
++  inspectStage: () => Promise<Record<string, unknown>>
 +}
 +
 +export interface AvatarBridgeSession {
@@ -612,7 +846,7 @@ index 0000000000000000000000000000000000000000..d49603370f34a085b0577592466fde22
 +      throw new ProtocolError('handshake is required')
 +
 +    const handlers: Record<string, () => Promise<Record<string, unknown>>> = {
-+      health: () => adapter.health(),
++      'health': () => adapter.health(),
 +      'model.list': () => adapter.listModels(),
 +      'model.validate': () => adapter.validateModel(request.params),
 +      'model.load': () => adapter.loadModel(request.params),
@@ -686,10 +920,10 @@ index 0000000000000000000000000000000000000000..8bfc55426573174de5014e2830d24927
 +) => Promise<Record<string, unknown>>
 diff --git a/apps/stage-tamagotchi/src/shared/avatar-bridge/renderer-runtime.ts b/apps/stage-tamagotchi/src/shared/avatar-bridge/renderer-runtime.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..9f0affc26ba52b806fd105992eedbc2ff52d2f1e
+index 0000000000000000000000000000000000000000..79cfa5535daedbb1bf7d7106d7d541e6f36c3c92
 --- /dev/null
 +++ b/apps/stage-tamagotchi/src/shared/avatar-bridge/renderer-runtime.ts
-@@ -0,0 +1,426 @@
+@@ -0,0 +1,448 @@
 +export type SupportedRenderer = 'live2d' | 'vrm'
 +
 +export interface RendererModel {
@@ -700,13 +934,13 @@ index 0000000000000000000000000000000000000000..9f0affc26ba52b806fd105992eedbc2f
 +}
 +
 +export interface RendererRuntimeDependencies {
-+  listModels(): Promise<RendererModel[]>
-+  selectModel(modelId: string): Promise<void>
-+  applyState(state: AvatarStateSnapshot): Promise<void>
-+  applyExpression(expressionId: string, intensity: number, durationMs: number): Promise<void>
-+  applyGesture(gestureId: string, intensity: number): Promise<void>
-+  applyProactiveLevel(level: number): Promise<void>
-+  isWindowVisible(): boolean
++  listModels: () => Promise<RendererModel[]>
++  selectModel: (modelId: string) => Promise<void>
++  applyState: (state: AvatarStateSnapshot) => Promise<void>
++  applyExpression: (expressionId: string, intensity: number, durationMs: number) => Promise<void>
++  applyGesture: (gestureId: string, intensity: number) => Promise<void>
++  applyProactiveLevel: (level: number) => Promise<void>
++  isWindowVisible: () => boolean
 +  modelLoadTimeoutMs?: number
 +}
 +
@@ -838,11 +1072,13 @@ index 0000000000000000000000000000000000000000..9f0affc26ba52b806fd105992eedbc2f
 +    if (!this.activeModelLoad && !this.pendingModelLoad && this.state.modelId && modelId !== this.state.modelId)
 +      return
 +    if (this.activeModelLoad
-+      && (renderer !== this.activeModelLoad.renderer || modelId !== this.activeModelLoad.modelId))
++      && (renderer !== this.activeModelLoad.renderer || modelId !== this.activeModelLoad.modelId)) {
 +      return
++    }
 +    if (this.pendingModelLoad
-+      && (renderer !== this.pendingModelLoad.renderer || modelId !== this.pendingModelLoad.modelId))
++      && (renderer !== this.pendingModelLoad.renderer || modelId !== this.pendingModelLoad.modelId)) {
 +      return
++    }
 +    this.state.renderer = renderer
 +    this.state.modelId = modelId
 +    this.state.modelLoaded = true
@@ -994,12 +1230,14 @@ index 0000000000000000000000000000000000000000..9f0affc26ba52b806fd105992eedbc2f
 +
 +  private async waitForModelLoad(timeoutMs: number): Promise<void> {
 +    await new Promise<void>((resolve, reject) => {
++      let timeout: ReturnType<typeof setTimeout> | undefined
 +      const done = () => {
-+        clearTimeout(timeout)
++        if (timeout)
++          clearTimeout(timeout)
 +        this.modelWaiters.delete(done)
 +        resolve()
 +      }
-+      const timeout = setTimeout(() => {
++      timeout = setTimeout(() => {
 +        this.modelWaiters.delete(done)
 +        reject(new Error('renderer model load timed out'))
 +      }, timeoutMs)
@@ -1025,16 +1263,34 @@ index 0000000000000000000000000000000000000000..9f0affc26ba52b806fd105992eedbc2f
 +  const pose = record(state.pose, 'state.pose')
 +  const eyes = record(state.eyes, 'state.eyes')
 +  exactKeys(state, [
-+    'expression', 'pose', 'eyes', 'valence', 'arousal', 'energy', 'is_speaking', 'audio_level',
++    'expression',
++    'pose',
++    'eyes',
++    'valence',
++    'arousal',
++    'energy',
++    'is_speaking',
++    'audio_level',
 +  ], 'state')
 +  exactKeys(expression, [
-+    'expression_id', 'intensity', 'mouth_open', 'eye_open', 'brow_raise', 'cheek_raise',
++    'expression_id',
++    'intensity',
++    'mouth_open',
++    'eye_open',
++    'brow_raise',
++    'cheek_raise',
 +  ], 'state.expression')
 +  exactKeys(pose, [
-+    'pose_id', 'gesture_id', 'gesture_intensity', 'breathing_amplitude',
++    'pose_id',
++    'gesture_id',
++    'gesture_intensity',
++    'breathing_amplitude',
 +  ], 'state.pose')
 +  exactKeys(eyes, [
-+    'gaze_target', 'blink_rate', 'eye_contact_duration', 'pupil_dilation',
++    'gaze_target',
++    'blink_rate',
++    'eye_contact_duration',
++    'pupil_dilation',
 +  ], 'state.eyes')
 +  return {
 +    expression: {
@@ -1117,38 +1373,46 @@ index 0000000000000000000000000000000000000000..9f0affc26ba52b806fd105992eedbc2f
 +  return parsed
 +}
 diff --git a/apps/stage-tamagotchi/src/shared/eventa/index.ts b/apps/stage-tamagotchi/src/shared/eventa/index.ts
-index 818b602ac94ba9cf683a83ae76b80e47c478dd3a..ca8541a0a0819a64df0f564f9c78a4530457bda4 100644
+index 818b602ac94ba9cf683a83ae76b80e47c478dd3a..3da97f2d6cad063bd810e1d97e0cbb9abf096144 100644
 --- a/apps/stage-tamagotchi/src/shared/eventa/index.ts
 +++ b/apps/stage-tamagotchi/src/shared/eventa/index.ts
-@@ -30,6 +30,10 @@ import type { Rectangle } from 'electron'
- 
- import { defineEventa, defineInvokeEventa } from '@moeru/eventa'
+@@ -28,8 +28,19 @@ import type {
+ } from '@proj-airi/stage-ui-three/trace'
+ import type { Rectangle } from 'electron'
  
 +import type { AvatarRendererRequest } from '../avatar-bridge/renderer-contract'
 +
+ import { defineEventa, defineInvokeEventa } from '@moeru/eventa'
+ 
 +export const avatarRendererInvoke = defineInvokeEventa<Record<string, unknown>, AvatarRendererRequest>('eventa:invoke:electron:avatar-bridge:renderer')
++export interface ManagedAvatarModelPayload {
++  id: string
++  name: string
++  renderer: 'vrm'
++  url: string
++}
++export const avatarManagedModelGet = defineInvokeEventa<ManagedAvatarModelPayload | undefined>('eventa:invoke:electron:avatar-bridge:managed-model:get')
 +
  export const electronStartTrackMousePosition = defineInvokeEventa('eventa:invoke:electron:start-tracking-mouse-position')
  export const electronStartDraggingWindow = defineInvokeEventa('eventa:invoke:electron:start-dragging-window')
  
 diff --git a/packages/stage-ui-live2d/src/components/scenes/Live2D.vue b/packages/stage-ui-live2d/src/components/scenes/Live2D.vue
-index eff476fbebc50e083eecd16750640aca80e22a32..1a02912dc880cf7c3144190fffb7c405521c6efc 100644
+index eff476fbebc50e083eecd16750640aca80e22a32..a16f14abeb74e1d832863db73032668a4bc6d3bc 100644
 --- a/packages/stage-ui-live2d/src/components/scenes/Live2D.vue
 +++ b/packages/stage-ui-live2d/src/components/scenes/Live2D.vue
-@@ -35,6 +35,12 @@ const componentState = defineModel<'pending' | 'loading' | 'mounted'>('state', {
- const componentStateCanvas = defineModel<'pending' | 'loading' | 'mounted'>('canvasState', { default: 'pending' })
- const componentStateModel = defineModel<'pending' | 'loading' | 'mounted'>('modelState', { default: 'pending' })
+@@ -31,6 +31,11 @@ const props = withDefaults(defineProps<{
+   themeColorsHueDynamic: false,
+ })
  
 +const emit = defineEmits<{
 +  (e: 'modelLoading', modelId: string): void
 +  (e: 'modelLoaded', modelId: string): void
 +  (e: 'framePresented'): void
 +}>()
-+
- const live2dCanvasRef = ref<InstanceType<typeof Live2DCanvas>>()
- const live2dModelRef = ref<InstanceType<typeof Live2DModel>>()
- const activeCursorPosition = ref<Live2DEyeFocusSource | null>(null)
-@@ -82,6 +88,14 @@ watch([componentStateModel, componentStateCanvas], () => {
+ const componentState = defineModel<'pending' | 'loading' | 'mounted'>('state', { default: 'pending' })
+ const componentStateCanvas = defineModel<'pending' | 'loading' | 'mounted'>('canvasState', { default: 'pending' })
+ const componentStateModel = defineModel<'pending' | 'loading' | 'mounted'>('modelState', { default: 'pending' })
+@@ -82,6 +87,14 @@ watch([componentStateModel, componentStateCanvas], () => {
  })
  
  defineExpose({
@@ -1163,15 +1427,15 @@ index eff476fbebc50e083eecd16750640aca80e22a32..1a02912dc880cf7c3144190fffb7c405
    canvasElement: () => {
      return live2dCanvasRef.value?.canvasElement()
    },
-@@ -101,6 +115,7 @@ defineExpose({
-       :height="height"
+@@ -102,6 +115,7 @@ defineExpose({
        :resolution="live2dRenderScale"
        :max-fps="live2dMaxFps"
-+      @frame-presented="emit('framePresented')"
        max-h="100dvh"
++      @frame-presented="emit('framePresented')"
      >
        <Live2DModel
-@@ -125,6 +140,8 @@ defineExpose({
+         ref="live2dModelRef"
+@@ -125,6 +139,8 @@ defineExpose({
          :live2d-force-auto-blink-enabled="live2dForceAutoBlinkEnabled"
          :live2d-expression-enabled="live2dExpressionEnabled"
          :live2d-shadow-enabled="live2dShadowEnabled"
@@ -1181,7 +1445,7 @@ index eff476fbebc50e083eecd16750640aca80e22a32..1a02912dc880cf7c3144190fffb7c405
      </Live2DCanvas>
    </Screen>
 diff --git a/packages/stage-ui-live2d/src/components/scenes/live2d/Canvas.vue b/packages/stage-ui-live2d/src/components/scenes/live2d/Canvas.vue
-index 1e86fb552b59fbe2931ba6014b4423d02681804e..3dd757393ce0abc10f90c9bea7b806496e49d550 100644
+index 1e86fb552b59fbe2931ba6014b4423d02681804e..c19bca14a3dfba673262399fb412d78a4b0f1118 100644
 --- a/packages/stage-ui-live2d/src/components/scenes/live2d/Canvas.vue
 +++ b/packages/stage-ui-live2d/src/components/scenes/live2d/Canvas.vue
 @@ -1,7 +1,7 @@
@@ -1193,17 +1457,17 @@ index 1e86fb552b59fbe2931ba6014b4423d02681804e..3dd757393ce0abc10f90c9bea7b80649
  import { Live2DModel } from 'pixi-live2d-display/cubism4'
  import { onMounted, onUnmounted, ref, watch } from 'vue'
  
-@@ -17,6 +17,10 @@ const props = withDefaults(defineProps<{
- 
- const componentState = defineModel<'pending' | 'loading' | 'mounted'>('state', { default: 'pending' })
+@@ -15,6 +15,10 @@ const props = withDefaults(defineProps<{
+   maxFps: 0,
+ })
  
 +const emit = defineEmits<{
 +  (e: 'framePresented'): void
 +}>()
 +
+ const componentState = defineModel<'pending' | 'loading' | 'mounted'>('state', { default: 'pending' })
+ 
  const containerRef = ref<HTMLDivElement>()
- const isPixiCanvasReady = ref(false)
- const pixiApp = ref<Application>()
 @@ -33,6 +37,7 @@ function installRenderGuard(app: Application) {
    const guardedRender = () => {
      try {
@@ -1222,15 +1486,14 @@ index 1e86fb552b59fbe2931ba6014b4423d02681804e..3dd757393ce0abc10f90c9bea7b80649
  }
  
 diff --git a/packages/stage-ui-live2d/src/components/scenes/live2d/Model.vue b/packages/stage-ui-live2d/src/components/scenes/live2d/Model.vue
-index 402f511ff462dfb6247ca9bb65fd3c8d65ed2d80..272f25f262151c3593d052437503d9984fdd8a69 100644
+index 402f511ff462dfb6247ca9bb65fd3c8d65ed2d80..6d991fccd218e2a026792afcf1f481383e2af150 100644
 --- a/packages/stage-ui-live2d/src/components/scenes/live2d/Model.vue
 +++ b/packages/stage-ui-live2d/src/components/scenes/live2d/Model.vue
-@@ -15,7 +15,9 @@ import { Live2DFactory, Live2DModel, MotionPriority } from 'pixi-live2d-display/
- import { computed, onMounted, onUnmounted, ref, shallowRef, toRef, watch } from 'vue'
+@@ -16,6 +16,8 @@ import { computed, onMounted, onUnmounted, ref, shallowRef, toRef, watch } from
  
  import {
-+  createSemanticExpressionController,
    createBeatSyncController,
++  createSemanticExpressionController,
 +  requireLive2DMotionStarted,
    useExpressionController,
    useLive2DMotionManagerUpdate,
@@ -1532,7 +1795,7 @@ index 0000000000000000000000000000000000000000..72f41ada65ca483d4f92a050eb712379
 +})
 diff --git a/packages/stage-ui-live2d/src/composables/live2d/avatar-semantics.ts b/packages/stage-ui-live2d/src/composables/live2d/avatar-semantics.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..1f3bc324d6e9f1c8abba3c9885ddfe8c75855f86
+index 0000000000000000000000000000000000000000..4abcf57a7c8a499ab336d4b97bd79a98b36c09d7
 --- /dev/null
 +++ b/packages/stage-ui-live2d/src/composables/live2d/avatar-semantics.ts
 @@ -0,0 +1,244 @@
@@ -1544,8 +1807,8 @@ index 0000000000000000000000000000000000000000..1f3bc324d6e9f1c8abba3c9885ddfe8c
 +}
 +
 +export interface Live2DCoreModelLike {
-+  getModel(): { parameters: Live2DCoreModelParameters }
-+  setParameterValueById(parameterId: string, value: number): void
++  getModel: () => { parameters: Live2DCoreModelParameters }
++  setParameterValueById: (parameterId: string, value: number) => void
 +}
 +
 +export interface Live2DMotionDescriptor {
@@ -1790,8 +2053,164 @@ index 5ffd0a61d672026592907fd2be95aafd9b47d8ae..1dcf78750aa3c389d798c554be2fc93e
  export * from './beat-sync'
  export * from './expression-controller'
  export * from './eye-tracking'
+diff --git a/packages/stage-ui-three/src/components/Model/VRMModel.vue b/packages/stage-ui-three/src/components/Model/VRMModel.vue
+index 64dec17d02b9fe19706535ab4eb9f7662980b005..c604758d2ce97f2b702f05b9e7d3de73e4568d9d 100644
+--- a/packages/stage-ui-three/src/components/Model/VRMModel.vue
++++ b/packages/stage-ui-three/src/components/Model/VRMModel.vue
+@@ -177,6 +177,20 @@ const raycaster = new Raycaster()
+ const vrmAnimationMixer = ref<AnimationMixer>()
+ const { onBeforeRender, stop, start } = useLoop()
+ 
++interface ActiveAvatarGesture {
++  amplitude: number
++  bone: Object3D
++  durationMs: number
++  offsetX: number
++  reject: (reason: Error) => void
++  resolve: () => void
++  startedAt: number
++  timeoutId?: ReturnType<typeof setTimeout>
++  vrm: VRM
++}
++
++let activeAvatarGesture: ActiveAvatarGesture | undefined
++
+ const vrmHooks: readonly VrmHook[] = resolveInternalVrmHooks()
+ type VrmFrameRuntimeHook = (vrm: VRM, delta: number) => void
+ const vrmFrameRuntimeHook = shallowRef<VrmFrameRuntimeHook>()
+@@ -405,6 +419,95 @@ function destroyManagedVrmInstanceWithHooks(instance: ManagedVrmInstance | undef
+   destroyManagedVrmInstance(instance)
+ }
+ 
++function restoreAvatarGestureOffset(gesture: ActiveAvatarGesture, syncHumanoid = false) {
++  if (gesture.offsetX !== 0) {
++    gesture.bone.rotation.x -= gesture.offsetX
++    gesture.offsetX = 0
++  }
++  if (syncHumanoid)
++    gesture.vrm.humanoid.update()
++}
++
++function finishAvatarGesture(gesture: ActiveAvatarGesture, error?: Error) {
++  if (activeAvatarGesture !== gesture)
++    return
++
++  if (gesture.timeoutId !== undefined)
++    clearTimeout(gesture.timeoutId)
++  restoreAvatarGestureOffset(gesture, true)
++  activeAvatarGesture = undefined
++  if (error)
++    gesture.reject(error)
++  else
++    gesture.resolve()
++}
++
++function interruptAvatarGesture(message: string) {
++  if (activeAvatarGesture)
++    finishAvatarGesture(activeAvatarGesture, new Error(message))
++}
++
++function supersedeAvatarGesture() {
++  const gesture = activeAvatarGesture
++  if (!gesture)
++    return
++
++  if (gesture.timeoutId !== undefined)
++    clearTimeout(gesture.timeoutId)
++  restoreAvatarGestureOffset(gesture, true)
++  activeAvatarGesture = undefined
++  gesture.resolve()
++}
++
++function updateAvatarGestureFrame(now: number) {
++  const gesture = activeAvatarGesture
++  if (!gesture)
++    return
++
++  const progress = Math.min(1, (now - gesture.startedAt) / gesture.durationMs)
++  if (progress >= 1) {
++    finishAvatarGesture(gesture)
++    return
++  }
++
++  gesture.offsetX = Math.sin(progress * Math.PI * 2) * gesture.amplitude
++  gesture.bone.rotation.x += gesture.offsetX
++}
++
++async function playAvatarGesture(gestureId: string, intensity = 1): Promise<void> {
++  if (gestureId !== 'nod')
++    throw new Error('VRM gesture is unsupported')
++  if (!Number.isFinite(intensity))
++    throw new Error('VRM gesture intensity is invalid')
++
++  const activeVrm = vrm.value
++  if (!modelLoaded.value || !activeVrm)
++    throw new Error('VRM model is unavailable')
++  const bone = activeVrm.humanoid.getNormalizedBoneNode('neck')
++    ?? activeVrm.humanoid.getNormalizedBoneNode('head')
++  if (!bone)
++    throw new Error('VRM nod bone is unavailable')
++
++  supersedeAvatarGesture()
++  const durationMs = 520
++  let gesture: ActiveAvatarGesture
++  const completion = new Promise<void>((resolve, reject) => {
++    gesture = {
++      amplitude: MathUtils.degToRad(8 + MathUtils.clamp(intensity, 0, 1) * 10),
++      bone,
++      durationMs,
++      offsetX: 0,
++      reject,
++      resolve,
++      startedAt: performance.now(),
++      vrm: activeVrm,
++    }
++  })
++  activeAvatarGesture = gesture!
++  gesture!.timeoutId = setTimeout(() => finishAvatarGesture(gesture!), durationMs)
++  return completion
++}
++
+ function bindManagedVrmInstanceRenderLoop() {
+   disposeBeforeRenderLoop?.()
+ 
+@@ -416,6 +519,9 @@ function bindManagedVrmInstanceRenderLoop() {
+     const traceStart = isStageThreeRuntimeTraceEnabled() ? performance.now() : 0
+     const tracingEnabled = traceStart > 0
+ 
++    if (activeAvatarGesture)
++      restoreAvatarGestureOffset(activeAvatarGesture)
++
+     const animationMixerMs = measureFrameStep(tracingEnabled, () => {
+       vrmAnimationMixer.value?.update(delta)
+     })
+@@ -436,6 +542,7 @@ function bindManagedVrmInstanceRenderLoop() {
+       if (activeVrm)
+         runVrmFrameRuntimeHook(activeVrm, delta)
+     })
++    updateAvatarGestureFrame(performance.now())
+     const humanoidMs = measureFrameStep(tracingEnabled, () => {
+       activeVrm?.humanoid.update()
+     })
+@@ -499,6 +606,8 @@ function componentCleanUp(
+   if (invalidate)
+     invalidatePendingLoads()
+ 
++  interruptAvatarGesture('VRM gesture was interrupted because the model changed')
++
+   const startedAt = performance.now()
+   const activeInstance = getActiveManagedVrmInstance()
+   const shouldDestroyResources = shouldDestroyVrmResources(reason)
+@@ -1017,6 +1126,7 @@ defineExpose({
+   setVrmFrameHook(hook?: VrmFrameRuntimeHook) {
+     vrmFrameRuntimeHook.value = hook
+   },
++  playAvatarGesture,
+   scene: computed(() => vrm.value?.scene),
+   lookAtUpdate(target: Vec3) {
+     idleEyeSaccades.instantUpdate(vrm.value, target)
 diff --git a/packages/stage-ui-three/src/components/ThreeScene.vue b/packages/stage-ui-three/src/components/ThreeScene.vue
-index 6c25082de9ff95fb79e433de8b210a6dfae61b3d..6fa0621288325db0458ac147a84daf3985245864 100644
+index 6c25082de9ff95fb79e433de8b210a6dfae61b3d..94f1432a6ececab087ed253b90a203fb69344493 100644
 --- a/packages/stage-ui-three/src/components/ThreeScene.vue
 +++ b/packages/stage-ui-three/src/components/ThreeScene.vue
 @@ -80,6 +80,9 @@ const props = withDefaults(defineProps<{
@@ -1829,8 +2248,20 @@ index 6c25082de9ff95fb79e433de8b210a6dfae61b3d..6fa0621288325db0458ac147a84daf39
    if (!isStageThreeRuntimeTraceEnabled())
      return
  
+@@ -700,6 +707,11 @@ defineExpose({
+     vrmFrameRuntimeHook.value = hook
+     applyVrmFrameRuntimeHook()
+   },
++  async playAvatarGesture(gestureId: string, intensity = 1) {
++    if (!modelRef.value)
++      throw new Error('VRM renderer is unavailable')
++    await modelRef.value.playAvatarGesture(gestureId, intensity)
++  },
+   canvasElement: () => {
+     return tresContextRef.value?.renderer.instance.domElement
+   },
 diff --git a/packages/stage-ui/src/components/scenes/Stage.vue b/packages/stage-ui/src/components/scenes/Stage.vue
-index 966f39b3b849eec527661978c654aa2f0161f208..b1f8015fb009137955aa98eea82379f25564f0e5 100644
+index 966f39b3b849eec527661978c654aa2f0161f208..b8de250002a4fdde9702136d67378c3b7e26e08b 100644
 --- a/packages/stage-ui/src/components/scenes/Stage.vue
 +++ b/packages/stage-ui/src/components/scenes/Stage.vue
 @@ -11,7 +11,7 @@ import { sleep } from '@moeru/std'
@@ -1842,8 +2273,18 @@ index 966f39b3b849eec527661978c654aa2f0161f208..b1f8015fb009137955aa98eea82379f2
  import { SpineScene } from '@proj-airi/stage-ui-spine'
  import { ThreeScene } from '@proj-airi/stage-ui-three'
  import { animations } from '@proj-airi/stage-ui-three/assets/vrm'
-@@ -58,6 +58,21 @@ const props = withDefaults(defineProps<{
+@@ -56,8 +56,23 @@ const props = withDefaults(defineProps<{
+   paused: false,
+ })
  
++const emit = defineEmits<{
++  (e: 'avatarStageMounted', renderer: AvatarRenderer): void
++  (e: 'avatarStageUnmounted'): void
++  (e: 'avatarModelLoading', renderer: AvatarRenderer, modelId: string): void
++  (e: 'avatarModelLoaded', renderer: AvatarRenderer, modelId: string): void
++  (e: 'avatarFramePresented'): void
++}>()
++
  const componentState = defineModel<'pending' | 'loading' | 'mounted'>('state', { default: 'pending' })
  
 +type AvatarRenderer = 'live2d' | 'vrm'
@@ -1852,14 +2293,6 @@ index 966f39b3b849eec527661978c654aa2f0161f208..b1f8015fb009137955aa98eea82379f2
 +  pose: { gesture_id: string | null, gesture_intensity: number, breathing_amplitude: number }
 +  is_speaking: boolean
 +}
-+
-+const emit = defineEmits<{
-+  (e: 'avatarStageMounted', renderer: AvatarRenderer): void
-+  (e: 'avatarStageUnmounted'): void
-+  (e: 'avatarModelLoading', renderer: AvatarRenderer, modelId: string): void
-+  (e: 'avatarModelLoaded', renderer: AvatarRenderer, modelId: string): void
-+  (e: 'avatarFramePresented'): void
-+}>()
 +
  const { getDb } = useDuckDb()
  // const transformersProvider = createTransformers({ embedWorkerURL })
@@ -1880,7 +2313,7 @@ index 966f39b3b849eec527661978c654aa2f0161f208..b1f8015fb009137955aa98eea82379f2
    showStage.value = false
    await settingsStore.updateStageModel()
    setTimeout(() => {
-@@ -160,6 +177,101 @@ const backgroundStore = useBackgroundStore()
+@@ -160,6 +177,107 @@ const backgroundStore = useBackgroundStore()
  const { activeBackgroundUrl } = storeToRefs(backgroundStore)
  
  const { currentMotion } = storeToRefs(useLive2dParams())
@@ -1935,6 +2368,12 @@ index 966f39b3b849eec527661978c654aa2f0161f208..b1f8015fb009137955aa98eea82379f2
 +}
 +
 +async function applyAvatarGesture(gestureId: string, _intensity: number) {
++  if (stageModelRenderer.value === 'vrm') {
++    if (!vrmViewerRef.value)
++      throw new Error('VRM renderer is unavailable')
++    await vrmViewerRef.value.playAvatarGesture(gestureId, _intensity)
++    return
++  }
 +  if (stageModelRenderer.value !== 'live2d')
 +    throw new Error('avatar renderer does not support one-shot gestures')
 +
@@ -1982,7 +2421,7 @@ index 966f39b3b849eec527661978c654aa2f0161f208..b1f8015fb009137955aa98eea82379f2
  
  const emotionsQueue = createQueue<EmotionPayload>({
    handlers: [
-@@ -943,6 +1055,7 @@ async function captureFrame() {
+@@ -943,6 +1061,7 @@ async function captureFrame() {
  }
  
  onUnmounted(() => {
@@ -1990,7 +2429,7 @@ index 966f39b3b849eec527661978c654aa2f0161f208..b1f8015fb009137955aa98eea82379f2
    resetLive2dLipSync()
    chatHookCleanups.forEach(dispose => dispose?.())
    viewUpdateCleanups.forEach(dispose => dispose?.())
-@@ -957,6 +1070,10 @@ onUnmounted(() => {
+@@ -957,6 +1076,10 @@ onUnmounted(() => {
  })
  
  defineExpose({
@@ -2001,7 +2440,7 @@ index 966f39b3b849eec527661978c654aa2f0161f208..b1f8015fb009137955aa98eea82379f2
    canvasElement,
    captureFrame,
    readRenderTargetRegionAtClientPoint,
-@@ -998,6 +1115,9 @@ defineExpose({
+@@ -998,6 +1121,9 @@ defineExpose({
          :live2d-shadow-enabled="live2dShadowEnabled"
          :live2d-max-fps="live2dMaxFps"
          :live2d-render-scale="live2dRenderScale"
@@ -2011,7 +2450,7 @@ index 966f39b3b849eec527661978c654aa2f0161f208..b1f8015fb009137955aa98eea82379f2
        />
        <ThreeScene
          v-if="stageModelRenderer === 'vrm' && showStage"
-@@ -1012,6 +1132,9 @@ defineExpose({
+@@ -1012,6 +1138,9 @@ defineExpose({
          :enable-orbit-controls="props.enableOrbitControls"
          :current-audio-source="currentAudioSource"
          @error="console.error"
@@ -2021,3 +2460,269 @@ index 966f39b3b849eec527661978c654aa2f0161f208..b1f8015fb009137955aa98eea82379f2
        />
        <SpineScene
          v-if="stageModelRenderer === 'spine' && showStage"
+diff --git a/packages/stage-ui/src/composables/use-data-maintenance.ts b/packages/stage-ui/src/composables/use-data-maintenance.ts
+index 760a993e1b4b62c707d5c361a248065fcfc3ecb0..7d315c4ae126b6cf09fc12745554001e617b47bf 100644
+--- a/packages/stage-ui/src/composables/use-data-maintenance.ts
++++ b/packages/stage-ui/src/composables/use-data-maintenance.ts
+@@ -45,7 +45,7 @@ export function useDataMaintenance() {
+ 
+   async function deleteAllModels() {
+     await displayModelsStore.resetDisplayModels()
+-    settingsStore.stageModelSelected = 'preset-live2d-1'
++    settingsStore.stageModelSelected = displayModelsStore.getManagedDisplayModel()?.id ?? 'preset-live2d-1'
+     await settingsStore.updateStageModel()
+   }
+ 
+diff --git a/packages/stage-ui/src/stores/display-models.test.ts b/packages/stage-ui/src/stores/display-models.test.ts
+index 15de0ee3de2f21e71c80d0f3a993cafabbe90512..b7211589dc875a9e13c3d7feac5e51dc9631aeb0 100644
+--- a/packages/stage-ui/src/stores/display-models.test.ts
++++ b/packages/stage-ui/src/stores/display-models.test.ts
+@@ -42,4 +42,22 @@ describe('display models store', () => {
+ 
+     expect(resolved).toEqual(model)
+   })
++
++  it('retains the managed avatar when user models are reset', async () => {
++    const store = useDisplayModelsStore()
++    const managedModel = {
++      id: 'managed-nemesia',
++      format: DisplayModelFormat.VRM,
++      type: 'url' as const,
++      url: 'companion-avatar://managed/managed-nemesia.vrm',
++      name: 'Nemesia pajamas',
++      importedAt: Number.MAX_SAFE_INTEGER,
++    }
++
++    store.registerManagedDisplayModel(managedModel)
++    await store.resetDisplayModels()
++
++    expect(store.getManagedDisplayModel()).toEqual(managedModel)
++    expect(store.displayModels[0]).toEqual(managedModel)
++  })
+ })
+diff --git a/packages/stage-ui/src/stores/display-models.ts b/packages/stage-ui/src/stores/display-models.ts
+index d3e0b5c03991283177992ff91c40dd7b95e99835..84b3ee5b8e0d2b4685e13f30a87269f2aa606c80 100644
+--- a/packages/stage-ui/src/stores/display-models.ts
++++ b/packages/stage-ui/src/stores/display-models.ts
+@@ -56,6 +56,7 @@ const displayModelsPresets: DisplayModel[] = [
+ 
+ export const useDisplayModelsStore = defineStore('display-models', () => {
+   const displayModels = ref<DisplayModel[]>([])
++  let managedDisplayModel: DisplayModelURL | undefined
+ 
+   let generateLive2DPreview: (file: File) => Promise<string | undefined>
+   let generateVrmPreview: (file: File) => Promise<string | undefined>
+@@ -67,7 +68,9 @@ export const useDisplayModelsStore = defineStore('display-models', () => {
+     await until(displayModelsFromIndexedDBLoading).toBe(false)
+ 
+     displayModelsFromIndexedDBLoading.value = true
+-    const models = [...displayModelsPresets]
++    const models = managedDisplayModel
++      ? [managedDisplayModel, ...displayModelsPresets]
++      : [...displayModelsPresets]
+ 
+     try {
+       await localforage.iterate<{ format: DisplayModelFormat, file: File, importedAt: number, previewImage?: string }, void>((val, key) => {
+@@ -141,6 +144,19 @@ export const useDisplayModelsStore = defineStore('display-models', () => {
+     return newDisplayModel
+   }
+ 
++  function registerManagedDisplayModel(model: DisplayModelURL) {
++    managedDisplayModel = model
++    const existing = displayModels.value.findIndex(item => item.id === model.id)
++    if (existing === -1)
++      displayModels.value.unshift(model)
++    else
++      displayModels.value[existing] = model
++  }
++
++  function getManagedDisplayModel() {
++    return managedDisplayModel
++  }
++
+   async function renameDisplayModel(id: string, name: string) {
+     await until(displayModelsFromIndexedDBLoading).toBe(false)
+     const displayModel = id.startsWith('display-model-')
+@@ -177,7 +193,9 @@ export const useDisplayModelsStore = defineStore('display-models', () => {
+       await removeDisplayModel(id)
+     }
+ 
+-    displayModels.value = [...displayModelsPresets].sort((a, b) => b.importedAt - a.importedAt)
++    displayModels.value = managedDisplayModel
++      ? [managedDisplayModel, ...displayModelsPresets].sort((a, b) => b.importedAt - a.importedAt)
++      : [...displayModelsPresets].sort((a, b) => b.importedAt - a.importedAt)
+   }
+ 
+   async function initialize() {
+@@ -201,6 +219,8 @@ export const useDisplayModelsStore = defineStore('display-models', () => {
+     loadDisplayModelsFromIndexedDB,
+     getDisplayModel,
+     addDisplayModel,
++    registerManagedDisplayModel,
++    getManagedDisplayModel,
+     renameDisplayModel,
+     removeDisplayModel,
+     resetDisplayModels,
+diff --git a/packages/stage-ui/src/stores/settings/stage-model.test.ts b/packages/stage-ui/src/stores/settings/stage-model.test.ts
+index f35d3be367c9ab29290ce6432360de389cbe1964..b05fc1d521631f470342e3ed39ae2193776291a6 100644
+--- a/packages/stage-ui/src/stores/settings/stage-model.test.ts
++++ b/packages/stage-ui/src/stores/settings/stage-model.test.ts
+@@ -23,6 +23,15 @@ vi.mock('@vueuse/core', async (importOriginal) => {
+   }
+ })
+ 
++vi.mock('localforage', () => ({
++  default: {
++    getItem: vi.fn(async () => undefined),
++    iterate: vi.fn(async () => undefined),
++    removeItem: vi.fn(async () => undefined),
++    setItem: vi.fn(async (_key: string, value: unknown) => value),
++  },
++}))
++
+ describe('settings stage model store', () => {
+   beforeEach(() => {
+     setActivePinia(createPinia())
+@@ -60,4 +69,62 @@ describe('settings stage model store', () => {
+     expect(getDisplayModelSpy).toHaveBeenCalledWith('display-model-missing')
+     expect(getDisplayModelSpy).toHaveBeenCalledWith(fallbackModel.id)
+   })
++
++  it('falls back to and resets onto the managed avatar when it is available', async () => {
++    const managedModel: DisplayModelURL = {
++      id: 'managed-nemesia',
++      format: DisplayModelFormat.VRM,
++      type: 'url',
++      url: 'companion-avatar://managed/managed-nemesia.vrm',
++      name: 'Nemesia pajamas',
++      importedAt: Number.MAX_SAFE_INTEGER,
++    }
++
++    const displayModelsStore = useDisplayModelsStore()
++    displayModelsStore.registerManagedDisplayModel(managedModel)
++    const store = useSettingsStageModel()
++    store.stageModelSelected = 'display-model-missing'
++
++    await store.initializeStageModel()
++
++    expect(store.stageModelSelected).toBe(managedModel.id)
++    expect(store.stageModelSelectedDisplayModel).toEqual(managedModel)
++    expect(store.stageModelSelectedUrl).toBe(managedModel.url)
++    expect(store.stageModelRenderer).toBe('vrm')
++
++    store.stageModelSelected = 'preset-live2d-1'
++    await store.resetState()
++
++    expect(store.stageModelSelected).toBe(managedModel.id)
++    expect(store.stageModelSelectedDisplayModel).toEqual(managedModel)
++  })
++
++  it('keeps a managed avatar selected over persisted and card model choices', async () => {
++    const managedModel: DisplayModelURL = {
++      id: 'managed-nemesia',
++      format: DisplayModelFormat.VRM,
++      type: 'url',
++      url: 'companion-avatar://managed/managed-nemesia.vrm',
++      name: 'Nemesia pajamas',
++      importedAt: Number.MAX_SAFE_INTEGER,
++    }
++
++    const displayModelsStore = useDisplayModelsStore()
++    const store = useSettingsStageModel()
++    store.stageModelSelected = 'preset-live2d-1'
++    displayModelsStore.registerManagedDisplayModel(managedModel)
++
++    await store.initializeStageModel()
++
++    expect(store.stageModelSelected).toBe(managedModel.id)
++    expect(store.stageModelSelectedDisplayModel).toEqual(managedModel)
++    expect(store.stageModelSelectedUrl).toBe(managedModel.url)
++    expect(store.stageModelRenderer).toBe('vrm')
++
++    store.stageModelSelected = 'preset-live2d-2'
++    await store.updateStageModel()
++
++    expect(store.stageModelSelected).toBe(managedModel.id)
++    expect(store.stageModelSelectedDisplayModel).toEqual(managedModel)
++  })
+ })
+diff --git a/packages/stage-ui/src/stores/settings/stage-model.ts b/packages/stage-ui/src/stores/settings/stage-model.ts
+index 300d7147ada18750b059fe74ecc2d9ea3a50adc9..b4d5a3d5c68e01a62e831a7c0953c06e4c4a0598 100644
+--- a/packages/stage-ui/src/stores/settings/stage-model.ts
++++ b/packages/stage-ui/src/stores/settings/stage-model.ts
+@@ -13,14 +13,22 @@ type BuiltInStageModelRenderer = Exclude<StageModelRenderer, 'godot'>
+ export const useSettingsStageModel = defineStore('settings-stage-model', () => {
+   const displayModelsStore = useDisplayModelsStore()
+   let stageModelUpdateSequence = 0
++  let updatingStageModelSelectionInternally = false
+   const stageModelStorageKey = 'settings/stage/model'
+-  const defaultStageModelId = 'preset-live2d-1'
+ 
+-  const stageModelSelectedState = useLocalStorageManualReset<string>(stageModelStorageKey, defaultStageModelId)
++  function resolveStageModelId(requestedId: string) {
++    return displayModelsStore.getManagedDisplayModel()?.id ?? requestedId
++  }
++
++  function getDefaultStageModelId() {
++    return resolveStageModelId('preset-live2d-1')
++  }
++
++  const stageModelSelectedState = useLocalStorageManualReset<string>(stageModelStorageKey, 'preset-live2d-1')
+   const stageModelSelected = computed<string>({
+     get: () => stageModelSelectedState.value,
+     set: (value) => {
+-      stageModelSelectedState.value = value
++      stageModelSelectedState.value = resolveStageModelId(value)
+     },
+   })
+   const stageModelSelectedDisplayModel = refManualReset<DisplayModel | undefined>(undefined)
+@@ -62,7 +70,14 @@ export const useSettingsStageModel = defineStore('settings-stage-model', () => {
+ 
+   async function updateStageModel() {
+     const requestId = ++stageModelUpdateSequence
+-    const selectedModelId = stageModelSelectedState.value
++    let selectedModelId = stageModelSelectedState.value
++    const resolvedModelId = resolveStageModelId(selectedModelId)
++    if (selectedModelId !== resolvedModelId) {
++      updatingStageModelSelectionInternally = true
++      stageModelSelectedState.value = resolvedModelId
++      updatingStageModelSelectionInternally = false
++      selectedModelId = resolvedModelId
++    }
+ 
+     if (!selectedModelId) {
+       replaceStageModelUrl(undefined)
+@@ -78,8 +93,11 @@ export const useSettingsStageModel = defineStore('settings-stage-model', () => {
+       return
+ 
+     if (!model) {
++      const defaultStageModelId = getDefaultStageModelId()
+       if (selectedModelId !== defaultStageModelId) {
++        updatingStageModelSelectionInternally = true
+         stageModelSelectedState.value = defaultStageModelId
++        updatingStageModelSelectionInternally = false
+         await updateStageModel()
+         return
+       }
+@@ -129,14 +147,19 @@ export const useSettingsStageModel = defineStore('settings-stage-model', () => {
+     revokeStageModelUrl(stageModelSelectedUrl.value)
+   })
+ 
+-  watch(stageModelSelectedState, (_newValue, _oldValue) => {
++  watch(stageModelSelectedState, () => {
++    if (updatingStageModelSelectionInternally)
++      return
+     void updateStageModel()
+-  })
++  }, { flush: 'sync' })
+ 
+   async function resetState() {
+     revokeStageModelUrl(stageModelSelectedUrl.value)
+ 
++    updatingStageModelSelectionInternally = true
+     stageModelSelectedState.reset()
++    stageModelSelectedState.value = getDefaultStageModelId()
++    updatingStageModelSelectionInternally = false
+     stageModelSelectedDisplayModel.reset()
+     stageModelSelectedUrl.reset()
+     stageModelRenderer.reset()

@@ -105,6 +105,15 @@ def test_memory_environment_override_is_applied_at_runtime(tmp_path, monkeypatch
     assert config.effective_memory_config().db_path == str(override)
 
 
+def test_relative_memory_environment_override_fails_closed(monkeypatch) -> None:
+    monkeypatch.setenv("COMPANION_DB_PATH", "relative-memory.db")
+
+    config = RuntimeConfig.from_yaml()
+
+    with pytest.raises(ValueError, match="COMPANION_DB_PATH must be an absolute path"):
+        config.effective_memory_config()
+
+
 def test_repository_config_template_matches_packaged_default() -> None:
     repository_default = Path(__file__).parents[1] / "config" / "default.yaml"
 
@@ -145,17 +154,24 @@ def test_enabled_avatar_bridge_config_is_parsed(tmp_path) -> None:
 def test_managed_avatar_launch_is_parsed_relative_to_explicit_config(tmp_path) -> None:
     path = tmp_path / "avatar.yaml"
     path.write_text(
-        """providers:
+        """identity:
+  avatar_model_id: managed-nemesia
+providers:
   avatar:
     enabled: true
     type: websocket_bridge
-    url: ws://127.0.0.1:6121/ws
+    url: ws://127.0.0.1:6122/ws
     auth_token_env: COMPANION_AVATAR_TOKEN
     launch:
       enabled: true
       executable_path: stage/airi.exe
       expected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      expected_godot_sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      model_path: model/nemesia.vrm
+      expected_model_sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+      model_id: managed-nemesia
+      model_name: Nemesia pajamas
       startup_timeout_seconds: 12
       shutdown_timeout_seconds: 4
 """,
@@ -170,8 +186,19 @@ def test_managed_avatar_launch_is_parsed_relative_to_explicit_config(tmp_path) -
     )
     assert config.avatar_stage_launch_config.expected_sha256 == "a" * 64
     assert config.avatar_stage_launch_config.expected_app_asar_sha256 == "b" * 64
+    assert config.avatar_stage_launch_config.expected_godot_sha256 == "d" * 64
+    assert config.avatar_stage_launch_config.model_path == str(
+        (tmp_path / "model" / "nemesia.vrm").resolve()
+    )
+    assert config.avatar_stage_launch_config.expected_model_sha256 == "c" * 64
+    assert config.avatar_stage_launch_config.model_id == "managed-nemesia"
+    assert config.avatar_stage_launch_config.model_name == "Nemesia pajamas"
     assert config.avatar_stage_launch_config.startup_timeout_seconds == 12
     assert config.avatar_stage_launch_config.shutdown_timeout_seconds == 4
+
+
+def test_default_avatar_bridge_uses_dedicated_airi_port() -> None:
+    assert WebSocketAvatarConfig().url == "ws://127.0.0.1:6122/ws"
 
 
 @pytest.mark.parametrize(
@@ -182,7 +209,11 @@ def test_managed_avatar_launch_is_parsed_relative_to_explicit_config(tmp_path) -
       enabled: true
       executable_path: airi.exe
       expected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-      expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb""",
+      expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      expected_godot_sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      model_path: avatar.vrm
+      expected_model_sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+      model_id: managed-nemesia""",
         """enabled: true
     type: websocket_bridge
     url: ws://127.0.0.1:9999/ws
@@ -191,25 +222,59 @@ def test_managed_avatar_launch_is_parsed_relative_to_explicit_config(tmp_path) -
       enabled: true
       executable_path: airi.exe
       expected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-      expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb""",
+      expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      expected_godot_sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      model_path: avatar.vrm
+      expected_model_sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+      model_id: managed-nemesia""",
         """enabled: true
     type: websocket_bridge
-    url: ws://127.0.0.1:6121/ws
+    url: ws://127.0.0.1:6122/ws
     auth_token_env: OTHER_TOKEN
     launch:
       enabled: true
       executable_path: airi.exe
       expected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-      expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb""",
+      expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      expected_godot_sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      model_path: avatar.vrm
+      expected_model_sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+      model_id: managed-nemesia""",
     ],
 )
 def test_managed_avatar_launch_rejects_unsafe_boundary(tmp_path, avatar_yaml) -> None:
     path = tmp_path / "avatar.yaml"
-    path.write_text(
-        f"providers:\n  avatar:\n    {avatar_yaml}\n", encoding="utf-8"
-    )
+    path.write_text(f"providers:\n  avatar:\n    {avatar_yaml}\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="managed avatar launch"):
+        RuntimeConfig.from_yaml(path)
+
+
+def test_managed_avatar_launch_requires_identity_model_match(tmp_path) -> None:
+    path = tmp_path / "avatar.yaml"
+    path.write_text(
+        """identity:
+  avatar_model_id: another-model
+providers:
+  avatar:
+    enabled: true
+    type: websocket_bridge
+    url: ws://127.0.0.1:6122/ws
+    auth_token_env: COMPANION_AVATAR_TOKEN
+    launch:
+      enabled: true
+      executable_path: airi.exe
+      expected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      expected_godot_sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      model_path: avatar.vrm
+      expected_model_sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+      model_id: managed-nemesia
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must match identity.avatar_model_id"):
         RuntimeConfig.from_yaml(path)
 
 
@@ -287,6 +352,127 @@ dev:
     assert config.memory_config.db_path == str((config_dir / "data/memory.db").resolve())
     assert config.action_audit_db_path == str((config_dir / "data/audit.db").resolve())
     assert config.log_file == str((config_dir / "logs/companion.log").resolve())
+
+
+def test_user_local_data_root_keeps_managed_assets_relative_to_config(
+    tmp_path, monkeypatch
+) -> None:
+    config_dir = tmp_path / "read-only-installation"
+    local_app_data = tmp_path / "local-app-data"
+    config_dir.mkdir()
+    monkeypatch.delenv("COMPANION_RUNTIME_DIR", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+    path = config_dir / "production.yaml"
+    path.write_text(
+        """runtime:
+  data_root: user_local
+identity:
+  avatar_model_id: managed-nemesia
+providers:
+  memory:
+    type: sqlite
+    db_path: data/memory.db
+  avatar:
+    enabled: true
+    type: websocket_bridge
+    url: ws://127.0.0.1:6122/ws
+    auth_token_env: COMPANION_AVATAR_TOKEN
+    launch:
+      enabled: true
+      executable_path: stage/airi.exe
+      expected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      expected_godot_sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      model_path: assets/nemesia.vrm
+      expected_model_sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+      model_id: managed-nemesia
+  action:
+    enabled: true
+    type: windows_readonly
+    sandbox_enabled: true
+    audit_db_path: data/audit.db
+dev:
+  log_file: logs/companion.log
+""",
+        encoding="utf-8",
+    )
+
+    config = RuntimeConfig.from_yaml(path)
+
+    user_root = local_app_data / "VirtualCompanion"
+    assert config.memory_config is not None
+    assert config.memory_config.db_path == str((user_root / "data/memory.db").resolve())
+    assert config.action_audit_db_path == str((user_root / "data/audit.db").resolve())
+    assert config.log_file == str((user_root / "logs/companion.log").resolve())
+    assert config.avatar_stage_launch_config is not None
+    assert config.avatar_stage_launch_config.executable_path == str(
+        (config_dir / "stage/airi.exe").resolve()
+    )
+    assert config.avatar_stage_launch_config.model_path == str(
+        (config_dir / "assets/nemesia.vrm").resolve()
+    )
+
+
+def test_runtime_directory_override_applies_to_explicit_data_only(
+    tmp_path, monkeypatch
+) -> None:
+    config_dir = tmp_path / "installation"
+    data_root = tmp_path / "profile"
+    config_dir.mkdir()
+    monkeypatch.setenv("COMPANION_RUNTIME_DIR", str(data_root.resolve()))
+    path = config_dir / "production.yaml"
+    path.write_text(
+        """runtime:
+  data_root: user_local
+identity:
+  avatar_model_id: managed-nemesia
+providers:
+  memory:
+    db_path: data/memory.db
+  avatar:
+    enabled: true
+    type: websocket_bridge
+    url: ws://127.0.0.1:6122/ws
+    auth_token_env: COMPANION_AVATAR_TOKEN
+    launch:
+      enabled: true
+      executable_path: stage/airi.exe
+      expected_sha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      expected_app_asar_sha256: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      expected_godot_sha256: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+      model_path: assets/nemesia.vrm
+      expected_model_sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+      model_id: managed-nemesia
+""",
+        encoding="utf-8",
+    )
+
+    config = RuntimeConfig.from_yaml(path)
+
+    assert config.memory_config is not None
+    assert config.memory_config.db_path == str((data_root / "data/memory.db").resolve())
+    assert config.avatar_stage_launch_config is not None
+    assert config.avatar_stage_launch_config.executable_path == str(
+        (config_dir / "stage/airi.exe").resolve()
+    )
+
+
+@pytest.mark.parametrize("mode", ["unknown", "", "program_files"])
+def test_invalid_runtime_data_root_fails_closed(tmp_path, mode) -> None:
+    path = tmp_path / "invalid-runtime-root.yaml"
+    path.write_text(f"runtime:\n  data_root: {mode!r}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="runtime.data_root"):
+        RuntimeConfig.from_yaml(path)
+
+
+def test_relative_runtime_directory_override_fails_closed(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("COMPANION_RUNTIME_DIR", "relative-profile")
+    path = tmp_path / "companion.yaml"
+    path.write_text("runtime:\n  data_root: user_local\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="COMPANION_RUNTIME_DIR must be an absolute path"):
+        RuntimeConfig.from_yaml(path)
 
 
 @pytest.mark.parametrize(

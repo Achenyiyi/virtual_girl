@@ -40,7 +40,7 @@ class AvatarBridgeError(RuntimeError):
 class WebSocketAvatarConfig:
     """Connection settings for a trusted external avatar bridge."""
 
-    url: str = "ws://127.0.0.1:6121/ws"
+    url: str = "ws://127.0.0.1:6122/ws"
     auth_token_env: str = "COMPANION_AVATAR_TOKEN"
     credential_target: str = ""
     connect_timeout_seconds: float = 3.0

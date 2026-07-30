@@ -75,6 +75,53 @@ def _acceptance(prefix: str, version: str) -> dict[str, object]:
     }
 
 
+def _windows_stage(version: str) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "app_version": version,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "passed": True,
+        "artifact_sha256": {
+            "airi_exe": "1" * 64,
+            "app_asar": "2" * 64,
+            "godot_stage_exe": "3" * 64,
+            "managed_avatar": (
+                "6c093fb4e37cda43e2bc89df36c9a93d1f42741fbd6ea7dd57a893e32a6fe31d"
+            ),
+        },
+        "authenticode": {
+            "airi_exe": {
+                "status": "Valid",
+                "signer_certificate_sha256": "4" * 64,
+                "timestamp_certificate_sha256": "5" * 64,
+            },
+            "godot_stage_exe": {
+                "status": "Valid",
+                "signer_certificate_sha256": "6" * 64,
+                "timestamp_certificate_sha256": "7" * 64,
+            },
+        },
+        "model_license": {
+            "model_id": "managed-nemesia-pajamas",
+            "title": "Nemesia_pajamas",
+            "author": "awa",
+            "source": "embedded-vrm-0.x-meta-and-owner-confirmed-vroid-hub-page",
+            "license_url": (
+                "https://hub.vroid.com/license?allowed_to_use_user=everyone&"
+                "characterization_allowed_user=everyone&corporate_commercial_use=allow&"
+                "credit=unnecessary&modification=allow&personal_commercial_use=profit&"
+                "redistribution=allow&sexual_expression=allow&version=1&"
+                "violent_expression=allow"
+            ),
+            "corporate_commercial_use": True,
+            "personal_commercial_use": True,
+            "redistribution": True,
+            "modification": True,
+            "credit_required": False,
+        },
+    }
+
+
 def _write_evidence(root: Path, tag: str) -> Path:
     evidence = root / tag
     evidence.mkdir(parents=True)
@@ -83,6 +130,9 @@ def _write_evidence(root: Path, tag: str) -> Path:
     )
     (evidence / "avatar-acceptance.json").write_text(
         json.dumps(_acceptance("avatar", tag.removeprefix("v"))), encoding="utf-8"
+    )
+    (evidence / "windows-stage.json").write_text(
+        json.dumps(_windows_stage(tag.removeprefix("v"))), encoding="utf-8"
     )
     common = {"reviewer": "release owner", "observed_at": datetime.now(UTC).isoformat()}
     (evidence / "visual-signoff.json").write_text(
@@ -145,6 +195,16 @@ def test_release_evidence_rejects_another_version(tmp_path) -> None:
         verify_evidence(tmp_path, "v1.2.4")
 
 
+def test_release_evidence_rejects_windows_stage_for_another_version(tmp_path) -> None:
+    evidence = _write_evidence(tmp_path, "v1.2.4")
+    stage = json.loads((evidence / "windows-stage.json").read_text(encoding="utf-8"))
+    stage["app_version"] = "1.2.3"
+    (evidence / "windows-stage.json").write_text(json.dumps(stage), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="windows-stage.json: app_version"):
+        verify_evidence(tmp_path, "v1.2.4")
+
+
 def test_release_evidence_rejects_stale_acceptance(tmp_path) -> None:
     evidence = _write_evidence(tmp_path, "v1.2.3")
     voice = json.loads((evidence / "voice-acceptance.json").read_text(encoding="utf-8"))
@@ -152,6 +212,16 @@ def test_release_evidence_rejects_stale_acceptance(tmp_path) -> None:
     (evidence / "voice-acceptance.json").write_text(json.dumps(voice), encoding="utf-8")
 
     with pytest.raises(ValueError, match="stale or future-dated"):
+        verify_evidence(tmp_path, "v1.2.3")
+
+
+def test_release_evidence_rejects_stale_windows_stage(tmp_path) -> None:
+    evidence = _write_evidence(tmp_path, "v1.2.3")
+    stage = json.loads((evidence / "windows-stage.json").read_text(encoding="utf-8"))
+    stage["generated_at"] = (datetime.now(UTC) - timedelta(days=31)).isoformat()
+    (evidence / "windows-stage.json").write_text(json.dumps(stage), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="windows-stage.json: generated_at"):
         verify_evidence(tmp_path, "v1.2.3")
 
 
@@ -181,6 +251,73 @@ def test_release_evidence_rejects_extra_files(tmp_path) -> None:
     (evidence / "screenshot.png").write_bytes(b"private visual evidence")
 
     with pytest.raises(ValueError, match="unexpected entries"):
+        verify_evidence(tmp_path, "v1.2.3")
+
+
+def test_release_evidence_requires_windows_stage(tmp_path) -> None:
+    evidence = _write_evidence(tmp_path, "v1.2.3")
+    (evidence / "windows-stage.json").unlink()
+
+    with pytest.raises(ValueError, match="windows-stage.json"):
+        verify_evidence(tmp_path, "v1.2.3")
+
+
+def test_release_evidence_rejects_windows_stage_path_field(tmp_path) -> None:
+    evidence = _write_evidence(tmp_path, "v1.2.3")
+    stage = json.loads((evidence / "windows-stage.json").read_text(encoding="utf-8"))
+    stage["installation_path"] = r"C:\private\user\airi"
+    (evidence / "windows-stage.json").write_text(json.dumps(stage), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unexpected report fields"):
+        verify_evidence(tmp_path, "v1.2.3")
+
+
+def test_release_evidence_rejects_invalid_windows_artifact_digest(tmp_path) -> None:
+    evidence = _write_evidence(tmp_path, "v1.2.3")
+    stage = json.loads((evidence / "windows-stage.json").read_text(encoding="utf-8"))
+    stage["artifact_sha256"]["app_asar"] = "NOT-A-DIGEST"
+    (evidence / "windows-stage.json").write_text(json.dumps(stage), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="artifact_sha256.app_asar"):
+        verify_evidence(tmp_path, "v1.2.3")
+
+
+@pytest.mark.parametrize("artifact", ["airi_exe", "godot_stage_exe"])
+def test_release_evidence_rejects_invalid_windows_signature(tmp_path, artifact) -> None:
+    evidence = _write_evidence(tmp_path, "v1.2.3")
+    stage = json.loads((evidence / "windows-stage.json").read_text(encoding="utf-8"))
+    stage["authenticode"][artifact]["status"] = "NotSigned"
+    (evidence / "windows-stage.json").write_text(json.dumps(stage), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=rf"authenticode\.{artifact}\.status"):
+        verify_evidence(tmp_path, "v1.2.3")
+
+
+def test_release_evidence_requires_windows_timestamp_certificate(tmp_path) -> None:
+    evidence = _write_evidence(tmp_path, "v1.2.3")
+    stage = json.loads((evidence / "windows-stage.json").read_text(encoding="utf-8"))
+    del stage["authenticode"]["airi_exe"]["timestamp_certificate_sha256"]
+    (evidence / "windows-stage.json").write_text(json.dumps(stage), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="timestamp_certificate_sha256"):
+        verify_evidence(tmp_path, "v1.2.3")
+
+
+def test_release_evidence_rejects_unapproved_model_digest_or_license(tmp_path) -> None:
+    evidence = _write_evidence(tmp_path, "v1.2.3")
+    stage_path = evidence / "windows-stage.json"
+    stage = json.loads(stage_path.read_text(encoding="utf-8"))
+    stage["artifact_sha256"]["managed_avatar"] = "8" * 64
+    stage_path.write_text(json.dumps(stage), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="managed avatar digest is not approved"):
+        verify_evidence(tmp_path, "v1.2.3")
+
+    stage = _windows_stage("1.2.3")
+    stage["model_license"]["redistribution"] = False
+    stage_path.write_text(json.dumps(stage), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="model_license.redistribution is not approved"):
         verify_evidence(tmp_path, "v1.2.3")
 
 

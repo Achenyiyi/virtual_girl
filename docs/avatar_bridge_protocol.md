@@ -12,7 +12,7 @@ protocol and does not claim compatibility with an unfinished AIRI remote-plugin 
 ## Transport and security
 
 - WebSocket text frames containing UTF-8 JSON.
-- Default local endpoint: `ws://127.0.0.1:6121/ws`.
+- Default local endpoint: `ws://127.0.0.1:6122/ws`.
 - Use `wss://` for every non-loopback connection.
 - URLs containing embedded credentials, query strings, or fragments are rejected so secrets
   cannot leak through endpoint logs.
@@ -30,7 +30,7 @@ providers:
   avatar:
     enabled: true
     type: websocket_bridge
-    url: ws://127.0.0.1:6121/ws
+    url: ws://127.0.0.1:6122/ws
     auth_token_env: COMPANION_AVATAR_TOKEN
     credential_target: VirtualCompanion/AvatarBridge
     connect_timeout_seconds: 3.0
@@ -41,6 +41,11 @@ providers:
       executable_path: C:/VirtualCompanion/AIRI/airi.exe
       expected_sha256: <64-hex-sha256-of-airi.exe>
       expected_app_asar_sha256: <64-hex-sha256-of-resources/app.asar>
+      expected_godot_sha256: <64-hex-sha256-of-resources/godot-stage/godot-stage.exe>
+      model_path: C:/VirtualCompanion/model/8496491754682859078.vrm
+      expected_model_sha256: 6c093fb4e37cda43e2bc89df36c9a93d1f42741fbd6ea7dd57a893e32a6fe31d
+      model_id: managed-nemesia-pajamas
+      model_name: Nemesia pajamas
       startup_timeout_seconds: 30.0
       shutdown_timeout_seconds: 8.0
 ```
@@ -50,9 +55,13 @@ Do not embed the token in the target name, URL, YAML, or extension configuration
 Managed launch is optional and Windows-only. It is deliberately restricted to the exact loopback
 endpoint and `COMPANION_AVATAR_TOKEN`, accepts no command-line arguments or shell command, strips
 unrelated credentials/proxy/debug variables from the child environment, and refuses to attach to
-an already-listening endpoint. Both `airi.exe` and `resources/app.asar` must match pinned SHA-256
-digests because Electron stores the reviewed bridge code in the ASAR rather than the executable
-shell. The process starts suspended, joins a kill-on-close Windows Job Object, then resumes; normal
+an already-listening endpoint. `airi.exe`, `resources/app.asar`, and the configured `.vrm` must all
+match pinned SHA-256 digests. The launcher also validates GLB 2.0 and VRM metadata before starting
+AIRI, then injects only the canonical model path, digest, fixed model ID, and display name. AIRI
+independently repeats the digest/VRM checks, exposes only that file through a private local protocol,
+registers it in memory, and selects it as the main stage model. It does not copy the model into
+IndexedDB or package it into `app.asar`. The process starts suspended, joins a kill-on-close Windows
+Job Object, then resumes; normal
 shutdown requests `WM_CLOSE` before terminating the owned process tree. Leave
 `launch.enabled: false` when AIRI is supervised externally.
 
@@ -175,7 +184,9 @@ existing MediaPipe patched dependency and pnpm metadata unchanged. When
 network access plus manual check, download, install, and channel controls; the About page reports
 the disabled state. It passes `git apply --check`, and a frozen filtered install of the stage app
 plus its 31 dependency workspaces succeeds with pnpm `10.33.0`. The patched upstream updater suite
-passes with 31 tests. Real runtime and visual acceptance remain open release gates.
+passes with 31 tests. Managed VRM mode also supplies a real humanoid neck/head nod so the VRM path
+can satisfy the same acceptance gesture gate as Live2D. Real runtime and visual acceptance remain
+open release gates.
 
 Research references:
 

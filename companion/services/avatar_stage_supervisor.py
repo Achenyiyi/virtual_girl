@@ -6,9 +6,11 @@ import asyncio
 import contextlib
 import ctypes
 import hashlib
+import json
 import os
 import re
 import socket
+import struct
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable, Mapping
@@ -18,7 +20,18 @@ from pathlib import Path
 from typing import Protocol
 
 _AVATAR_TOKEN_ENV = "COMPANION_AVATAR_TOKEN"
+_AVATAR_MODEL_PATH_ENV = "COMPANION_AVATAR_MODEL_PATH"
+_AVATAR_MODEL_SHA256_ENV = "COMPANION_AVATAR_MODEL_SHA256"
+_AVATAR_MODEL_ID_ENV = "COMPANION_AVATAR_MODEL_ID"
+_AVATAR_MODEL_NAME_ENV = "COMPANION_AVATAR_MODEL_NAME"
 _SHA256_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
+_MODEL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_MAX_MANAGED_VRM_BYTES = 512 * 1024 * 1024
+_GLB_HEADER = struct.Struct("<4sII")
+_GLB_CHUNK_HEADER = struct.Struct("<I4s")
+_GLB_MAGIC = b"glTF"
+_GLB_JSON_CHUNK = b"JSON"
+_GLB_VERSION = 2
 _POLL_INTERVAL_SECONDS = 0.2
 _CREATE_SUSPENDED = 0x00000004
 
@@ -78,6 +91,11 @@ class AvatarStageLaunchConfig:
     executable_path: str
     expected_sha256: str
     expected_app_asar_sha256: str
+    expected_godot_sha256: str
+    model_path: str
+    expected_model_sha256: str
+    model_id: str
+    model_name: str = "Managed VRM avatar"
     startup_timeout_seconds: float = 30.0
     shutdown_timeout_seconds: float = 8.0
 
@@ -92,6 +110,26 @@ class AvatarStageLaunchConfig:
             raise ValueError(
                 "managed avatar stage expected_app_asar_sha256 must be 64 hexadecimal "
                 "characters"
+            )
+        if not _SHA256_PATTERN.fullmatch(self.expected_godot_sha256.strip()):
+            raise ValueError(
+                "managed avatar stage expected_godot_sha256 must be 64 hexadecimal characters"
+            )
+        if not self.model_path.strip():
+            raise ValueError("managed avatar stage model_path must not be empty")
+        if not _SHA256_PATTERN.fullmatch(self.expected_model_sha256.strip()):
+            raise ValueError(
+                "managed avatar stage expected_model_sha256 must be 64 hexadecimal "
+                "characters"
+            )
+        if not _MODEL_ID_PATTERN.fullmatch(self.model_id.strip()):
+            raise ValueError(
+                "managed avatar stage model_id must use 1-128 ASCII letters, digits, dots, "
+                "underscores, or hyphens"
+            )
+        if not self.model_name.strip() or len(self.model_name.strip()) > 128:
+            raise ValueError(
+                "managed avatar stage model_name must contain 1-128 characters"
             )
         if not 1.0 <= self.startup_timeout_seconds <= 120.0:
             raise ValueError(
@@ -134,7 +172,7 @@ class AvatarStageSupervisor:
         config: AvatarStageLaunchConfig,
         *,
         bridge_host: str = "127.0.0.1",
-        bridge_port: int = 6121,
+        bridge_port: int = 6122,
         process_factory: _ProcessFactory | None = None,
         job_factory: _JobFactory | None = None,
         window_closer: _WindowCloser | None = None,
@@ -163,13 +201,15 @@ class AvatarStageSupervisor:
     def shutdown_clean(self) -> bool:
         return self._shutdown_clean
 
-    def validate_installation(self) -> Path:
-        """Validate the local Electron executable and its application archive."""
+    def validate_installation(self) -> tuple[Path, Path]:
+        """Validate the pinned AIRI installation and managed VRM asset."""
         if self._platform != "win32":
             raise AvatarStageLaunchError("managed avatar stage is supported only on Windows")
         configured_executable = Path(self._config.executable_path).expanduser()
         executable = configured_executable.resolve()
-        if executable != configured_executable.absolute():
+        if not _same_resolved_path(
+            executable, configured_executable.absolute(), platform=self._platform
+        ):
             raise AvatarStageLaunchError(
                 "managed avatar stage executable must not use a link"
             )
@@ -187,12 +227,31 @@ class AvatarStageSupervisor:
             raise AvatarStageLaunchError(
                 "managed avatar stage application archive is unavailable"
             )
+        configured_godot = (
+            executable.parent / "resources" / "godot-stage" / "godot-stage.exe"
+        )
+        godot = configured_godot.resolve()
+        if not _same_resolved_path(
+            godot, configured_godot.absolute(), platform=self._platform
+        ):
+            raise AvatarStageLaunchError(
+                "managed avatar stage Godot sidecar must not use a link"
+            )
+        if godot.suffix.lower() != ".exe" or not godot.is_file():
+            raise AvatarStageLaunchError(
+                "managed avatar stage Godot sidecar is unavailable"
+            )
+        if _is_remote_path(godot, platform=self._platform):
+            raise AvatarStageLaunchError(
+                "managed avatar stage Godot sidecar must use a local volume"
+            )
         executable_digest = _sha256_file(
             executable, require_pe=True, label="executable"
         )
         app_asar_digest = _sha256_file(
             app_asar, require_pe=False, label="application archive"
         )
+        godot_digest = _sha256_file(godot, require_pe=True, label="Godot sidecar")
         if executable_digest.lower() != self._config.expected_sha256.strip().lower():
             raise AvatarStageLaunchError("managed avatar stage executable digest does not match")
         if (
@@ -202,7 +261,16 @@ class AvatarStageSupervisor:
             raise AvatarStageLaunchError(
                 "managed avatar stage application archive digest does not match"
             )
-        return executable
+        if godot_digest.lower() != self._config.expected_godot_sha256.strip().lower():
+            raise AvatarStageLaunchError(
+                "managed avatar stage Godot sidecar digest does not match"
+            )
+        model = _validate_managed_vrm(
+            self._config.model_path,
+            self._config.expected_model_sha256,
+            platform=self._platform,
+        )
+        return executable, model
 
     async def start(
         self, token: str, *, parent_environment: Mapping[str, str] | None = None
@@ -215,7 +283,7 @@ class AvatarStageSupervisor:
                 "managed avatar stage token is unavailable or malformed"
             )
         await self._cleanup_exited_process()
-        executable = await asyncio.to_thread(self.validate_installation)
+        executable, model = await asyncio.to_thread(self.validate_installation)
         if await asyncio.to_thread(
             self._endpoint_probe, self._bridge_host, self._bridge_port
         ):
@@ -223,7 +291,14 @@ class AvatarStageSupervisor:
                 "managed avatar stage bridge endpoint is already in use"
             )
         parent = os.environ if parent_environment is None else parent_environment
-        environment = _build_child_environment(parent, token)
+        environment = _build_child_environment(
+            parent,
+            token,
+            model_path=model,
+            model_sha256=self._config.expected_model_sha256,
+            model_id=self._config.model_id,
+            model_name=self._config.model_name,
+        )
         creation_flags = (
             int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
             | int(getattr(subprocess, "CREATE_DEFAULT_ERROR_MODE", 0))
@@ -414,7 +489,15 @@ def _resume_suspended_process(process: _ManagedProcess) -> None:
         raise AvatarStageLaunchError("managed avatar stage suspended thread was unavailable")
 
 
-def _build_child_environment(parent: Mapping[str, str], token: str) -> dict[str, str]:
+def _build_child_environment(
+    parent: Mapping[str, str],
+    token: str,
+    *,
+    model_path: Path | None = None,
+    model_sha256: str = "",
+    model_id: str = "",
+    model_name: str = "",
+) -> dict[str, str]:
     by_upper = {name.upper(): (name, value) for name, value in parent.items()}
     environment: dict[str, str] = {}
     for allowed in _CHILD_ENV_ALLOWLIST:
@@ -422,7 +505,76 @@ def _build_child_environment(parent: Mapping[str, str], token: str) -> dict[str,
         if entry is not None:
             environment[entry[0]] = entry[1]
     environment[_AVATAR_TOKEN_ENV] = token
+    if model_path is not None:
+        environment[_AVATAR_MODEL_PATH_ENV] = str(model_path)
+        environment[_AVATAR_MODEL_SHA256_ENV] = model_sha256.strip().lower()
+        environment[_AVATAR_MODEL_ID_ENV] = model_id.strip()
+        environment[_AVATAR_MODEL_NAME_ENV] = model_name.strip()
     return environment
+
+
+def _validate_managed_vrm(
+    configured_path: str, expected_sha256: str, *, platform: str
+) -> Path:
+    configured = Path(configured_path).expanduser()
+    model = configured.resolve()
+    if not _same_resolved_path(model, configured.absolute(), platform=platform):
+        raise AvatarStageLaunchError("managed avatar model must not use a link")
+    if model.suffix.lower() != ".vrm" or not model.is_file():
+        raise AvatarStageLaunchError("managed avatar model is unavailable")
+    if _is_remote_path(model, platform=platform):
+        raise AvatarStageLaunchError("managed avatar model must use a local volume")
+    try:
+        size = model.stat().st_size
+    except OSError as exc:
+        raise AvatarStageLaunchError("managed avatar model could not be read") from exc
+    if not 20 <= size <= _MAX_MANAGED_VRM_BYTES:
+        raise AvatarStageLaunchError("managed avatar model size is invalid")
+    digest = _sha256_file(model, require_pe=False, label="model")
+    if digest.lower() != expected_sha256.strip().lower():
+        raise AvatarStageLaunchError("managed avatar model digest does not match")
+    _validate_vrm_glb(model, expected_length=size)
+    return model
+
+
+def _validate_vrm_glb(path: Path, *, expected_length: int) -> None:
+    try:
+        with path.open("rb") as stream:
+            header = stream.read(_GLB_HEADER.size)
+            if len(header) != _GLB_HEADER.size:
+                raise AvatarStageLaunchError("managed avatar model GLB header is invalid")
+            magic, version, declared_length = _GLB_HEADER.unpack(header)
+            if (
+                magic != _GLB_MAGIC
+                or version != _GLB_VERSION
+                or declared_length != expected_length
+            ):
+                raise AvatarStageLaunchError("managed avatar model is not a valid GLB 2.0 file")
+            chunk_header = stream.read(_GLB_CHUNK_HEADER.size)
+            if len(chunk_header) != _GLB_CHUNK_HEADER.size:
+                raise AvatarStageLaunchError("managed avatar model JSON chunk is unavailable")
+            json_length, chunk_type = _GLB_CHUNK_HEADER.unpack(chunk_header)
+            if chunk_type != _GLB_JSON_CHUNK or json_length <= 0:
+                raise AvatarStageLaunchError("managed avatar model JSON chunk is invalid")
+            json_bytes = stream.read(json_length)
+            if len(json_bytes) != json_length:
+                raise AvatarStageLaunchError("managed avatar model JSON chunk is truncated")
+        document = json.loads(json_bytes.rstrip(b"\x00 \t\r\n").decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise AvatarStageLaunchError("managed avatar model metadata could not be read") from exc
+    if not isinstance(document, dict) or not isinstance(document.get("asset"), dict):
+        raise AvatarStageLaunchError("managed avatar model glTF metadata is invalid")
+    extensions = document.get("extensions")
+    if not isinstance(extensions, dict) or not any(
+        name in extensions for name in ("VRM", "VRMC_vrm")
+    ):
+        raise AvatarStageLaunchError("managed avatar model does not contain VRM metadata")
+
+
+def _same_resolved_path(left: Path, right: Path, *, platform: str) -> bool:
+    if platform == "win32":
+        return os.path.normcase(str(left)) == os.path.normcase(str(right))
+    return left == right
 
 
 def _sha256_file(path: Path, *, require_pe: bool, label: str) -> str:

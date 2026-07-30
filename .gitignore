@@ -45,12 +45,14 @@ htmlcov/
 
 # Data
 data/
+model/
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
 
 # Secrets & config
+production.yaml
 .env
 .env.local
 *.key

@@ -45,6 +45,7 @@ def _fields(*names: str) -> ConfigSchema:
 
 
 _CONFIG_SCHEMA: ConfigSchema = {
+    "runtime": _fields("data_root"),
     "identity": _fields(
         "name",
         "self_concept",
@@ -123,6 +124,11 @@ _CONFIG_SCHEMA: ConfigSchema = {
                 "executable_path",
                 "expected_sha256",
                 "expected_app_asar_sha256",
+                "expected_godot_sha256",
+                "model_path",
+                "expected_model_sha256",
+                "model_id",
+                "model_name",
                 "startup_timeout_seconds",
                 "shutdown_timeout_seconds",
             ),
@@ -195,7 +201,12 @@ class RuntimeConfig:
             db_path="./data/companion_memory.db"
         )
         override = os.environ.get("COMPANION_DB_PATH", "").strip()
-        return replace(config, db_path=override) if override else config
+        if not override:
+            return config
+        candidate = Path(override).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError("COMPANION_DB_PATH must be an absolute path")
+        return replace(config, db_path=str(candidate.resolve()))
 
     @classmethod
     def from_yaml(cls, path: Path | str | None = None) -> RuntimeConfig:
@@ -212,7 +223,6 @@ class RuntimeConfig:
         )
         if not config_path.exists():
             raise FileNotFoundError(f"Configuration file does not exist: {config_path}")
-        runtime_root = _runtime_root(config_path, explicit=explicit_path)
 
         try:
             with open(config_path, encoding="utf-8") as f:
@@ -223,6 +233,13 @@ class RuntimeConfig:
             raise ValueError("Configuration root must be a YAML mapping")
         raw: dict[str, Any] = loaded
         _validate_known_fields(raw, _CONFIG_SCHEMA)
+        runtime_raw = _section(raw, "runtime")
+        runtime_root = _runtime_root(
+            config_path,
+            explicit=explicit_path,
+            mode=str(runtime_raw.get("data_root", "auto")),
+        )
+        asset_root = config_path.parent
 
         cfg = cls(raw=raw)
 
@@ -353,7 +370,7 @@ class RuntimeConfig:
             if avatar_raw.get("type") != "websocket_bridge":
                 raise ValueError("enabled avatar provider type must be 'websocket_bridge'")
             cfg.avatar_config = WebSocketAvatarConfig(
-                url=avatar_raw.get("url", "ws://127.0.0.1:6121/ws"),
+                url=avatar_raw.get("url", "ws://127.0.0.1:6122/ws"),
                 auth_token_env=avatar_raw.get("auth_token_env", "COMPANION_AVATAR_TOKEN"),
                 credential_target=avatar_raw.get("credential_target", ""),
                 connect_timeout_seconds=float(
@@ -370,9 +387,9 @@ class RuntimeConfig:
         ):
             if not avatar_enabled or cfg.avatar_config is None:
                 raise ValueError("managed avatar launch requires the avatar provider")
-            if cfg.avatar_config.url != "ws://127.0.0.1:6121/ws":
+            if cfg.avatar_config.url != "ws://127.0.0.1:6122/ws":
                 raise ValueError(
-                    "managed avatar launch requires url 'ws://127.0.0.1:6121/ws'"
+                    "managed avatar launch requires url 'ws://127.0.0.1:6122/ws'"
                 )
             if cfg.avatar_config.auth_token_env != "COMPANION_AVATAR_TOKEN":
                 raise ValueError(
@@ -384,13 +401,34 @@ class RuntimeConfig:
                 raise ValueError(
                     "managed avatar launch executable_path must not be empty"
                 )
+            model_path = str(launch_raw.get("model_path", "")).strip()
+            if not model_path:
+                raise ValueError("managed avatar launch model_path must not be empty")
+            model_id = str(launch_raw.get("model_id", "")).strip()
+            if not model_id:
+                raise ValueError("managed avatar launch model_id must not be empty")
+            if cfg.identity is None or cfg.identity.avatar_model_id != model_id:
+                raise ValueError(
+                    "managed avatar launch model_id must match identity.avatar_model_id"
+                )
             cfg.avatar_stage_launch_config = AvatarStageLaunchConfig(
                 executable_path=_resolve_runtime_path(
-                    executable_path, runtime_root
+                    executable_path, asset_root
                 ),
                 expected_sha256=str(launch_raw.get("expected_sha256", "")),
                 expected_app_asar_sha256=str(
                     launch_raw.get("expected_app_asar_sha256", "")
+                ),
+                expected_godot_sha256=str(
+                    launch_raw.get("expected_godot_sha256", "")
+                ),
+                model_path=_resolve_runtime_path(model_path, asset_root),
+                expected_model_sha256=str(
+                    launch_raw.get("expected_model_sha256", "")
+                ),
+                model_id=model_id,
+                model_name=str(
+                    launch_raw.get("model_name", "Managed VRM avatar")
                 ),
                 startup_timeout_seconds=float(
                     launch_raw.get("startup_timeout_seconds", 30.0)
@@ -517,13 +555,27 @@ def _boolean(value: object, field_name: str) -> bool:
     return value
 
 
-def _runtime_root(config_path: Path, *, explicit: bool) -> Path:
+def _runtime_root(config_path: Path, *, explicit: bool, mode: str) -> Path:
     """Choose a deterministic writable root for relative runtime data paths."""
-    if explicit:
-        return config_path.parent
+    normalized_mode = mode.strip().lower()
+    if normalized_mode not in {"auto", "config_directory", "user_local"}:
+        raise ValueError(
+            "runtime.data_root must be 'auto', 'config_directory', or 'user_local'"
+        )
     override = os.environ.get("COMPANION_RUNTIME_DIR", "").strip()
     if override:
-        return Path(override).expanduser().resolve()
+        candidate = Path(override).expanduser()
+        if not candidate.is_absolute():
+            raise ValueError("COMPANION_RUNTIME_DIR must be an absolute path")
+        return candidate.resolve()
+    if normalized_mode == "config_directory":
+        if not explicit:
+            raise ValueError(
+                "runtime.data_root 'config_directory' requires an explicit configuration file"
+            )
+        return config_path.parent
+    if normalized_mode == "auto" and explicit:
+        return config_path.parent
     local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
     if local_app_data:
         return Path(local_app_data).resolve() / "VirtualCompanion"

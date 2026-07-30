@@ -1,5 +1,9 @@
 # Default configuration for the Virtual Companion runtime.
 
+# Relative databases and logs belong in the current user's local application data.
+runtime:
+  data_root: "user_local"
+
 # ── Identity ────────────────────────────────────────────────────────────
 identity:
   name: "未命名伙伴"
@@ -86,7 +90,7 @@ providers:
   avatar:
     enabled: false
     type: "websocket_bridge"
-    url: "ws://127.0.0.1:6121/ws"
+    url: "ws://127.0.0.1:6122/ws"
     auth_token_env: "COMPANION_AVATAR_TOKEN"
     credential_target: "VirtualCompanion/AvatarBridge"
     connect_timeout_seconds: 3.0
@@ -97,6 +101,11 @@ providers:
       executable_path: ""
       expected_sha256: ""
       expected_app_asar_sha256: ""
+      expected_godot_sha256: ""
+      model_path: ""
+      expected_model_sha256: ""
+      model_id: ""
+      model_name: "Managed VRM avatar"
       startup_timeout_seconds: 30.0
       shutdown_timeout_seconds: 8.0
 
