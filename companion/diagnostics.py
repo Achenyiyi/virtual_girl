@@ -140,7 +140,7 @@ async def run_diagnostics(
         provider_tts = CloudTTSProvider(config.tts_config)
         try:
             health = await provider_tts.health_check()
-            checks.append(_health_check("tts.online", "Azure TTS endpoint", health))
+            checks.append(_health_check("tts.online", "Fish Audio TTS endpoint", health))
         finally:
             await provider_tts.shutdown()
 
@@ -276,7 +276,7 @@ def _voice_checks(config: RuntimeConfig, *, require_voice: bool) -> list[Diagnos
             DiagnosticCheck(
                 "tts.config",
                 DiagnosticStatus.FAIL,
-                "Voice mode requires an enabled Azure TTS provider.",
+                "Voice mode requires an enabled Fish Audio TTS provider.",
             )
         )
     elif not config.tts_config.get_api_key():
@@ -288,8 +288,8 @@ def _voice_checks(config: RuntimeConfig, *, require_voice: bool) -> list[Diagnos
             DiagnosticCheck(
                 "tts.credential",
                 DiagnosticStatus.FAIL,
-                f"Azure TTS credential is unavailable from {sources}.",
-                "Inject the Azure Speech credential through the configured secure source.",
+                f"Fish Audio TTS credential is unavailable from {sources}.",
+                "Inject the Fish Audio credential through the configured secure source.",
             )
         )
     else:
@@ -301,7 +301,7 @@ def _voice_checks(config: RuntimeConfig, *, require_voice: bool) -> list[Diagnos
             DiagnosticCheck(
                 "tts.credential",
                 DiagnosticStatus.PASS,
-                f"Azure TTS credential is available through {source}.",
+                f"Fish Audio TTS credential is available through {source}.",
             )
         )
     return checks

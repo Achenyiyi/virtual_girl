@@ -27,8 +27,10 @@ def test_packaged_default_config_is_cwd_independent(tmp_path, monkeypatch) -> No
     assert config.llm_config.model == "deepseek-chat"
     assert config.llm_config.max_retries == 3
     assert config.tts_config is not None
-    assert config.tts_config.region == "eastasia"
-    assert config.tts_config.credential_target == "VirtualCompanion/AzureSpeech"
+    assert config.tts_config.provider == "fish_audio"
+    assert config.tts_config.model == "s2.1-pro-free"
+    assert config.tts_config.api_key_env == "FISH_API_KEY"
+    assert config.tts_config.credential_target == "VirtualCompanion/FishAudio"
     assert config.memory_config is not None
     assert config.memory_config.db_path == str(
         (runtime_root / "data" / "companion_memory.db").resolve()

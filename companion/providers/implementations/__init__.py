@@ -2,7 +2,7 @@
 
 Phase 1 providers:
 - CloudLLMProvider: Anthropic Claude / OpenAI via HTTP
-- CloudTTSProvider: Azure / Edge TTS
+- CloudTTSProvider: Fish Audio TTS
 - LocalASRProvider: sherpa-onnx / faster-whisper stubs
 - Composite implementations: Fallback chains, model routing
 """

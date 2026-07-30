@@ -77,7 +77,10 @@ async def test_tts_health_is_readonly_and_requires_usable_credentials(
         assert await provider.health_check() == expected
         assert len(requests) == 1
         assert requests[0].method == "GET"
-        assert requests[0].url.path.endswith("/cognitiveservices/voices/list")
+        assert requests[0].url.path.endswith("/wallet/self/api-credit")
+        auth_scheme, auth_value = requests[0].headers["authorization"].split(" ", 1)
+        assert auth_scheme == "Bearer"
+        assert auth_value == "test-secret-value-long-enough"
     finally:
         await provider.shutdown()
 

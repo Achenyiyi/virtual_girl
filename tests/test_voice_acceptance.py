@@ -310,6 +310,7 @@ async def test_voice_acceptance_rejects_premature_echo_signal() -> None:
 @pytest.mark.asyncio
 async def test_voice_acceptance_json_reports_startup_failure(
     monkeypatch,
+    tmp_path,
 ) -> None:
     original_stop = CompanionApp.stop
 
@@ -330,8 +331,13 @@ async def test_voice_acceptance_json_reports_startup_failure(
     monkeypatch.setattr(CompanionApp, "stop", stopped)
     printed: list[str] = []
     monkeypatch.setattr("builtins.print", lambda value, **_kwargs: printed.append(str(value)))
+    config_path = tmp_path / "voice-acceptance.yaml"
+    config_path.write_text(
+        "runtime:\n  data_root: config_directory\n",
+        encoding="utf-8",
+    )
     args = Namespace(
-        config=None,
+        config=config_path,
         doctor=False,
         doctor_online=False,
         doctor_json=False,

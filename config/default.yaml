@@ -52,11 +52,13 @@ providers:
     providers:
       cloud:
         enabled: true
-        provider: "azure"
-        voice: "zh-CN-XiaoxiaoNeural"
-        api_key_env: "AZURE_SPEECH_KEY"  # pragma: allowlist secret
-        credential_target: "VirtualCompanion/AzureSpeech"
-        region: "eastasia"
+        provider: "fish_audio"
+        model: "s2.1-pro-free"
+        reference_id: ""
+        api_key_env: "FISH_API_KEY"  # pragma: allowlist secret
+        credential_target: "VirtualCompanion/FishAudio"
+        base_url: "https://api.fish.audio"
+        latency: "normal"
         timeout_seconds: 15.0
     sample_rate: 24000
 

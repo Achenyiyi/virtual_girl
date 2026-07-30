@@ -11,7 +11,7 @@ The following settings are now authoritative at runtime:
 - memory SQLite path, WAL, and FTS configuration;
 - `COMPANION_DB_PATH` as an absolute explicit memory-path environment override;
 - LLM retries, retry delay, timeout, model, endpoint, and credential environment name;
-- Azure TTS region, voice, timeout, credential environment name, and 24 kHz PCM format;
+- Fish Audio TTS model, endpoint, latency mode, timeout, credential source, and 24 kHz PCM format;
 - microphone/ASR sample rate, language, pre-roll, speech/silence limits, whole-turn timeout, TTS
   chunk timeout, playback timeout, cleanup timeout, and provider-interruption timeout;
 - quiet hours, hourly proactive budgets, and per-level cooldowns;
@@ -44,7 +44,8 @@ python -m companion --config production.yaml --accept-avatar-json 1>avatar-accep
 ```
 
 `--doctor` performs no LLM/TTS network calls. `--doctor-online` validates configured remote
-providers. The Azure check uses the read-only voices-list endpoint and doesn't synthesize audio.
+providers. The Fish Audio check uses the read-only wallet credit endpoint and does not synthesize
+audio.
 No diagnostic message or JSON field includes credential values.
 
 ## Windows credential setup
@@ -56,7 +57,7 @@ Credentials > Add a generic credential** and use these default Internet or netwo
 | Secret | Default target | Temporary environment override |
 | --- | --- | --- |
 | DeepSeek | `VirtualCompanion/DeepSeek` | `DEEPSEEK_API_KEY` |
-| Azure Speech | `VirtualCompanion/AzureSpeech` | `AZURE_SPEECH_KEY` |
+| Fish Audio TTS | `VirtualCompanion/FishAudio` | `FISH_API_KEY` |
 | Avatar bridge | `VirtualCompanion/AvatarBridge` | `COMPANION_AVATAR_TOKEN` |
 
 The username field is unused; put the secret in the password field. A custom target can be set
@@ -127,7 +128,7 @@ Exit codes:
 - `2`: configuration could not be parsed or validated.
 
 When `--voice-input` is included, doctor requires faster-whisper, NumPy, sounddevice, a usable
-default input device, a usable default output device, and the Azure Speech credential. It does not
+default input device, a usable default output device, and the Fish Audio credential. It does not
 download or load the configured Whisper model.
 
 `--doctor-voice-hardware` is an explicit deeper check. It may download/load the configured model,
@@ -202,7 +203,7 @@ devices, network providers, or the single-instance boundary.
    wheel with `--no-deps`, verify the wheel/sdist against `SHA256SUMS`, and run `pip check`. Do not
    use the development/release-tool lock as the installed desktop runtime.
 5. Run local doctor with `--voice-input` from the exact installed runtime.
-6. Run online doctor with the rotated DeepSeek and Azure credentials available from Credential
+6. Run online doctor with the rotated DeepSeek and Fish Audio credentials available from Credential
    Manager or temporary environment overrides.
 7. Run `python -m companion --accept-voice-json 1>voice-acceptance.json`; follow the stderr prompts
    and retain the passing JSON report with the release evidence.
@@ -249,7 +250,7 @@ Cancellation targets the active HTTP generation by turn ID, including the period
 streamed token. Custom endpoints must be HTTPS URLs without embedded credentials, query strings, or
 fragments.
 
-Azure TTS treats an absent credential, non-success HTTP response, transport failure, timeout, or
+Fish Audio TTS treats an absent credential, non-success HTTP response, transport failure, timeout, or
 empty successful response as a failed voice stage; none may be accepted as a silent successful
 turn. Cancellation is effective from connection setup onward, not only after response headers have
 arrived. A duplicate active turn ID is rejected to prevent one synthesis from overwriting another's

@@ -82,14 +82,16 @@ _CONFIG_SCHEMA: ConfigSchema = {
             "sample_rate": None,
             "providers": {
                 "cloud": _fields(
-                    "enabled",
-                    "provider",
-                    "voice",
-                    "api_key_env",
-                    "credential_target",
-                    "region",
-                    "timeout_seconds",
-                )
+                "enabled",
+                "provider",
+                "model",
+                "reference_id",
+                "api_key_env",
+                "credential_target",
+                "base_url",
+                "timeout_seconds",
+                "latency",
+            )
             },
         },
         "asr": {
@@ -295,13 +297,15 @@ class RuntimeConfig:
         tts_cloud = _section(tts_providers, "cloud")
         if _boolean(tts_cloud.get("enabled", True), "providers.tts.providers.cloud.enabled"):
             cfg.tts_config = CloudTTSConfig(
-                provider=tts_cloud.get("provider", "azure"),
-                voice=tts_cloud.get("voice", "zh-CN-XiaoxiaoNeural"),
-                api_key_env=tts_cloud.get("api_key_env", "AZURE_SPEECH_KEY"),
+                provider=tts_cloud.get("provider", "fish_audio"),
+                model=tts_cloud.get("model", "s2.1-pro-free"),
+                reference_id=tts_cloud.get("reference_id", ""),
+                api_key_env=tts_cloud.get("api_key_env", "FISH_API_KEY"),
                 credential_target=tts_cloud.get("credential_target", ""),
-                region=tts_cloud.get("region", "eastasia"),
+                base_url=tts_cloud.get("base_url", "https://api.fish.audio"),
                 sample_rate=int(tts_raw.get("sample_rate", 24000)),
                 timeout_seconds=float(tts_cloud.get("timeout_seconds", 15.0)),
+                latency=tts_cloud.get("latency", "normal"),
             )
 
         # ── ASR Provider ──────────────────────────────────────────────

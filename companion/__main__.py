@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import getpass
 import io
 import json
 import logging
@@ -55,7 +56,10 @@ from companion.security.single_instance import (
     SingleInstanceGuard,
 )
 from companion.security.storage_readiness import check_runtime_storage
-from companion.security.windows_credentials import provision_avatar_bridge_credential
+from companion.security.windows_credentials import (
+    provision_avatar_bridge_credential,
+    write_windows_credential,
+)
 from companion.services.action_service import ActionService
 from companion.services.avatar_stage_supervisor import AvatarStageSupervisor
 from companion.services.proactive_scheduler import ProactiveScheduler, SchedulerConfig
@@ -69,6 +73,39 @@ from companion.voice_acceptance import (
 _SHUTDOWN_STEP_TIMEOUT_SECONDS = 5.0
 
 # ── Logging setup ──────────────────────────────────────────────────────
+
+
+def _prompt_hidden_credential(label: str) -> str:
+    """Prompt twice for a credential without echoing it to the terminal."""
+    value = getpass.getpass(f"{label} credential (input hidden): ")
+    confirmation = getpass.getpass(f"Confirm {label} credential: ")
+    if value != confirmation:
+        raise ValueError(f"{label} credential entries did not match")
+    return value
+
+
+def _write_configured_api_credential(
+    label: str,
+    config: Any | None,
+    *,
+    overwrite: bool,
+) -> str:
+    """Write one configured provider API credential without exposing its value."""
+    if config is None or not config.credential_target:
+        raise ValueError(
+            f"{label} credential provisioning requires an enabled provider and "
+            "credential_target"
+        )
+    target = str(config.credential_target)
+    env_name = str(config.api_key_env)
+    if env_name and os.environ.get(env_name, ""):
+        raise ValueError(
+            f"remove the temporary {label} credential environment override before "
+            "provisioning"
+        )
+    value = _prompt_hidden_credential(label)
+    write_windows_credential(target, value, overwrite=overwrite)
+    return target
 
 
 def _configure_cli_streams() -> None:
@@ -414,7 +451,7 @@ class CompanionApp:
             print(f"{Colors.RED}✗ ASR 未就绪。{Colors.RESET}")
             return False
         if await self._tts.health_check() != ProviderHealth.HEALTHY:
-            print(f"{Colors.RED}✗ TTS 未就绪，请检查 Azure Speech 配置。{Colors.RESET}")
+            print(f"{Colors.RED}✗ TTS 未就绪，请检查 Fish Audio 配置。{Colors.RESET}")
             return False
         await self._voice_pipeline.start_session()
         return True
@@ -524,6 +561,46 @@ async def async_main(args: argparse.Namespace) -> int:
         return 0
     # Load config for every operation that uses runtime settings.
     config = RuntimeConfig.from_yaml(args.config)
+    credential_operations = (
+        (
+            "Cloud LLM",
+            config.llm_config,
+            bool(getattr(args, "set_llm_credential", False)),
+            bool(getattr(args, "rotate_llm_credential", False)),
+            "--rotate-llm-credential",
+        ),
+        (
+            "Cloud TTS",
+            config.tts_config,
+            bool(getattr(args, "set_tts_credential", False)),
+            bool(getattr(args, "rotate_tts_credential", False)),
+            "--rotate-tts-credential",
+        ),
+    )
+    for label, provider_config, set_credential, rotate_credential, rotate_flag in (
+        credential_operations
+    ):
+        if not (set_credential or rotate_credential):
+            continue
+        try:
+            target = _write_configured_api_credential(
+                label,
+                provider_config,
+                overwrite=rotate_credential,
+            )
+        except FileExistsError:
+            print(
+                f"{label} credential already exists; use {rotate_flag} to replace it.",
+                file=sys.stderr,
+            )
+            return 1
+        operation = "rotated" if rotate_credential else "provisioned"
+        print(
+            f"{label} credential {operation} in Windows Credential Manager target "
+            f"{target}."
+        )
+        return 0
+
     provision_avatar_token = bool(
         getattr(args, "provision_avatar_token", False)
         or getattr(args, "rotate_avatar_token", False)
@@ -801,7 +878,7 @@ async def async_main(args: argparse.Namespace) -> int:
             if not voice_ready:
                 provider_report = failed_voice_acceptance_report(
                     "voice.provider_ready",
-                    "ASR or Azure TTS did not pass voice readiness.",
+                    "ASR or cloud TTS did not pass voice readiness.",
                 )
                 print(
                     provider_report.to_json()
@@ -1041,13 +1118,33 @@ def main() -> None:
         action="store_true",
         help="严格校验配置文件后退出，不访问凭据、存储、设备或 Provider",
     )
-    avatar_credential_group = parser.add_mutually_exclusive_group()
-    avatar_credential_group.add_argument(
+    credential_group = parser.add_mutually_exclusive_group()
+    credential_group.add_argument(
+        "--set-llm-credential",
+        action="store_true",
+        help="隐藏输入并写入配置的云端 LLM Windows 凭据（拒绝覆盖）",
+    )
+    credential_group.add_argument(
+        "--rotate-llm-credential",
+        action="store_true",
+        help="隐藏输入并替换配置的云端 LLM Windows 凭据",
+    )
+    credential_group.add_argument(
+        "--set-tts-credential",
+        action="store_true",
+        help="隐藏输入并写入配置的云端 TTS Windows 凭据（拒绝覆盖）",
+    )
+    credential_group.add_argument(
+        "--rotate-tts-credential",
+        action="store_true",
+        help="隐藏输入并替换配置的云端 TTS Windows 凭据",
+    )
+    credential_group.add_argument(
         "--provision-avatar-token",
         action="store_true",
         help="生成本机 Avatar Bridge token 并安全写入 Windows 凭据（拒绝覆盖）",
     )
-    avatar_credential_group.add_argument(
+    credential_group.add_argument(
         "--rotate-avatar-token",
         action="store_true",
         help="生成新 Avatar Bridge token 并替换配置目标中的 Windows 凭据",
@@ -1114,7 +1211,7 @@ def main() -> None:
         "--voice",
         action="store_true",
         default=False,
-        help="启用 TTS 语音输出 (需要配置 AZURE_SPEECH_KEY)",
+        help="启用 TTS 语音输出 (需要配置 FISH_API_KEY 或 Windows 凭据)",
     )
     parser.add_argument(
         "--voice-input",
@@ -1127,7 +1224,14 @@ def main() -> None:
     maintenance_modes = sum(
         (
             bool(args.validate_config),
-            bool(args.provision_avatar_token or args.rotate_avatar_token),
+            bool(
+                args.set_llm_credential
+                or args.rotate_llm_credential
+                or args.set_tts_credential
+                or args.rotate_tts_credential
+                or args.provision_avatar_token
+                or args.rotate_avatar_token
+            ),
             any(
                 (
                     args.doctor,
@@ -1145,7 +1249,7 @@ def main() -> None:
     )
     if maintenance_modes > 1:
         parser.error(
-            "validate-config、avatar-token、doctor、accept-voice、accept-avatar、backup-memory、"
+            "validate-config、credential、doctor、accept-voice、accept-avatar、backup-memory、"
             "verify-memory-backup 和 restore-memory-backup 模式不能组合使用"
         )
     if args.accept_voice and args.accept_voice_json:

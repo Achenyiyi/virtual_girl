@@ -91,15 +91,19 @@ CPython 3.12.10、仅运行时依赖、AIRI 舞台和经许可审核的 VRM；�
 
 ```powershell
 $env:DEEPSEEK_API_KEY = "..."
-$env:AZURE_SPEECH_KEY = "..."
+$env:FISH_API_KEY = "..."
 python -m companion --voice-input
 ```
 
 生产桌面环境建议改用 Windows“通用凭据”，默认目标为
-`VirtualCompanion/DeepSeek`、`VirtualCompanion/AzureSpeech` 和
+`VirtualCompanion/DeepSeek`、`VirtualCompanion/FishAudio` 和
 `VirtualCompanion/AvatarBridge`。环境变量会优先覆盖已保存凭据；不要把 Key 写入 YAML、
 `.env`、key 文件、命令参数或启动脚本。设置与轮换步骤见
 [`docs/deployment_preflight.md`](docs/deployment_preflight.md)。
+
+Fish Audio TTS 当前使用官方免费开放的 `s2.1-pro-free` 测试模型；本地 ASR 仍使用
+faster-whisper。上线前仍需把任何曾出现在聊天、日志或命令中的 Fish/DeepSeek 密钥轮换为
+从未披露的新值。
 
 Avatar Bridge 使用本机随机 token，可由程序直接安全初始化且不会回显：
 
