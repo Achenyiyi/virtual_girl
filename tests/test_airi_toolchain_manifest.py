@@ -16,6 +16,7 @@ def test_airi_toolchain_manifest_pins_reproducible_windows_inputs() -> None:
 
     assert manifest["airi_commit"] == "dbf812488829a61cc2e95909e021b215704d066c"
     assert manifest["node_version"] == "24.9.0"
+    assert manifest["dotnet_sdk_version"] == "8.0.206"
     assert manifest["pnpm_version"] == "10.33.0"
     assert manifest["electron_version"] == "41.2.1"
     assert manifest["electron_builder_version"] == "26.8.1"
@@ -37,7 +38,12 @@ def test_airi_build_script_pins_pnpm_for_builder_subprocesses() -> None:
         "pnpm --filter '@proj-airi/stage-tamagotchi...' install --frozen-lockfile"
         in script
     )
-    assert '(dotnet --version).Trim().StartsWith("8.0.")' in script
+    assert '$DotnetSdkVersion = "8.0.206"' in script
+    assert "$installedDotnetSdks = @(dotnet --list-sdks)" in script
+    assert "[IO.FileMode]::CreateNew" in script
+    assert 'rollForward = "disable"' in script
+    assert "$actualDotnetSdkVersion = (dotnet --version).Trim()" in script
+    assert "$actualDotnetSdkVersion -ne $DotnetSdkVersion" in script
     assert "Godot 4.6.2 stable Mono is required" in script
     assert '[string]$GodotUserPath = ""' in script
     assert "GODOT_USER_HOME" not in script
@@ -58,6 +64,28 @@ def test_airi_build_script_pins_pnpm_for_builder_subprocesses() -> None:
     assert "pnpm --filter '@proj-airi/stage-tamagotchi' build:unpack" in script
     assert '"resources\\app.asar"' in script
     assert '"resources\\godot-stage\\godot-stage.exe"' in script
+
+
+def test_airi_workflow_pins_exact_dotnet_sdk() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "airi-windows.yml"
+    ).read_text(encoding="utf-8")
+
+    assert 'dotnet-version: "8.0.206"' in workflow
+    assert 'dotnet-version: "8.0.x"' not in workflow
+
+
+def test_ci_secret_scan_excludes_only_pinned_digest_assignments() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+    expected = (
+        "--exclude-lines '(?i)(\"(?:sha256|[a-z0-9_]+_sha(?:256|512)|airi_commit)\""
+        "\\s*:|\\$AiriCommit\\s*=)'"
+    )
+
+    assert expected in workflow
+    assert "--exclude-files" not in workflow
 
 
 def test_airi_powershell_scripts_parse() -> None:
