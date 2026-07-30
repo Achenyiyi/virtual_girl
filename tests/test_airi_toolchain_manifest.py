@@ -34,10 +34,8 @@ def test_airi_build_script_pins_pnpm_for_builder_subprocesses() -> None:
     assert "corepack enable pnpm --install-directory $corepackBin" in script
     assert '$env:PATH = "$corepackBin;$originalPath"' in script
     assert "(pnpm --version).Trim() -ne $PnpmVersion" in script
-    assert (
-        "pnpm --filter '@proj-airi/stage-tamagotchi...' install --frozen-lockfile"
-        in script
-    )
+    assert "pnpm install --frozen-lockfile" in script
+    assert "--filter '@proj-airi/stage-tamagotchi...' install" not in script
     assert '$DotnetSdkVersion = "8.0.206"' in script
     assert "$installedDotnetSdks = @(dotnet --list-sdks)" in script
     assert "[IO.FileMode]::CreateNew" in script

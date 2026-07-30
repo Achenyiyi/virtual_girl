@@ -119,8 +119,8 @@ try {
             throw "pnpm $PnpmVersion is required for the approved Windows build"
         }
         if (-not $SkipInstall) {
-            # Limit lifecycle scripts and binary downloads to the desktop app's dependency graph.
-            pnpm --filter '@proj-airi/stage-tamagotchi...' install --frozen-lockfile
+            # AIRI's root postinstall builds every workspace package, so all locked deps are needed.
+            pnpm install --frozen-lockfile
         }
 
         $godotProject = Join-Path $checkout "engines\stage-tamagotchi-godot"
