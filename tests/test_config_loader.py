@@ -31,6 +31,10 @@ def test_packaged_default_config_is_cwd_independent(tmp_path, monkeypatch) -> No
     assert config.tts_config.model == "s2.1-pro-free"
     assert config.tts_config.api_key_env == "FISH_API_KEY"
     assert config.tts_config.credential_target == "VirtualCompanion/FishAudio"
+    assert config.tts_config.latency == "balanced"
+    assert config.tts_config.chunk_length == 180
+    assert config.tts_config.min_chunk_length == 30
+    assert config.tts_config.max_text_bytes == 480
     assert config.memory_config is not None
     assert config.memory_config.db_path == str(
         (runtime_root / "data" / "companion_memory.db").resolve()
@@ -40,10 +44,11 @@ def test_packaged_default_config_is_cwd_independent(tmp_path, monkeypatch) -> No
     assert config.microphone_config.pre_roll_buffer_ms == 400
     assert config.voice_pipeline_config.language == "zh"
     assert config.voice_pipeline_config.tts_chunk_timeout_seconds == 15.0
-    assert config.voice_pipeline_config.playback_timeout_seconds == 30.0
+    assert config.voice_pipeline_config.playback_timeout_seconds == 120.0
+    assert config.voice_pipeline_config.max_turn_duration_ms == 120_000
+    assert config.voice_pipeline_config.target_e2e_latency_ms == 30_000
     assert config.voice_pipeline_config.cleanup_timeout_seconds == 2.0
     assert config.voice_pipeline_config.interrupt_timeout_seconds == 0.3
-    assert config.voice_pipeline_config.target_e2e_latency_ms == 900
     assert config.voice_pipeline_config.target_interrupt_latency_ms == 300
     assert config.policy_config.level_4_per_hour == 1
     assert config.policy_config.level_4_cooldown_seconds == 1800

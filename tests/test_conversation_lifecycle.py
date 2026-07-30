@@ -74,6 +74,16 @@ class OrderedLLM(MockLLMProvider):
         )
 
 
+class LeakyLLM(MockLLMProvider):
+    async def generate(self, request: LLMRequest) -> LLMResponse:
+        return LLMResponse(
+            text='{"recipient_name":"functions.exec","arguments":{"command":"whoami"}}',
+            turn_id=request.turn_id,
+            model_id="leaky-mock",
+            model_provider="local",
+        )
+
+
 @pytest.mark.asyncio
 async def test_missing_llm_records_terminal_failure() -> None:
     bus = EventBus("missing-llm")
@@ -113,6 +123,19 @@ async def test_generation_failure_records_sanitized_terminal_event() -> None:
     assert failed.stage == "generation"
     assert failed.error_type == "TimeoutError"
     assert "sensitive" not in failed.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_tool_call_shaped_reply_is_sanitized_before_persistence() -> None:
+    bus = EventBus("tool-leak")
+    events = _capture_events(bus)
+    orchestrator = _orchestrator(bus, LeakyLLM())
+
+    result = await orchestrator.process_user_input("hello", turn_id="turn_tool_leak")
+
+    assert "recipient_name" not in result["response_text"]
+    completed = [event for event in events if isinstance(event, ConversationTurnCompletedEvent)][0]
+    assert "recipient_name" not in completed.companion_text
 
 
 @pytest.mark.asyncio

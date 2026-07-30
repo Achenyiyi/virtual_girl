@@ -10,7 +10,7 @@ import contextlib
 import logging
 import re
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
@@ -46,7 +46,16 @@ class CloudTTSConfig:
     base_url: str = "https://api.fish.audio"
     sample_rate: int = 24000
     timeout_seconds: float = 15.0
-    latency: str = "normal"
+    latency: str = "balanced"
+    temperature: float = 0.7
+    top_p: float = 0.7
+    chunk_length: int = 180
+    min_chunk_length: int = 30
+    max_new_tokens: int = 1024
+    repetition_penalty: float = 1.2
+    condition_on_previous_chunks: bool = True
+    early_stop_threshold: float = 1.0
+    max_text_bytes: int = 480
 
     def __post_init__(self) -> None:
         configured_secret_sources(
@@ -64,6 +73,20 @@ class CloudTTSConfig:
             raise ValueError("TTS timeout_seconds must be positive")
         if self.latency not in {"low", "normal", "balanced"}:
             raise ValueError("Fish Audio latency must be low, normal, or balanced")
+        if not 0 <= self.temperature <= 1 or not 0 <= self.top_p <= 1:
+            raise ValueError("Fish Audio temperature and top_p must be between 0 and 1")
+        if not 100 <= self.chunk_length <= 300:
+            raise ValueError("Fish Audio chunk_length must be between 100 and 300")
+        if not 0 <= self.min_chunk_length <= 100:
+            raise ValueError("Fish Audio min_chunk_length must be between 0 and 100")
+        if self.max_new_tokens < 1:
+            raise ValueError("Fish Audio max_new_tokens must be positive")
+        if self.repetition_penalty <= 0:
+            raise ValueError("Fish Audio repetition_penalty must be positive")
+        if not 0 <= self.early_stop_threshold <= 1:
+            raise ValueError("Fish Audio early_stop_threshold must be between 0 and 1")
+        if self.max_text_bytes < 100:
+            raise ValueError("Fish Audio max_text_bytes must be at least 100")
         parsed = urlsplit(self.base_url)
         if (
             parsed.scheme != "https"
@@ -105,9 +128,14 @@ class CloudTTSProvider(TTSProvider):
         t0 = time.time()
         owner_task = self._claim_turn(request.turn_id)
         try:
-            audio_bytes: bytes = await self._await_bounded(
-                self._fish_tts(request), operation_name="synthesis"
-            )
+            audio_parts: list[bytes] = []
+            for segment_request in self._segment_request(request):
+                audio_parts.append(
+                    await self._await_bounded(
+                        self._fish_tts(segment_request), operation_name="synthesis"
+                    )
+                )
+            audio_bytes = b"".join(audio_parts)
             if not audio_bytes:
                 raise CloudTTSError("Fish Audio TTS returned empty audio")
         finally:
@@ -133,35 +161,46 @@ class CloudTTSProvider(TTSProvider):
 
         t0 = time.time()
         owner_task = self._claim_turn(request.turn_id)
-        url, headers, payload = self._fish_request(request)
         chunk_size_bytes = int(self._config.sample_rate * 2 * 0.1)
         segment_idx = 0
-        pending: bytes | None = None
         try:
-            client = await self._get_client()
-            async with client.stream(
-                "POST",
-                url,
-                json=payload,
-                headers=headers,
-            ) as response:
-                response.raise_for_status()
-                self._active_streams[request.turn_id] = response
-                async for chunk_data in response.aiter_bytes(chunk_size_bytes):
-                    if request.turn_id in self._cancelled_syntheses:
-                        break
-                    if pending is not None:
+            segment_requests = self._segment_request(request)
+            for segment_number, segment_request in enumerate(segment_requests):
+                is_last_segment = segment_number == len(segment_requests) - 1
+                pending: bytes | None = None
+                url, headers, payload = self._fish_request(segment_request)
+                client = await self._get_client()
+                async with client.stream(
+                    "POST",
+                    url,
+                    json=payload,
+                    headers=headers,
+                ) as response:
+                    response.raise_for_status()
+                    self._active_streams[request.turn_id] = response
+                    async for chunk_data in response.aiter_bytes(chunk_size_bytes):
+                        if request.turn_id in self._cancelled_syntheses:
+                            break
+                        if pending is not None:
+                            yield self._make_stream_chunk(
+                                segment_request, pending, segment_idx, t0, is_final=False
+                            )
+                            segment_idx += 1
+                        pending = chunk_data
+                    if pending is not None and request.turn_id not in self._cancelled_syntheses:
                         yield self._make_stream_chunk(
-                            request, pending, segment_idx, t0, is_final=False
+                            segment_request, pending, segment_idx, t0, is_final=is_last_segment
                         )
                         segment_idx += 1
-                    pending = chunk_data
-                if pending is not None and request.turn_id not in self._cancelled_syntheses:
-                    yield self._make_stream_chunk(
-                        request, pending, segment_idx, t0, is_final=True
-                    )
-                elif request.turn_id not in self._cancelled_syntheses:
-                    raise CloudTTSError("Fish Audio streaming TTS returned empty audio")
+                    elif request.turn_id not in self._cancelled_syntheses:
+                        raise CloudTTSError("Fish Audio streaming TTS returned empty audio")
+                self._active_streams.pop(request.turn_id, None)
+                if request.turn_id in self._cancelled_syntheses:
+                    break
+            if segment_idx and request.turn_id not in self._cancelled_syntheses:
+                return
+            if request.turn_id not in self._cancelled_syntheses:
+                raise CloudTTSError("Fish Audio streaming TTS returned empty audio")
         except asyncio.CancelledError:
             raise
         except httpx.HTTPStatusError as exc:
@@ -193,7 +232,7 @@ class CloudTTSProvider(TTSProvider):
         return TTSChunk(
             audio_bytes=audio_bytes,
             turn_id=request.turn_id,
-            segment_index=request.segment_index * 1000 + segment_index,
+            segment_index=segment_index,
             sample_rate=self._config.sample_rate,
             is_first=is_first,
             is_final=is_final,
@@ -268,15 +307,19 @@ class CloudTTSProvider(TTSProvider):
             "sample_rate": self._config.sample_rate,
             "latency": self._config.latency,
             "normalize": True,
+            "temperature": self._config.temperature,
+            "top_p": self._config.top_p,
             "prosody": {
                 "speed": self._bounded(request.speed, lower=0.5, upper=2.0),
                 "volume": self._volume_to_db(request.volume),
                 "normalize_loudness": True,
             },
-            "chunk_length": 300,
-            "min_chunk_length": 50,
-            "condition_on_previous_chunks": True,
-            "repetition_penalty": 1.2,
+            "chunk_length": self._config.chunk_length,
+            "min_chunk_length": self._config.min_chunk_length,
+            "max_new_tokens": self._config.max_new_tokens,
+            "condition_on_previous_chunks": self._config.condition_on_previous_chunks,
+            "repetition_penalty": self._config.repetition_penalty,
+            "early_stop_threshold": self._config.early_stop_threshold,
         }
         if reference_id:
             payload["reference_id"] = reference_id
@@ -288,6 +331,52 @@ class CloudTTSProvider(TTSProvider):
             "User-Agent": "virtual-companion/0.1.0",
         }
         return url, headers, payload
+
+    def _segment_request(self, request: TTSRequest) -> list[TTSRequest]:
+        return [
+            replace(request, text=text, segment_index=request.segment_index + index)
+            for index, text in enumerate(self._split_text_for_fish(request.text))
+        ]
+
+    def _split_text_for_fish(self, text: str) -> list[str]:
+        limit = max(1, self._config.max_text_bytes - 48)
+        if len(text.encode("utf-8")) <= limit:
+            return [text]
+        pieces = [
+            piece
+            for piece in re.findall(r"[^。！？!?；;\n]+[。！？!?；;]?\s*|\n+", text)
+            if piece.strip()
+        ] or [text]
+        segments: list[str] = []
+        current = ""
+        for piece in pieces:
+            candidate = f"{current}{piece}" if current else piece
+            if len(candidate.encode("utf-8")) <= limit:
+                current = candidate
+                continue
+            if current.strip():
+                segments.append(current.strip())
+            current = ""
+            segments.extend(self._split_oversized_piece(piece, limit))
+        if current.strip():
+            segments.append(current.strip())
+        return segments or [text[:limit]]
+
+    @staticmethod
+    def _split_oversized_piece(piece: str, limit: int) -> list[str]:
+        segments: list[str] = []
+        current = ""
+        for char in piece:
+            candidate = f"{current}{char}"
+            if len(candidate.encode("utf-8")) <= limit:
+                current = candidate
+                continue
+            if current.strip():
+                segments.append(current.strip())
+            current = char
+        if current.strip():
+            segments.append(current.strip())
+        return segments
 
     @staticmethod
     def _bounded(value: float, *, lower: float, upper: float) -> float:

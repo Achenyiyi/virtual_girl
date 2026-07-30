@@ -16,6 +16,11 @@
 | TTS 首字节 | < 300 ms | < 800 ms | 文本输入 → 首个音频字节 |
 | 打断响应 | < 200 ms | < 300 ms | 中断信号 → 播放停止 |
 
+当前免费 Fish `s2.1-pro-free` 接入阶段，`providers.asr.capture.target_e2e_latency_ms`
+临时放宽为 30,000 ms，只用于验证真实麦克风、faster-whisper、DeepSeek、Fish TTS、播放和
+barge-in 链路已打通。上表仍是付费低延迟模型/生产体验目标；切换到有 SLA 的 Fish 模型后需把
+验收阈值重新收紧并重新采集目标机器证据。
+
 ## 2. 追踪点位
 
 系统中的关键追踪时间点（使用 OpenTelemetry spans）：
@@ -42,7 +47,7 @@ t9: 播放停止 (playback_stopped)
 ### 端到端首音频延迟
 ```
 e2e_latency = t6 - t1
-目标: p50 < 900ms, p95 < 1.8s
+目标: p50 < 900ms, p95 < 1.8s（免费 Fish 连通性验收临时阈值为 30,000ms）
 ```
 
 ### ASR 延迟

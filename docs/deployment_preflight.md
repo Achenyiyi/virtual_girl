@@ -148,7 +148,15 @@ signal. Before prompting for barge-in, the gate observes a short no-speech windo
 edge fails as suspected speaker echo or crosstalk instead of being counted as a user interruption.
 The completed turn must reach its
 first played audio within `target_e2e_latency_ms`. Both targets are configured under
-`providers.asr.capture` and default to 900 ms and 300 ms respectively.
+`providers.asr.capture`. The current defaults are 30,000 ms for first played audio and 300 ms for
+interruption because the free Fish `s2.1-pro-free` model has no SLA/TTFA guarantee. When moving to a
+paid Fish model, regenerate target-machine evidence with the lower latency budget before release.
+
+The Fish TTS runtime uses the official streaming HTTP surface with 24 kHz PCM, `latency: balanced`,
+explicit temperature/top-p/prosody controls, cross-chunk consistency, and per-request text
+segmentation below the free-tier call limit. This keeps long companion replies from failing the
+remote validation limit and gives playback smaller, earlier chunks without changing the local
+faster-whisper ASR path.
 
 The JSON variant writes interactive prompts to stderr and exactly one machine-readable report to
 stdout. Redirect stdout to retain release evidence. The report contains only check identifiers,

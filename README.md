@@ -102,8 +102,10 @@ python -m companion --voice-input
 [`docs/deployment_preflight.md`](docs/deployment_preflight.md)。
 
 Fish Audio TTS 当前使用官方免费开放的 `s2.1-pro-free` 测试模型；本地 ASR 仍使用
-faster-whisper。上线前仍需把任何曾出现在聊天、日志或命令中的 Fish/DeepSeek 密钥轮换为
-从未披露的新值。
+faster-whisper。默认 TTS 参数面向对话体验：`latency: balanced`、24 kHz PCM、较短
+`chunk_length`/`min_chunk_length`、跨块上下文一致性，并把长回复拆成不超过 480 bytes 的
+Fish 文本片段，以适配当前免费层的单次调用限制。上线前仍需把任何曾出现在聊天、日志或命令中
+的 Fish/DeepSeek 密钥轮换为从未披露的新值。
 
 Avatar Bridge 使用本机随机 token，可由程序直接安全初始化且不会回显：
 
@@ -175,7 +177,9 @@ python -m companion --config production.yaml --accept-avatar-json 1>avatar-accep
 ```
 
 语音上线验收要求一轮真实麦克风到流式播放完整成功，再在第二轮播放期间通过新的 VAD
-speech-start 边沿立即打断；默认门槛为首音频 900 ms、打断 300 ms。完整流程和报告字段见
+speech-start 边沿立即打断；当前免费 Fish 模型没有 SLA/TTFA 保证，默认门槛为首音频
+30,000 ms、打断 300 ms。切换到付费 Fish 模型后应重新收紧并验证低延迟目标。完整流程和
+报告字段见
 [`docs/deployment_preflight.md`](docs/deployment_preflight.md)。
 
 形象舞台上线验收要求启用 `providers.avatar`、设置 `identity.avatar_model_id` 和头像鉴权
@@ -208,7 +212,7 @@ Windows 行动能力同样默认关闭。目前只提供三个不可变、无参
 | Phase | 目标 | 状态 |
 |---|---|---|
 | Phase 0 | 事件 Schema、Provider 接口、协议、威胁模型 | 🟢 本地与远程 CI 门禁通过 |
-| Phase 1 | 可打断 ASR→LLM→流式 TTS→播放 | 🟡 代码完成，真实设备验收待做 |
+| Phase 1 | 可打断 ASR→LLM→流式 TTS→播放 | 🟡 免费模型真实设备验收通过，生产低延迟待验证 |
 | Phase 2 | 事件账本、五层记忆、时间化事实 | 🟢 自动化验证通过 |
 | Phase 3 | 连续情绪状态、表情/动作/TTS一致映射 | 🟢 AIRI 真实模型、表情、动作和呈现帧验收通过 |
 | Phase 4 | 主动预算、计划/反思、受控电脑工具 | 🟡 Windows 只读能力已验证，写操作保持禁用 |

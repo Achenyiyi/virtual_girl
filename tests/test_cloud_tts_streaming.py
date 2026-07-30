@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -128,6 +129,33 @@ async def test_success_status_with_empty_audio_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_later_segment_with_empty_audio_fails_closed() -> None:
+    calls = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, request=request, content=b"audio" if calls == 1 else b"")
+
+    provider = CloudTTSProvider(
+        CloudTTSConfig(api_key="configured-test-credential", max_text_bytes=100)
+    )
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        with pytest.raises(CloudTTSError, match="empty audio"):
+            _ = [
+                chunk
+                async for chunk in provider.synthesize_stream(
+                    TTSRequest(text="第一段。" * 30, turn_id="later-empty")
+                )
+            ]
+    finally:
+        await provider.shutdown()
+
+    assert calls >= 2
+
+
+@pytest.mark.asyncio
 async def test_fish_tts_request_uses_configured_model_and_pcm_payload() -> None:
     seen: dict[str, object] = {}
 
@@ -163,7 +191,33 @@ async def test_fish_tts_request_uses_configured_model_and_pcm_payload() -> None:
     assert auth_value == "configured-test-credential"
     assert '"format":"pcm"' in str(seen["json"]).replace(" ", "")
     assert '"sample_rate":24000' in str(seen["json"]).replace(" ", "")
+    assert '"latency":"balanced"' in str(seen["json"]).replace(" ", "")
+    assert '"chunk_length":180' in str(seen["json"]).replace(" ", "")
+    assert '"min_chunk_length":30' in str(seen["json"]).replace(" ", "")
     assert '"reference_id":"voice_123"' in str(seen["json"]).replace(" ", "")
+
+
+@pytest.mark.asyncio
+async def test_long_free_tier_text_is_split_into_smaller_tts_calls() -> None:
+    requests: list[str] = []
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        requests.append(request.read().decode("utf-8"))
+        return httpx.Response(200, request=request, content=b"a" * 4800)
+
+    provider = CloudTTSProvider(
+        CloudTTSConfig(api_key="configured-test-credential", max_text_bytes=120)
+    )
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(capture))
+    text = "第一句话很长很长，需要被切开。" * 8
+    try:
+        chunk = await provider.synthesize(TTSRequest(text=text, turn_id="split"))
+    finally:
+        await provider.shutdown()
+
+    assert chunk.audio_bytes
+    assert len(requests) > 1
+    assert all(len(json.loads(payload)["text"].encode("utf-8")) <= 120 for payload in requests)
 
 
 @pytest.mark.asyncio
