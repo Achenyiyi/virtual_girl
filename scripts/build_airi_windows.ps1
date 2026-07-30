@@ -16,6 +16,7 @@ $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
 
 $AiriCommit = "dbf812488829a61cc2e95909e021b215704d066c"
+$DotnetSdkVersion = "8.0.206"
 $PnpmVersion = "10.33.0"
 $GodotVersionPrefix = "4.6.2.stable.mono."
 $checkout = (Resolve-Path -LiteralPath $CheckoutPath).Path
@@ -34,8 +35,12 @@ if (git -C $checkout status --porcelain) {
 if ((node --version).Trim() -ne "v24.9.0") {
     throw "Node.js v24.9.0 is required for the approved Windows build"
 }
-if (-not (dotnet --version).Trim().StartsWith("8.0.")) {
-    throw ".NET SDK 8.0.x is required for the approved Windows build"
+$installedDotnetSdks = @(dotnet --list-sdks)
+$hasPinnedDotnetSdk = $installedDotnetSdks | Where-Object {
+    ($_ -split '\s+', 2)[0] -eq $DotnetSdkVersion
+}
+if (-not $hasPinnedDotnetSdk) {
+    throw ".NET SDK $DotnetSdkVersion is required for the approved Windows build"
 }
 $actualGodotVersion = ((& $GodotPath --version) | Select-Object -First 1).Trim()
 if (-not $actualGodotVersion.StartsWith($GodotVersionPrefix)) {
@@ -54,6 +59,46 @@ if (-not $godotAppData -or -not $godotLocalAppData) {
 
 git -C $checkout apply --check $patch
 git -C $checkout apply $patch
+
+$globalJsonPath = Join-Path $checkout "global.json"
+if (Test-Path -LiteralPath $globalJsonPath) {
+    throw "Refusing to overwrite AIRI global.json: $globalJsonPath"
+}
+$globalJson = [ordered]@{
+    sdk = [ordered]@{
+        version = $DotnetSdkVersion
+        rollForward = "disable"
+    }
+} | ConvertTo-Json -Depth 3
+$globalJsonBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+    $globalJson + [Environment]::NewLine
+)
+$globalJsonStream = [IO.File]::Open(
+    $globalJsonPath,
+    [IO.FileMode]::CreateNew,
+    [IO.FileAccess]::Write,
+    [IO.FileShare]::None
+)
+try {
+    $globalJsonStream.Write($globalJsonBytes, 0, $globalJsonBytes.Length)
+}
+finally {
+    $globalJsonStream.Dispose()
+}
+
+Push-Location $checkout
+try {
+    $actualDotnetSdkVersion = (dotnet --version).Trim()
+}
+finally {
+    Pop-Location
+}
+if ($actualDotnetSdkVersion -ne $DotnetSdkVersion) {
+    throw (
+        ".NET SDK selection mismatch: expected $DotnetSdkVersion, " +
+        "got $actualDotnetSdkVersion"
+    )
+}
 
 $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $corepackBin = Join-Path $tempRoot ("airi-corepack-" + [Guid]::NewGuid().ToString("N"))

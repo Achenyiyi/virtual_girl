@@ -2,6 +2,7 @@
   "schema_version": 1,
   "airi_commit": "dbf812488829a61cc2e95909e021b215704d066c",
   "node_version": "24.9.0",
+  "dotnet_sdk_version": "8.0.206",
   "pnpm_version": "10.33.0",
   "electron_version": "41.2.1",
   "electron_builder_version": "26.8.1",

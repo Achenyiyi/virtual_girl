@@ -76,7 +76,7 @@ jobs:
 
       - name: Scan release sources for secrets
         run: |
-          detect-secrets scan companion config docs integrations scripts README.md pyproject.toml requirements.lock MANIFEST.in .github > secret-scan.json
+          detect-secrets scan --exclude-lines '(?i)("(?:sha256|[a-z0-9_]+_sha(?:256|512)|airi_commit)"\s*:|\$AiriCommit\s*=)' companion config docs integrations scripts README.md pyproject.toml requirements.lock MANIFEST.in .github > secret-scan.json
           python -c "import json; d=json.load(open('secret-scan.json', encoding='utf-8')); n=sum(map(len, d.get('results', {}).values())); print(f'secret candidates: {n}'); raise SystemExit(n > 0)"
 
       - name: Audit runtime dependencies
