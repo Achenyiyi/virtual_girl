@@ -49,6 +49,7 @@ from companion.protocols.turn import TurnManager, TurnRecord, TurnState
 from companion.providers.asr import ASRBatchRequest, ASRProvider
 from companion.providers.model import LLMProvider, LLMRequest
 from companion.providers.tts import TTSChunk, TTSProvider, TTSRequest
+from companion.security.assistant_output import sanitize_assistant_text
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -418,6 +419,7 @@ class VoicePipeline:
                 stage="generation",
                 timeout_error="turn_timeout",
             )
+            response.text = sanitize_assistant_text(response.text)
         except asyncio.CancelledError:
             raise
         except VoiceStageError as exc:
@@ -557,6 +559,7 @@ class VoicePipeline:
         except Exception as exc:
             raise VoiceStageError("tts", type(exc).__name__, retryable=True) from exc
         first_chunk = True
+        iterator: Any | None = None
         try:
             try:
                 stream = self._tts.synthesize_stream(request)
@@ -684,6 +687,21 @@ class VoicePipeline:
             except Exception as exc:
                 raise VoiceStageError("tts", type(exc).__name__, retryable=True) from exc
         finally:
+            if iterator is not None and hasattr(iterator, "aclose"):
+                close_task: asyncio.Future[None] = asyncio.ensure_future(iterator.aclose())
+                try:
+                    done_close, _ = await asyncio.wait(
+                        [close_task], timeout=self._config.cleanup_timeout_seconds
+                    )
+                    if not done_close:
+                        close_task.cancel()
+                        close_task.add_done_callback(self._consume_future_result)
+                except asyncio.CancelledError:
+                    close_task.cancel()
+                    close_task.add_done_callback(self._consume_future_result)
+                    raise
+                except Exception:
+                    logger.debug("TTS stream close failed during voice cleanup", exc_info=True)
             finish_task: asyncio.Future[None] = asyncio.ensure_future(self._audio_output.finish())
             try:
                 done_finish, _ = await asyncio.wait(

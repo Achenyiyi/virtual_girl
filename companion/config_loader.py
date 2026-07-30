@@ -91,6 +91,15 @@ _CONFIG_SCHEMA: ConfigSchema = {
                 "base_url",
                 "timeout_seconds",
                 "latency",
+                "temperature",
+                "top_p",
+                "chunk_length",
+                "min_chunk_length",
+                "max_new_tokens",
+                "repetition_penalty",
+                "condition_on_previous_chunks",
+                "early_stop_threshold",
+                "max_text_bytes",
             )
             },
         },
@@ -305,7 +314,19 @@ class RuntimeConfig:
                 base_url=tts_cloud.get("base_url", "https://api.fish.audio"),
                 sample_rate=int(tts_raw.get("sample_rate", 24000)),
                 timeout_seconds=float(tts_cloud.get("timeout_seconds", 15.0)),
-                latency=tts_cloud.get("latency", "normal"),
+                latency=tts_cloud.get("latency", "balanced"),
+                temperature=float(tts_cloud.get("temperature", 0.7)),
+                top_p=float(tts_cloud.get("top_p", 0.7)),
+                chunk_length=int(tts_cloud.get("chunk_length", 180)),
+                min_chunk_length=int(tts_cloud.get("min_chunk_length", 30)),
+                max_new_tokens=int(tts_cloud.get("max_new_tokens", 1024)),
+                repetition_penalty=float(tts_cloud.get("repetition_penalty", 1.2)),
+                condition_on_previous_chunks=_boolean(
+                    tts_cloud.get("condition_on_previous_chunks", True),
+                    "providers.tts.providers.cloud.condition_on_previous_chunks",
+                ),
+                early_stop_threshold=float(tts_cloud.get("early_stop_threshold", 1.0)),
+                max_text_bytes=int(tts_cloud.get("max_text_bytes", 480)),
             )
 
         # ── ASR Provider ──────────────────────────────────────────────

@@ -90,19 +90,22 @@ authoritative event persistence, causal fact references, atomic memory rebuild, 
 time-versioned preference keys, single-use action confirmation, provider timeouts, strict
 LLM readiness status, unknown no-data telemetry, and standards-compliant WAV generation.
 
-Active milestone: revoke every credential disclosed in chat, validate the interruptible voice path
-with never-disclosed DeepSeek and Fish Audio credentials, provision Authenticode signing, produce
-the first signed installer from the real AIRI stage, and complete human security/visual sign-off.
-The unified installer pipeline itself is implemented and has passed an unsigned lifecycle test.
-Mutating actions remain out of release scope until a separate OS isolation boundary exists.
+Active milestone: revoke every credential disclosed in chat, retain per-tag voice/avatar evidence
+with never-disclosed DeepSeek and Fish Audio credentials, provision Authenticode signing, produce the
+first signed installer from the real AIRI stage, and complete human security/visual sign-off. The
+unified installer pipeline itself is implemented and has passed an unsigned lifecycle test. Mutating
+actions remain out of release scope until a separate OS isolation boundary exists.
 
 Voice implementation status: the code path now includes optional local faster-whisper ASR,
 contextual runtime generation, network-streamed Fish Audio PCM, gapless sounddevice playback,
 played-audio confirmation, and barge-in cancellation. Voice turn admission is serialized while
 the explicit barge-in path remains concurrent; ASR/LLM/TTS/playback failures emit sanitized durable
 terminal events, cancellation cannot leave a started turn dangling, and interruption checks prevent
-late provider or event commits from resuming generation or playback. The gate remains open until
-this exact path passes latency and device tests on the target Windows machine with real credentials.
+late provider or event commits from resuming generation or playback. On the target Windows machine,
+the credential-backed path passed `--accept-voice-json` with the current free Fish budget: first
+audio 5,592 ms against a 30,000 ms target and interruption 27 ms against a 300 ms target. This proves
+current connectivity and barge-in behavior; paid-model low-latency targets must be revalidated after
+switching away from the free model.
 
 Avatar implementation status: the Python runtime now owns a versioned, authenticated WebSocket
 bridge with bounded messages and timeouts, concurrent request correlation, model validation/load,
@@ -204,16 +207,25 @@ successful responses with empty audio all propagate as sanitized synthesis failu
 silently completing an inaudible turn. Active non-streaming and streaming synthesis is tracked by
 turn ID, allowing cancellation during connection setup and before the first PCM chunk. Duplicate
 active turn IDs are rejected, response streams are always released, and provider shutdown bounds
-both response and client closure even when third-party close operations ignore cancellation.
+both response and client closure even when third-party close operations ignore cancellation. Fish
+Audio requests now use the official conversation-friendly parameter surface: `latency: balanced`,
+24 kHz PCM, explicit sampling/prosody controls, cross-chunk consistency, and 480-byte text
+segmentation for the current free-tier call limit.
+
+Dialogue output safety status: assistant replies are sanitized before they reach UI, memory, voice
+synthesis, or avatar follow-on behavior. Tool-call-shaped JSON, internal tool directives, and
+analysis/final leakage are stripped or replaced with a safe companion utterance so internal agent
+mechanics cannot become spoken character dialogue.
 
 Target-machine voice acceptance status: the release CLI now provides an interactive, credential-
 backed gate that separately proves one complete microphone-to-playback turn and one real-microphone
 barge-in. Runtime barge-in now fires on the VAD speech-start edge rather than waiting for the
 interrupting utterance to finish. The gate consumes the same configured providers and durable
 event ledger as production, checks
-the 900 ms voice-turn-to-first-audio and 300 ms interruption targets, returns deterministic exit
-codes, and can emit privacy-safe JSON evidence without transcripts, responses, audio, credentials,
-or raw exception messages. The gate remains unpassed until run with rotated credentials.
+the configured first-audio and 300 ms interruption targets, returns deterministic exit codes, and
+can emit privacy-safe JSON evidence without transcripts, responses, audio, credentials, or raw
+exception messages. The latest target-machine run passed with first audio at 5,592 ms against the
+temporary 30,000 ms free-model target and interruption at 27 ms against the 300 ms target.
 
 Long-running resource status: file logs rotate at 10 MiB with five backups by default; replay,
 action, audit, proactive, latency, and audio queues are bounded. The durable SQLite event ledger is
@@ -317,15 +329,15 @@ The action and perception features must remain disabled until their correspondin
   risk/method values, and unknown actions cannot reach provider execution.
 - On the target machine's isolated release environment, doctor found faster-whisper, NumPy,
   sounddevice, a usable default microphone, and a usable default output device. A separate online
-  doctor resolved DeepSeek from `VirtualCompanion/DeepSeek` and completed the provider health check
-  without exposing the credential. This proves current credential usability, not revocation of any
-  previously exposed key. Voice preflight currently fails only because
-  `VirtualCompanion/FishAudio` has not yet passed credential-backed target-machine acceptance.
+  doctor resolved DeepSeek from `VirtualCompanion/DeepSeek` and Fish Audio from
+  `VirtualCompanion/FishAudio`, then completed provider health checks without exposing credentials.
+  This proves current credential usability, not revocation of any previously exposed key.
 - The explicit hardware doctor first downloaded/loaded the configured faster-whisper `base` model
   in 34.3 seconds. With the cached model, the latest run loaded it in 4.8 seconds,
   completed a real CTranslate2 in-memory silence inference in 0.2 seconds, captured 16 microphone
   frames through the production stream, and opened the production playback stream with 20 ms of
-  silence. Credential-backed Fish Audio synthesis remains pending.
+  silence. Credential-backed Fish Audio voice acceptance then passed the full microphone,
+  faster-whisper, DeepSeek, Fish streaming TTS, playback, and barge-in path.
 - `requirements.lock` pins runtime, voice, development, and release tooling for CI/build hosts;
   `requirements-runtime.lock` is a constrained runtime-only subset used inside the installer and
   isolated wheel checks. There is no unhashed `requirements.txt` dependency entry point.
@@ -386,9 +398,9 @@ The action and perception features must remain disabled until their correspondin
   job exposed an incompatible `requirements.txt` indirection and that compatibility wrapper was
   removed; a subsequent main-branch graph job must confirm successful ingestion of `pyproject.toml`
   and the audited `requirements.lock`.
-- Local voice modules and default devices now pass doctor in the isolated release environment, but
-  no credential-backed test has yet proven microphone capture, faster-whisper model loading,
-  Fish Audio streaming TTS, gapless playback, and barge-in latency together.
+- Local voice modules, default devices, credential-backed Fish Audio synthesis, gapless playback,
+  and barge-in latency now pass together on the target machine. Each public tag still needs fresh
+  privacy-safe `voice-acceptance.json` evidence generated from the signed installed runtime.
 - The pinned AIRI candidate, `app.asar`, Godot sidecar, and managed VRM now have approved hashes and
   pass the real 6/6 avatar gate. Public release is still blocked because `airi.exe` and
   `godot-stage.exe` lack Authenticode signatures and trusted timestamps. The release gate now
@@ -404,7 +416,8 @@ The action and perception features must remain disabled until their correspondin
   deliberately unavailable. This does not block the current read-only release scope; enabling them
   later requires a separate OS isolation boundary and target-device acceptance tests.
 - End users run the bundled CPython runtime, not the global Anaconda interpreter. Trusted source
-  builders require CPython 3.12 x64 plus the full hash lock. DeepSeek online health passed in an
-  isolated environment, while Fish Audio credential-backed voice acceptance remains pending.
+  builders require CPython 3.12 x64 plus the full hash lock. DeepSeek and Fish Audio online health
+  passed in an isolated environment; public release still requires never-disclosed replacement keys
+  and per-tag evidence from the signed installer.
 - Dependency hashes were generated and verified on Windows/Python 3.12. Cross-platform releases
   are not claimed; regenerate and verify the lock on every newly supported OS/Python target.

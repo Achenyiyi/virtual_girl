@@ -97,6 +97,9 @@ class PromptBuilder:
         sections.append("- 允许适度的幽默，但不要过度")
         sections.append("- 对话以中文为主，用户可以用英文时你可以用英文回复")
         sections.append("- 你不是人类，不要假扮人类")
+        sections.append(
+            "- 普通对话只输出角色真正要说的自然语言，不输出内部思考、工具调用、JSON 或协议标记"
+        )
         sections.append("- 如果用户情绪低落，表示关心但不强行建议")
         sections.append("- 用户需要时你可以扮演各种角色（老师、朋友、顾问），但要明确这是AI")
 

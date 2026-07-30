@@ -55,7 +55,16 @@ providers:
         api_key_env: "FISH_API_KEY"  # pragma: allowlist secret
         credential_target: "VirtualCompanion/FishAudio"
         base_url: "https://api.fish.audio"
-        latency: "normal"
+        latency: "balanced"
+        temperature: 0.7
+        top_p: 0.7
+        chunk_length: 180
+        min_chunk_length: 30
+        max_new_tokens: 1024
+        repetition_penalty: 1.2
+        condition_on_previous_chunks: true
+        early_stop_threshold: 1.0
+        max_text_bytes: 480
         timeout_seconds: 15.0
     sample_rate: 24000
 
@@ -66,12 +75,12 @@ providers:
       pre_roll_ms: 400
       max_speech_duration_ms: 30000
       silence_duration_ms: 800
-      max_turn_duration_ms: 30000
+      max_turn_duration_ms: 120000
       tts_chunk_timeout_seconds: 15.0
-      playback_timeout_seconds: 30.0
+      playback_timeout_seconds: 120.0
       cleanup_timeout_seconds: 2.0
       interrupt_timeout_seconds: 0.3
-      target_e2e_latency_ms: 900
+      target_e2e_latency_ms: 30000
       target_interrupt_latency_ms: 300
     batch:
       provider: "faster-whisper"

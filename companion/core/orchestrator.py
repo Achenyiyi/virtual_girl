@@ -37,6 +37,7 @@ from companion.providers.memory import MemoryProvider
 from companion.providers.model import LLMProvider, LLMRequest, LLMResponse
 from companion.providers.perception import PerceptionProvider
 from companion.providers.tts import TTSProvider
+from companion.security.assistant_output import sanitize_assistant_text
 
 logger = logging.getLogger(__name__)
 _GESTURE_COOLDOWN_SECONDS = 8.0
@@ -484,7 +485,9 @@ class CompanionOrchestrator:
             max_tokens=512,
             temperature=0.7,
         )
-        return await self._llm.generate(request)
+        response = await self._llm.generate(request)
+        response.text = sanitize_assistant_text(response.text)
+        return response
 
     async def commit_response(
         self,
