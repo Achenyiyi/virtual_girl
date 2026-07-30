@@ -47,7 +47,13 @@ jobs:
       - name: Apply patch and build unpacked Windows app
         shell: pwsh
         run: |
-          .\scripts\build_airi_windows.ps1 -CheckoutPath "$env:RUNNER_TEMP\airi" -RepositoryRoot $env:GITHUB_WORKSPACE
+          $godotConsoles = @(
+            Get-ChildItem -LiteralPath (Join-Path $env:USERPROFILE "godot") -Recurse -File -Filter "Godot_v4.6.2-stable_mono_*_console.exe"
+          )
+          if ($godotConsoles.Count -ne 1) {
+            throw "Expected exactly one Godot 4.6.2 Mono console executable, found $($godotConsoles.Count)"
+          }
+          .\scripts\build_airi_windows.ps1 -CheckoutPath "$env:RUNNER_TEMP\airi" -RepositoryRoot $env:GITHUB_WORKSPACE -GodotPath $godotConsoles[0].FullName
 
       - name: Upload unsigned acceptance candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
