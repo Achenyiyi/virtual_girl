@@ -7,6 +7,7 @@ import json
 import re
 import sys
 from datetime import UTC, datetime, timedelta
+from hashlib import file_digest
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,17 @@ WINDOWS_ARTIFACTS = {
     "managed_avatar",
 }
 WINDOWS_SIGNED_ARTIFACTS = {"airi_exe", "godot_stage_exe"}
+WINDOWS_INSTALLER_SMOKE_CHECKS = {
+    "silent_install",
+    "bundle_integrity",
+    "config_validation",
+    "runtime_import",
+    "cli_help",
+    "uninstaller_authenticode",
+    "silent_uninstall",
+    "install_directory_removed",
+}
+COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 
 def _load_object(path: Path) -> dict[str, Any]:
@@ -86,6 +98,11 @@ def _require_sha256(value: object, path: Path, field: str) -> str:
     return value
 
 
+def _file_sha256(path: Path) -> str:
+    with path.open("rb") as stream:
+        return file_digest(stream, "sha256").hexdigest()
+
+
 def _approved_model_release_values() -> tuple[str, dict[str, object]]:
     manifest = _load_object(MANAGED_AVATAR_MANIFEST)
     if manifest.get("schema_version") != 2:
@@ -127,7 +144,7 @@ def _approved_model_release_values() -> tuple[str, dict[str, object]]:
     return model_sha256, expected
 
 
-def _verify_windows_stage(path: Path, expected_version: str) -> None:
+def _verify_windows_stage(path: Path, expected_version: str) -> dict[str, Any]:
     report = _load_object(path)
     _require_exact_fields(
         report,
@@ -189,6 +206,83 @@ def _verify_windows_stage(path: Path, expected_version: str) -> None:
         matches = actual is expected if isinstance(expected, bool) else actual == expected
         if not matches:
             raise ValueError(f"{path.name}: model_license.{field} is not approved")
+    return report
+
+
+def _verify_windows_installer(path: Path, expected_version: str) -> dict[str, Any]:
+    report = _load_object(path)
+    _require_exact_fields(
+        report,
+        {
+            "schema_version",
+            "app_version",
+            "source_commit",
+            "generated_at",
+            "passed",
+            "installer",
+            "authenticode",
+            "bundle_manifest_sha256",
+            "windows_stage_evidence_sha256",
+            "smoke",
+        },
+        path,
+        "report",
+    )
+    if report["schema_version"] != 1:
+        raise ValueError(f"{path.name}: unsupported schema_version")
+    if report["app_version"] != expected_version:
+        raise ValueError(f"{path.name}: app_version does not match release")
+    if report["passed"] is not True:
+        raise ValueError(f"{path.name}: installer verification did not pass")
+    _require_recent(report["generated_at"], path, "generated_at")
+    source_commit = report["source_commit"]
+    if not isinstance(source_commit, str) or COMMIT_PATTERN.fullmatch(source_commit) is None:
+        raise ValueError(f"{path.name}: source_commit must be a lowercase Git commit")
+
+    installer = report["installer"]
+    if not isinstance(installer, dict):
+        raise ValueError(f"{path.name}: installer must be an object")
+    _require_exact_fields(
+        installer, {"filename", "size_bytes", "sha256"}, path, "installer"
+    )
+    expected_filename = f"VirtualCompanion-{expected_version}-windows-x64.exe"
+    if installer["filename"] != expected_filename:
+        raise ValueError(f"{path.name}: installer.filename is not approved")
+    size_bytes = installer["size_bytes"]
+    if not isinstance(size_bytes, int) or isinstance(size_bytes, bool) or size_bytes <= 0:
+        raise ValueError(f"{path.name}: installer.size_bytes must be positive")
+    _require_sha256(installer["sha256"], path, "installer.sha256")
+
+    signature = report["authenticode"]
+    if not isinstance(signature, dict):
+        raise ValueError(f"{path.name}: authenticode must be an object")
+    signature_fields = {
+        "status",
+        "signer_certificate_sha256",
+        "timestamp_certificate_sha256",
+    }
+    _require_exact_fields(signature, signature_fields, path, "authenticode")
+    if signature["status"] != "Valid":
+        raise ValueError(f"{path.name}: authenticode.status must be Valid")
+    for field in ("signer_certificate_sha256", "timestamp_certificate_sha256"):
+        _require_sha256(signature[field], path, f"authenticode.{field}")
+    _require_sha256(
+        report["bundle_manifest_sha256"], path, "bundle_manifest_sha256"
+    )
+    _require_sha256(
+        report["windows_stage_evidence_sha256"],
+        path,
+        "windows_stage_evidence_sha256",
+    )
+
+    smoke = report["smoke"]
+    if not isinstance(smoke, dict):
+        raise ValueError(f"{path.name}: smoke must be an object")
+    _require_exact_fields(smoke, WINDOWS_INSTALLER_SMOKE_CHECKS, path, "smoke")
+    for check in WINDOWS_INSTALLER_SMOKE_CHECKS:
+        if smoke[check] is not True:
+            raise ValueError(f"{path.name}: smoke.{check} must be true")
+    return report
 
 
 def _verify_acceptance(path: Path, expected_prefix: str, expected_version: str) -> None:
@@ -262,6 +356,7 @@ def verify(evidence_root: Path, tag: str) -> Path:
         "voice-acceptance.json",
         "avatar-acceptance.json",
         "windows-stage.json",
+        "windows-installer.json",
         "visual-signoff.json",
         "security-signoff.json",
     }
@@ -277,7 +372,30 @@ def verify(evidence_root: Path, tag: str) -> Path:
         raise ValueError(f"release evidence is missing: {sorted(missing)}")
     _verify_acceptance(evidence / "voice-acceptance.json", "voice.", expected_version)
     _verify_acceptance(evidence / "avatar-acceptance.json", "avatar.", expected_version)
-    _verify_windows_stage(evidence / "windows-stage.json", expected_version)
+    windows_stage = _verify_windows_stage(
+        evidence / "windows-stage.json", expected_version
+    )
+    windows_installer = _verify_windows_installer(
+        evidence / "windows-installer.json", expected_version
+    )
+    expected_stage_evidence_sha256 = _file_sha256(evidence / "windows-stage.json")
+    if (
+        windows_installer["windows_stage_evidence_sha256"]
+        != expected_stage_evidence_sha256
+    ):
+        raise ValueError(
+            "windows-installer.json: windows_stage_evidence_sha256 does not match "
+            "windows-stage.json"
+        )
+    signer_digests = {
+        windows_stage["authenticode"][artifact]["signer_certificate_sha256"]
+        for artifact in WINDOWS_SIGNED_ARTIFACTS
+    }
+    signer_digests.add(
+        windows_installer["authenticode"]["signer_certificate_sha256"]
+    )
+    if len(signer_digests) != 1:
+        raise ValueError("Windows stage and installer must use one signing identity")
     _verify_signoff(
         evidence / "visual-signoff.json",
         {"intended_model_visible", "animation_healthy", "rendering_approved"},

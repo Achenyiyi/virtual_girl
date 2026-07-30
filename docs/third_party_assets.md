@@ -22,5 +22,5 @@ commercial-use, redistribution, modification, and attribution values match the a
 Permission to redistribute does not make an arbitrary replacement model distributable. Any model
 change requires a new digest, a new manifest license review, and a new visual acceptance run. The
 VRM binary remains a Git-ignored local asset and is not included in the Python wheel or source
-distribution; adding it to a future signed desktop bundle must be an explicit, inventoried release
-change.
+distribution. The Windows installer build includes it only after the manifest, embedded metadata,
+size, digest, release evidence, and installed bundle inventory all match this approved record.

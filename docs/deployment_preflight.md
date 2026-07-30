@@ -193,21 +193,27 @@ automation. It validates the complete supported schema, types, ranges, provider 
 rules, and safety constraints, then exits without reading credentials or touching runtime storage,
 devices, network providers, or the single-instance boundary.
 
-1. Revoke any credential that was ever stored outside an environment secret or Credential Manager.
-2. Store only the rotated replacements using the Generic Credential targets above.
-3. Install `requirements.lock` with hashes and install the wheel with `--no-deps`.
-4. Verify the published wheel and sdist against the accompanying `SHA256SUMS` before installation.
-5. Run `pip check` in that environment.
-6. Run local doctor with `--voice-input`.
-7. Run online doctor with the rotated DeepSeek and Azure credentials available from Credential
+1. Revoke every credential that ever appeared in chat, a file, a log, or a command argument.
+2. Store only never-disclosed replacements using the Generic Credential targets above.
+3. Verify the signed Windows installer's Authenticode signature, timestamp, attestation, and
+   `SHA256SUMS` entry, then install it for the current user. It already contains the pinned CPython
+   runtime, `requirements-runtime.lock` environment, AIRI stage, and approved VRM.
+4. For Python-artifact acceptance only, install `requirements-runtime.lock` with hashes, install the
+   wheel with `--no-deps`, verify the wheel/sdist against `SHA256SUMS`, and run `pip check`. Do not
+   use the development/release-tool lock as the installed desktop runtime.
+5. Run local doctor with `--voice-input` from the exact installed runtime.
+6. Run online doctor with the rotated DeepSeek and Azure credentials available from Credential
    Manager or temporary environment overrides.
-8. Run `python -m companion --accept-voice-json 1>voice-acceptance.json`; follow the stderr prompts
+7. Run `python -m companion --accept-voice-json 1>voice-acceptance.json`; follow the stderr prompts
    and retain the passing JSON report with the release evidence.
-9. Enable managed launch for the pinned AIRI build (or supervise the same pinned files externally),
+8. Enable managed launch for the pinned AIRI build (or supervise the same pinned files externally),
    run `--accept-avatar-json`, retain its passing report, and record the visual sign-off above.
+9. Confirm `windows-installer.json` binds the installed bundle to the exact `windows-stage.json`,
+   and record the security sign-off required by `docs/release_process.md`.
 10. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.
 
-Before step 9, verify the unpacked AIRI directory with `scripts/verify_airi_windows.ps1`. For a
+Before building the installer, verify the unpacked AIRI directory with
+`scripts/verify_airi_windows.ps1`. For a
 release candidate, pass `-RequireAuthenticode`; this must report `Valid` for both `airi.exe` and
 `resources/godot-stage/godot-stage.exe`, with signer and timestamp certificates present. Also pass
 `-AppVersion` and `-EvidenceJson release-evidence\<tag>\windows-stage.json`; evidence mode refuses

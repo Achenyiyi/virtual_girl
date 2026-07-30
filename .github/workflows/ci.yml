@@ -22,7 +22,9 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-          cache-dependency-path: requirements.lock
+          cache-dependency-path: |
+            requirements.lock
+            requirements-runtime.lock
 
       - name: Set up Node for AIRI bridge checks
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
@@ -76,11 +78,13 @@ jobs:
 
       - name: Scan release sources for secrets
         run: |
-          detect-secrets scan --exclude-lines '(?i)("(?:sha256|[a-z0-9_]+_sha(?:256|512)|airi_commit)"\s*:|\$AiriCommit\s*=)' companion config docs integrations scripts README.md pyproject.toml requirements.lock MANIFEST.in .github > secret-scan.json
+          detect-secrets scan --exclude-lines '(?i)("(?:sha256|[a-z0-9_]+_sha(?:256|512)|airi_commit)"\s*:|\$AiriCommit\s*=)' companion config docs integrations packaging scripts README.md pyproject.toml requirements.lock requirements-runtime.lock MANIFEST.in .github > secret-scan.json
           python -c "import json; d=json.load(open('secret-scan.json', encoding='utf-8')); n=sum(map(len, d.get('results', {}).values())); print(f'secret candidates: {n}'); raise SystemExit(n > 0)"
 
       - name: Audit runtime dependencies
-        run: python -m pip_audit -r requirements.lock
+        run: |
+          python -m pip_audit -r requirements-runtime.lock
+          python -m pip_audit -r requirements.lock
 
       - name: Build release artifacts
         run: python -m build --no-isolation
@@ -92,7 +96,7 @@ jobs:
         shell: pwsh
         run: |
           python -m venv "$env:RUNNER_TEMP\release-venv"
-          & "$env:RUNNER_TEMP\release-venv\Scripts\python.exe" -m pip install --disable-pip-version-check --require-hashes -r requirements.lock
+          & "$env:RUNNER_TEMP\release-venv\Scripts\python.exe" -m pip install --disable-pip-version-check --require-hashes -r requirements-runtime.lock
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $wheel = (Get-ChildItem dist\*.whl -File | Select-Object -First 1).FullName
           & "$env:RUNNER_TEMP\release-venv\Scripts\python.exe" -m pip install --disable-pip-version-check --no-deps $wheel
@@ -101,7 +105,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Push-Location $env:RUNNER_TEMP
           try {
-            & "$env:RUNNER_TEMP\release-venv\Scripts\python.exe" -c "from companion.config_loader import RuntimeConfig; RuntimeConfig.from_yaml(); import companion; print(companion.__version__)"
+            & "$env:RUNNER_TEMP\release-venv\Scripts\python.exe" -c "from companion.config_loader import RuntimeConfig; RuntimeConfig.from_yaml(); import companion, ctranslate2, faster_whisper, numpy, sounddevice; print(companion.__version__)"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             & "$env:RUNNER_TEMP\release-venv\Scripts\companion.exe" --help
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
