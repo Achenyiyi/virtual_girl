@@ -36,6 +36,7 @@ env/
 
 # Testing
 .pytest_cache/
+.tmp/
 .coverage
 coverage.xml
 secret-scan.json
