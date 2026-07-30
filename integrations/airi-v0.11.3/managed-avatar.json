@@ -1,0 +1,28 @@
+{
+  "schema_version": 2,
+  "model_id": "managed-nemesia-pajamas",
+  "display_name": "Nemesia pajamas",
+  "relative_path": "model/8496491754682859078.vrm",
+  "size_bytes": 30688684,
+  "sha256": "6c093fb4e37cda43e2bc89df36c9a93d1f42741fbd6ea7dd57a893e32a6fe31d",
+  "container": "glb-2.0",
+  "vrm_spec": "0.x",
+  "license": {
+    "source": "embedded-vrm-0.x-meta-and-owner-confirmed-vroid-hub-page",
+    "title": "Nemesia_pajamas",
+    "author": "awa",
+    "allowed_user_name": "Everyone",
+    "commercial_usage_name": "Allow",
+    "license_name": "Other",
+    "license_url": "https://hub.vroid.com/license?allowed_to_use_user=everyone&characterization_allowed_user=everyone&corporate_commercial_use=allow&credit=unnecessary&modification=allow&personal_commercial_use=profit&redistribution=allow&sexual_expression=allow&version=1&violent_expression=allow",
+    "permissions": {
+      "corporate_commercial_use": true,
+      "personal_commercial_use": true,
+      "redistribution": true,
+      "modification": true,
+      "credit_required": false
+    },
+    "reviewed_at": "2026-07-30"
+  },
+  "repository_policy": "local-user-asset-not-committed"
+}

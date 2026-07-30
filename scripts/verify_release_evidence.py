@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -26,6 +27,21 @@ REQUIRED_CHECK_CODES = {
     },
 }
 
+MANAGED_AVATAR_MANIFEST = (
+    Path(__file__).resolve().parents[1]
+    / "integrations"
+    / "airi-v0.11.3"
+    / "managed-avatar.json"
+)
+SHA256_PATTERN = re.compile(r"[0-9a-f]{64}")
+WINDOWS_ARTIFACTS = {
+    "airi_exe",
+    "app_asar",
+    "godot_stage_exe",
+    "managed_avatar",
+}
+WINDOWS_SIGNED_ARTIFACTS = {"airi_exe", "godot_stage_exe"}
+
 
 def _load_object(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8"))
@@ -44,6 +60,135 @@ def _parse_timestamp(value: object, path: Path, field: str) -> datetime:
     if parsed.tzinfo is None:
         raise ValueError(f"{path.name}: {field} must include a timezone")
     return parsed.astimezone(UTC)
+
+
+def _require_exact_fields(
+    value: dict[str, Any], expected: set[str], path: Path, context: str
+) -> None:
+    unexpected = set(value) - expected
+    if unexpected:
+        raise ValueError(f"{path.name}: unexpected {context} fields: {sorted(unexpected)}")
+    missing = expected - set(value)
+    if missing:
+        raise ValueError(f"{path.name}: missing {context} fields: {sorted(missing)}")
+
+
+def _require_recent(value: object, path: Path, field: str) -> None:
+    parsed = _parse_timestamp(value, path, field)
+    now = datetime.now(UTC)
+    if parsed > now or parsed < now - timedelta(days=30):
+        raise ValueError(f"{path.name}: {field} is stale or future-dated")
+
+
+def _require_sha256(value: object, path: Path, field: str) -> str:
+    if not isinstance(value, str) or SHA256_PATTERN.fullmatch(value) is None:
+        raise ValueError(f"{path.name}: {field} must be a lowercase SHA-256 digest")
+    return value
+
+
+def _approved_model_release_values() -> tuple[str, dict[str, object]]:
+    manifest = _load_object(MANAGED_AVATAR_MANIFEST)
+    if manifest.get("schema_version") != 2:
+        raise ValueError("managed-avatar.json: unsupported schema_version")
+    model_sha256 = _require_sha256(
+        manifest.get("sha256"), MANAGED_AVATAR_MANIFEST, "sha256"
+    )
+    license_value = manifest.get("license")
+    if not isinstance(license_value, dict):
+        raise ValueError("managed-avatar.json: license must be an object")
+    permissions = license_value.get("permissions")
+    if not isinstance(permissions, dict):
+        raise ValueError("managed-avatar.json: license permissions must be an object")
+    expected = {
+        "model_id": manifest.get("model_id"),
+        "title": license_value.get("title"),
+        "author": license_value.get("author"),
+        "source": license_value.get("source"),
+        "license_url": license_value.get("license_url"),
+        "corporate_commercial_use": permissions.get("corporate_commercial_use"),
+        "personal_commercial_use": permissions.get("personal_commercial_use"),
+        "redistribution": permissions.get("redistribution"),
+        "modification": permissions.get("modification"),
+        "credit_required": permissions.get("credit_required"),
+    }
+    for field in ("model_id", "title", "author", "source", "license_url"):
+        if not isinstance(expected[field], str) or not expected[field]:
+            raise ValueError(f"managed-avatar.json: license release field {field} is invalid")
+    required_permissions = {
+        "corporate_commercial_use": True,
+        "personal_commercial_use": True,
+        "redistribution": True,
+        "modification": True,
+        "credit_required": False,
+    }
+    for field, required in required_permissions.items():
+        if expected[field] is not required:
+            raise ValueError(f"managed-avatar.json: release permission {field} is invalid")
+    return model_sha256, expected
+
+
+def _verify_windows_stage(path: Path, expected_version: str) -> None:
+    report = _load_object(path)
+    _require_exact_fields(
+        report,
+        {
+            "schema_version",
+            "app_version",
+            "generated_at",
+            "passed",
+            "artifact_sha256",
+            "authenticode",
+            "model_license",
+        },
+        path,
+        "report",
+    )
+    if report["schema_version"] != 1:
+        raise ValueError(f"{path.name}: unsupported schema_version")
+    if report["app_version"] != expected_version:
+        raise ValueError(f"{path.name}: app_version does not match release")
+    if report["passed"] is not True:
+        raise ValueError(f"{path.name}: Windows stage verification did not pass")
+    _require_recent(report["generated_at"], path, "generated_at")
+
+    artifacts = report["artifact_sha256"]
+    if not isinstance(artifacts, dict):
+        raise ValueError(f"{path.name}: artifact_sha256 must be an object")
+    _require_exact_fields(artifacts, WINDOWS_ARTIFACTS, path, "artifact_sha256")
+    for artifact in WINDOWS_ARTIFACTS:
+        _require_sha256(artifacts[artifact], path, f"artifact_sha256.{artifact}")
+
+    signatures = report["authenticode"]
+    if not isinstance(signatures, dict):
+        raise ValueError(f"{path.name}: authenticode must be an object")
+    _require_exact_fields(signatures, WINDOWS_SIGNED_ARTIFACTS, path, "authenticode")
+    signature_fields = {
+        "status",
+        "signer_certificate_sha256",
+        "timestamp_certificate_sha256",
+    }
+    for artifact in WINDOWS_SIGNED_ARTIFACTS:
+        signature = signatures[artifact]
+        if not isinstance(signature, dict):
+            raise ValueError(f"{path.name}: authenticode.{artifact} must be an object")
+        _require_exact_fields(signature, signature_fields, path, f"authenticode.{artifact}")
+        if signature["status"] != "Valid":
+            raise ValueError(f"{path.name}: authenticode.{artifact}.status must be Valid")
+        for field in ("signer_certificate_sha256", "timestamp_certificate_sha256"):
+            _require_sha256(signature[field], path, f"authenticode.{artifact}.{field}")
+
+    approved_model_sha256, approved_license = _approved_model_release_values()
+    if artifacts["managed_avatar"] != approved_model_sha256:
+        raise ValueError(f"{path.name}: managed avatar digest is not approved")
+    model_license = report["model_license"]
+    if not isinstance(model_license, dict):
+        raise ValueError(f"{path.name}: model_license must be an object")
+    _require_exact_fields(model_license, set(approved_license), path, "model_license")
+    for field, expected in approved_license.items():
+        actual = model_license[field]
+        matches = actual is expected if isinstance(expected, bool) else actual == expected
+        if not matches:
+            raise ValueError(f"{path.name}: model_license.{field} is not approved")
 
 
 def _verify_acceptance(path: Path, expected_prefix: str, expected_version: str) -> None:
@@ -65,10 +210,7 @@ def _verify_acceptance(path: Path, expected_prefix: str, expected_version: str) 
         raise ValueError(f"{path.name}: unsupported schema_version")
     if report.get("app_version") != expected_version:
         raise ValueError(f"{path.name}: app_version does not match release")
-    generated_at = _parse_timestamp(report.get("generated_at"), path, "generated_at")
-    now = datetime.now(UTC)
-    if generated_at > now or generated_at < now - timedelta(days=30):
-        raise ValueError(f"{path.name}: acceptance evidence is stale or future-dated")
+    _require_recent(report.get("generated_at"), path, "generated_at")
     checks = report.get("checks")
     if not isinstance(checks, list) or not checks:
         raise ValueError(f"{path.name}: checks are missing")
@@ -108,10 +250,7 @@ def _verify_signoff(path: Path, required_true: set[str]) -> None:
     reviewer = signoff.get("reviewer")
     if not isinstance(reviewer, str) or not reviewer.strip():
         raise ValueError(f"{path.name}: reviewer is required")
-    parsed = _parse_timestamp(signoff.get("observed_at"), path, "observed_at")
-    now = datetime.now(UTC)
-    if parsed > now or parsed < now - timedelta(days=30):
-        raise ValueError(f"{path.name}: observed_at is stale or future-dated")
+    _require_recent(signoff.get("observed_at"), path, "observed_at")
 
 
 def verify(evidence_root: Path, tag: str) -> Path:
@@ -122,6 +261,7 @@ def verify(evidence_root: Path, tag: str) -> Path:
     required = {
         "voice-acceptance.json",
         "avatar-acceptance.json",
+        "windows-stage.json",
         "visual-signoff.json",
         "security-signoff.json",
     }
@@ -137,6 +277,7 @@ def verify(evidence_root: Path, tag: str) -> Path:
         raise ValueError(f"release evidence is missing: {sorted(missing)}")
     _verify_acceptance(evidence / "voice-acceptance.json", "voice.", expected_version)
     _verify_acceptance(evidence / "avatar-acceptance.json", "avatar.", expected_version)
+    _verify_windows_stage(evidence / "windows-stage.json", expected_version)
     _verify_signoff(
         evidence / "visual-signoff.json",
         {"intended_model_visible", "animation_healthy", "rendering_approved"},

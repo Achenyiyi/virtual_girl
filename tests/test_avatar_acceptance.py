@@ -28,9 +28,12 @@ class AcceptanceAvatarProvider:
         *,
         advance_frame: bool = True,
         preapply_frame_only: bool = False,
+        health_sequence: list[ProviderHealth] | None = None,
     ) -> None:
         self.advance_frame = advance_frame
         self.preapply_frame_only = preapply_frame_only
+        self.health_sequence = list(health_sequence or [ProviderHealth.HEALTHY])
+        self.health_checks = 0
         self.loaded = False
         self.state_sequence = 0
         self.frame_sequence = 4
@@ -45,7 +48,10 @@ class AcceptanceAvatarProvider:
         self.state_gesture_ids: list[str | None] = []
 
     async def health_check(self) -> ProviderHealth:
-        return ProviderHealth.HEALTHY
+        self.health_checks += 1
+        if len(self.health_sequence) > 1:
+            return self.health_sequence.pop(0)
+        return self.health_sequence[0]
 
     async def list_available_models(self) -> list[AvatarModel]:
         return [AvatarModel("kurisu", "Kurisu", "live2d", "kurisu.model3.json")]
@@ -105,6 +111,36 @@ class AcceptanceAvatarProvider:
 
     async def shutdown(self) -> None:
         return None
+
+
+@pytest.mark.asyncio
+async def test_avatar_acceptance_waits_for_renderer_health() -> None:
+    provider = AcceptanceAvatarProvider(
+        health_sequence=[ProviderHealth.UNHEALTHY, ProviderHealth.HEALTHY]
+    )
+
+    report = await run_avatar_acceptance(
+        provider, model_id="kurisu", apply_timeout_seconds=0.2
+    )
+
+    assert report.exit_code == 0
+    assert report.checks[0].code == "avatar.bridge_health"
+    assert provider.health_checks == 2
+
+
+@pytest.mark.asyncio
+async def test_avatar_acceptance_health_wait_is_bounded() -> None:
+    provider = AcceptanceAvatarProvider(
+        health_sequence=[ProviderHealth.UNHEALTHY]
+    )
+
+    report = await run_avatar_acceptance(
+        provider, model_id="kurisu", apply_timeout_seconds=0.01
+    )
+
+    assert report.exit_code == 1
+    assert report.checks[0].code == "avatar.bridge_health"
+    assert provider.health_checks >= 1
 
 
 @pytest.mark.asyncio
@@ -177,7 +213,7 @@ providers:
   avatar:
     enabled: true
     type: websocket_bridge
-    url: ws://127.0.0.1:6121/ws
+    url: ws://127.0.0.1:6122/ws
     auth_token_env: TEST_AVATAR_ACCEPTANCE_TOKEN
 """,
         encoding="utf-8",
@@ -227,6 +263,13 @@ async def test_managed_avatar_acceptance_launches_and_cleans_stage(
     app_asar.parent.mkdir()
     app_asar_content = b"managed-airi-application"
     app_asar.write_bytes(app_asar_content)
+    godot = tmp_path / "resources" / "godot-stage" / "godot-stage.exe"
+    godot.parent.mkdir()
+    godot_content = b"MZmanaged-godot-sidecar"
+    godot.write_bytes(godot_content)
+    model = tmp_path / "nemesia.vrm"
+    model_content = b"managed-vrm"
+    model.write_bytes(model_content)
     config_path = tmp_path / "avatar.yaml"
     config_path.write_text(
         f"""identity:
@@ -235,13 +278,18 @@ providers:
   avatar:
     enabled: true
     type: websocket_bridge
-    url: ws://127.0.0.1:6121/ws
+    url: ws://127.0.0.1:6122/ws
     auth_token_env: COMPANION_AVATAR_TOKEN
     launch:
       enabled: true
       executable_path: {executable.as_posix()}
       expected_sha256: {hashlib.sha256(content).hexdigest()}
       expected_app_asar_sha256: {hashlib.sha256(app_asar_content).hexdigest()}
+      expected_godot_sha256: {hashlib.sha256(godot_content).hexdigest()}
+      model_path: {model.as_posix()}
+      expected_model_sha256: {hashlib.sha256(model_content).hexdigest()}
+      model_id: kurisu
+      model_name: Nemesia pajamas
 """,
         encoding="utf-8",
     )
@@ -301,6 +349,13 @@ async def test_managed_avatar_acceptance_cancellation_still_cleans_stage(
     app_asar.parent.mkdir()
     app_asar_content = b"managed-airi-application"
     app_asar.write_bytes(app_asar_content)
+    godot = tmp_path / "resources" / "godot-stage" / "godot-stage.exe"
+    godot.parent.mkdir()
+    godot_content = b"MZmanaged-godot-sidecar"
+    godot.write_bytes(godot_content)
+    model = tmp_path / "nemesia.vrm"
+    model_content = b"managed-vrm"
+    model.write_bytes(model_content)
     config_path = tmp_path / "avatar.yaml"
     config_path.write_text(
         f"""identity:
@@ -309,13 +364,18 @@ providers:
   avatar:
     enabled: true
     type: websocket_bridge
-    url: ws://127.0.0.1:6121/ws
+    url: ws://127.0.0.1:6122/ws
     auth_token_env: COMPANION_AVATAR_TOKEN
     launch:
       enabled: true
       executable_path: {executable.as_posix()}
       expected_sha256: {hashlib.sha256(content).hexdigest()}
       expected_app_asar_sha256: {hashlib.sha256(app_asar_content).hexdigest()}
+      expected_godot_sha256: {hashlib.sha256(godot_content).hexdigest()}
+      model_path: {model.as_posix()}
+      expected_model_sha256: {hashlib.sha256(model_content).hexdigest()}
+      model_id: kurisu
+      model_name: Nemesia pajamas
 """,
         encoding="utf-8",
     )

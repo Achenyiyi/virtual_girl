@@ -94,8 +94,9 @@ async def run_avatar_acceptance(
 
     checks: list[AvatarAcceptanceCheck] = []
     try:
-        health = await provider.health_check()
-        if health != ProviderHealth.HEALTHY:
+        if not await _wait_for_healthy(
+            provider, timeout_seconds=apply_timeout_seconds
+        ):
             return failed_avatar_acceptance_report(
                 "avatar.bridge_health", "Avatar bridge did not report healthy."
             )
@@ -237,6 +238,19 @@ def _baseline_matches(
         and inspection.model_loaded
         and inspection.visible
     )
+
+
+async def _wait_for_healthy(
+    provider: AvatarAcceptanceProvider, *, timeout_seconds: float
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if await provider.health_check() == ProviderHealth.HEALTHY:
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        await asyncio.sleep(min(0.1, remaining))
 
 
 async def _wait_for_rendered_state(

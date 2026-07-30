@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from companion.security.windows_credentials import (
     _decode_credential_blob,
+    _encode_credential_blob,
     configured_secret_sources,
+    provision_avatar_bridge_credential,
     resolve_secret,
 )
 
@@ -83,3 +87,35 @@ def test_unsafe_credential_references_are_rejected(env_name, target) -> None:
 def test_windows_credential_blob_requires_utf16() -> None:
     assert _decode_credential_blob("rotated-secret".encode("utf-16-le")) == "rotated-secret"
     assert _decode_credential_blob(b"\xff") == ""
+    assert _encode_credential_blob("rotated-secret") == "rotated-secret".encode("utf-16-le")
+
+
+@pytest.mark.parametrize("value", ["", "nul\x00byte", "line\nbreak", "x" * 257])
+def test_windows_credential_blob_rejects_unsafe_values(value) -> None:
+    with pytest.raises(ValueError):
+        _encode_credential_blob(value)
+
+
+def test_avatar_bridge_provisioning_generates_a_secret_without_returning_it(
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_write(target: str, value: str, *, overwrite: bool) -> None:
+        captured.update(target=target, value=value, overwrite=overwrite)
+
+    monkeypatch.setattr(
+        "companion.security.windows_credentials.write_windows_credential",
+        fake_write,
+    )
+
+    result = provision_avatar_bridge_credential(
+        "VirtualCompanion/AvatarBridge", overwrite=True
+    )
+
+    assert result is None
+    assert captured["target"] == "VirtualCompanion/AvatarBridge"
+    assert captured["overwrite"] is True
+    assert isinstance(captured["value"], str)
+    assert len(captured["value"]) >= 40
+    assert re.fullmatch(r"[A-Za-z0-9_-]+", captured["value"])

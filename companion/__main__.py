@@ -55,6 +55,7 @@ from companion.security.single_instance import (
     SingleInstanceGuard,
 )
 from companion.security.storage_readiness import check_runtime_storage
+from companion.security.windows_credentials import provision_avatar_bridge_credential
 from companion.services.action_service import ActionService
 from companion.services.avatar_stage_supervisor import AvatarStageSupervisor
 from companion.services.proactive_scheduler import ProactiveScheduler, SchedulerConfig
@@ -523,6 +524,39 @@ async def async_main(args: argparse.Namespace) -> int:
         return 0
     # Load config for every operation that uses runtime settings.
     config = RuntimeConfig.from_yaml(args.config)
+    provision_avatar_token = bool(
+        getattr(args, "provision_avatar_token", False)
+        or getattr(args, "rotate_avatar_token", False)
+    )
+    if provision_avatar_token:
+        if config.avatar_config is None or not config.avatar_config.credential_target:
+            raise ValueError(
+                "avatar credential provisioning requires an enabled avatar provider and "
+                "credential_target"
+            )
+        if os.environ.get(config.avatar_config.auth_token_env, ""):
+            raise ValueError(
+                "remove the temporary avatar token environment override before provisioning"
+            )
+        rotate = bool(getattr(args, "rotate_avatar_token", False))
+        try:
+            provision_avatar_bridge_credential(
+                config.avatar_config.credential_target,
+                overwrite=rotate,
+            )
+        except FileExistsError:
+            print(
+                "Avatar bridge credential already exists; use --rotate-avatar-token "
+                "to replace it.",
+                file=sys.stderr,
+            )
+            return 1
+        operation = "rotated" if rotate else "provisioned"
+        print(
+            f"Avatar bridge credential {operation} in Windows Credential Manager target "
+            f"{config.avatar_config.credential_target}."
+        )
+        return 0
     if getattr(args, "validate_config", False):
         print("Configuration is valid.")
         return 0
@@ -1007,6 +1041,17 @@ def main() -> None:
         action="store_true",
         help="严格校验配置文件后退出，不访问凭据、存储、设备或 Provider",
     )
+    avatar_credential_group = parser.add_mutually_exclusive_group()
+    avatar_credential_group.add_argument(
+        "--provision-avatar-token",
+        action="store_true",
+        help="生成本机 Avatar Bridge token 并安全写入 Windows 凭据（拒绝覆盖）",
+    )
+    avatar_credential_group.add_argument(
+        "--rotate-avatar-token",
+        action="store_true",
+        help="生成新 Avatar Bridge token 并替换配置目标中的 Windows 凭据",
+    )
     parser.add_argument(
         "--doctor-online",
         action="store_true",
@@ -1082,6 +1127,7 @@ def main() -> None:
     maintenance_modes = sum(
         (
             bool(args.validate_config),
+            bool(args.provision_avatar_token or args.rotate_avatar_token),
             any(
                 (
                     args.doctor,
@@ -1099,7 +1145,7 @@ def main() -> None:
     )
     if maintenance_modes > 1:
         parser.error(
-            "validate-config、doctor、accept-voice、accept-avatar、backup-memory、"
+            "validate-config、avatar-token、doctor、accept-voice、accept-avatar、backup-memory、"
             "verify-memory-backup 和 restore-memory-backup 模式不能组合使用"
         )
     if args.accept_voice and args.accept_voice_json:

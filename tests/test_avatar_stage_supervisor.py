@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
+import struct
 import subprocess
 from collections.abc import Iterator
 from pathlib import Path
@@ -56,16 +58,40 @@ class FakeJob:
         self.closed = True
 
 
-def _write_installation(path: Path) -> tuple[str, str]:
+def _write_vrm(path: Path) -> str:
+    document = json.dumps(
+        {"asset": {"version": "2.0"}, "extensions": {"VRM": {}}},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    document += b" " * (-len(document) % 4)
+    content = (
+        struct.pack("<4sII", b"glTF", 2, 12 + 8 + len(document))
+        + struct.pack("<I4s", len(document), b"JSON")
+        + document
+    )
+    path.write_bytes(content)
+    return hashlib.sha256(content).hexdigest()
+
+
+def _write_installation(path: Path) -> tuple[str, str, str, Path, str]:
     content = b"MZ" + b"approved-airi-binary"
     path.write_bytes(content)
     app_asar = path.parent / "resources" / "app.asar"
     app_asar.parent.mkdir()
     archive_content = b"approved-airi-application"
     app_asar.write_bytes(archive_content)
+    godot = path.parent / "resources" / "godot-stage" / "godot-stage.exe"
+    godot.parent.mkdir()
+    godot_content = b"MZ" + b"approved-godot-sidecar"
+    godot.write_bytes(godot_content)
+    model = path.parent / "avatar.vrm"
+    model_digest = _write_vrm(model)
     return (
         hashlib.sha256(content).hexdigest(),
         hashlib.sha256(archive_content).hexdigest(),
+        hashlib.sha256(godot_content).hexdigest(),
+        model,
+        model_digest,
     )
 
 
@@ -73,10 +99,22 @@ def _supervisor(
     executable: Path,
     digest: str,
     app_asar_digest: str,
+    godot_digest: str,
+    model: Path,
+    model_digest: str,
     **kwargs: Any,
 ) -> AvatarStageSupervisor:
     return AvatarStageSupervisor(
-        AvatarStageLaunchConfig(str(executable), digest, app_asar_digest),
+        AvatarStageLaunchConfig(
+            str(executable),
+            digest,
+            app_asar_digest,
+            godot_digest,
+            str(model),
+            model_digest,
+            "managed-nemesia",
+            "Nemesia pajamas",
+        ),
         platform="win32",
         endpoint_probe=lambda _host, _port: False,
         **kwargs,
@@ -87,14 +125,21 @@ def test_validate_installation_requires_pinned_local_pe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     executable = tmp_path / "airi.exe"
-    digest, app_asar_digest = _write_installation(executable)
-    supervisor = _supervisor(executable, digest, app_asar_digest)
+    digest, app_asar_digest, godot_digest, model, model_digest = _write_installation(
+        executable
+    )
+    supervisor = _supervisor(
+        executable, digest, app_asar_digest, godot_digest, model, model_digest
+    )
     monkeypatch.setattr(
         "companion.services.avatar_stage_supervisor._is_remote_path",
         lambda _path, *, platform: False,
     )
 
-    assert supervisor.validate_installation() == executable.resolve()
+    assert supervisor.validate_installation() == (
+        executable.resolve(),
+        model.resolve(),
+    )
 
     executable.write_bytes(b"MZmodified")
     with pytest.raises(AvatarStageLaunchError, match="digest"):
@@ -105,19 +150,52 @@ def test_validate_installation_rejects_remote_and_non_windows_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     executable = tmp_path / "airi.exe"
-    digest, app_asar_digest = _write_installation(executable)
+    digest, app_asar_digest, godot_digest, model, model_digest = _write_installation(
+        executable
+    )
     monkeypatch.setattr(
         "companion.services.avatar_stage_supervisor._is_remote_path",
         lambda _path, *, platform: True,
     )
 
     with pytest.raises(AvatarStageLaunchError, match="local volume"):
-        _supervisor(executable, digest, app_asar_digest).validate_installation()
+        _supervisor(
+            executable, digest, app_asar_digest, godot_digest, model, model_digest
+        ).validate_installation()
     with pytest.raises(AvatarStageLaunchError, match="only on Windows"):
         AvatarStageSupervisor(
-            AvatarStageLaunchConfig(str(executable), digest, app_asar_digest),
+            AvatarStageLaunchConfig(
+                str(executable),
+                digest,
+                app_asar_digest,
+                godot_digest,
+                str(model),
+                model_digest,
+                "managed-nemesia",
+            ),
             platform="linux",
         ).validate_installation()
+
+
+def test_validate_installation_rejects_modified_godot_sidecar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "airi.exe"
+    digest, app_asar_digest, godot_digest, model, model_digest = _write_installation(
+        executable
+    )
+    supervisor = _supervisor(
+        executable, digest, app_asar_digest, godot_digest, model, model_digest
+    )
+    monkeypatch.setattr(
+        "companion.services.avatar_stage_supervisor._is_remote_path",
+        lambda _path, *, platform: False,
+    )
+    godot = executable.parent / "resources" / "godot-stage" / "godot-stage.exe"
+    godot.write_bytes(b"MZmodified-godot-sidecar")
+
+    with pytest.raises(AvatarStageLaunchError, match="Godot sidecar digest"):
+        supervisor.validate_installation()
 
 
 def test_child_environment_excludes_credentials_proxy_and_debug_hooks() -> None:
@@ -142,12 +220,42 @@ def test_child_environment_excludes_credentials_proxy_and_debug_hooks() -> None:
     }
 
 
+def test_validate_installation_rejects_modified_or_non_vrm_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    executable = tmp_path / "airi.exe"
+    digest, app_asar_digest, godot_digest, model, model_digest = _write_installation(
+        executable
+    )
+    supervisor = _supervisor(
+        executable, digest, app_asar_digest, godot_digest, model, model_digest
+    )
+    monkeypatch.setattr(
+        "companion.services.avatar_stage_supervisor._is_remote_path",
+        lambda _path, *, platform: False,
+    )
+
+    original_size = model.stat().st_size
+    model.write_bytes(b"x" * original_size)
+    with pytest.raises(AvatarStageLaunchError, match="digest"):
+        supervisor.validate_installation()
+
+    invalid_digest = hashlib.sha256(b"x" * original_size).hexdigest()
+    invalid = _supervisor(
+        executable, digest, app_asar_digest, godot_digest, model, invalid_digest
+    )
+    with pytest.raises(AvatarStageLaunchError, match="GLB|size"):
+        invalid.validate_installation()
+
+
 @pytest.mark.asyncio
 async def test_start_uses_exact_process_boundary_and_job_assignment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     executable = tmp_path / "airi.exe"
-    digest, app_asar_digest = _write_installation(executable)
+    digest, app_asar_digest, godot_digest, model, model_digest = _write_installation(
+        executable
+    )
     process = FakeProcess()
     job = FakeJob()
     calls: list[dict[str, Any]] = []
@@ -165,6 +273,9 @@ async def test_start_uses_exact_process_boundary_and_job_assignment(
         executable,
         digest,
         app_asar_digest,
+        godot_digest,
+        model,
+        model_digest,
         process_factory=process_factory,
         job_factory=lambda: job,
         thread_resumer=lambda child: resumed.append(child.pid),
@@ -187,6 +298,10 @@ async def test_start_uses_exact_process_boundary_and_job_assignment(
     assert options["env"] == {
         "PATH": "C:\\Windows",
         "COMPANION_AVATAR_TOKEN": "bridge-token",
+        "COMPANION_AVATAR_MODEL_PATH": str(model.resolve()),
+        "COMPANION_AVATAR_MODEL_SHA256": model_digest,
+        "COMPANION_AVATAR_MODEL_ID": "managed-nemesia",
+        "COMPANION_AVATAR_MODEL_NAME": "Nemesia pajamas",
     }
     assert options["creationflags"] & 0x00000004
 
@@ -196,7 +311,9 @@ async def test_start_refuses_preexisting_bridge_without_spawning(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     executable = tmp_path / "airi.exe"
-    digest, app_asar_digest = _write_installation(executable)
+    digest, app_asar_digest, godot_digest, model, model_digest = _write_installation(
+        executable
+    )
     monkeypatch.setattr(
         "companion.services.avatar_stage_supervisor._is_remote_path",
         lambda _path, *, platform: False,
@@ -209,7 +326,15 @@ async def test_start_refuses_preexisting_bridge_without_spawning(
         return FakeProcess()
 
     supervisor = AvatarStageSupervisor(
-        AvatarStageLaunchConfig(str(executable), digest, app_asar_digest),
+        AvatarStageLaunchConfig(
+            str(executable),
+            digest,
+            app_asar_digest,
+            godot_digest,
+            str(model),
+            model_digest,
+            "managed-nemesia",
+        ),
         platform="win32",
         endpoint_probe=lambda _host, _port: True,
         process_factory=process_factory,
@@ -225,7 +350,9 @@ async def test_job_assignment_failure_terminates_process_and_closes_job(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     executable = tmp_path / "airi.exe"
-    digest, app_asar_digest = _write_installation(executable)
+    digest, app_asar_digest, godot_digest, model, model_digest = _write_installation(
+        executable
+    )
     process = FakeProcess()
     job = FakeJob(fail_assign=True)
     monkeypatch.setattr(
@@ -236,6 +363,9 @@ async def test_job_assignment_failure_terminates_process_and_closes_job(
         executable,
         digest,
         app_asar_digest,
+        godot_digest,
+        model,
+        model_digest,
         process_factory=lambda *_args, **_kwargs: process,
         job_factory=lambda: job,
         thread_resumer=lambda _process: None,
@@ -254,7 +384,14 @@ async def test_readiness_fails_on_early_exit_and_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = AvatarStageLaunchConfig(
-        "airi.exe", "a" * 64, "b" * 64, startup_timeout_seconds=1.0
+        "airi.exe",
+        "a" * 64,
+        "b" * 64,
+        "d" * 64,
+        "avatar.vrm",
+        "c" * 64,
+        "managed-nemesia",
+        startup_timeout_seconds=1.0,
     )
     process = FakeProcess(running=False)
     supervisor = AvatarStageSupervisor(config, platform="win32")
@@ -283,7 +420,15 @@ async def test_shutdown_requests_window_close_then_forces_and_closes_job() -> No
     process = FakeProcess()
     job = FakeJob()
     supervisor = AvatarStageSupervisor(
-        AvatarStageLaunchConfig("airi.exe", "a" * 64, "b" * 64),
+        AvatarStageLaunchConfig(
+            "airi.exe",
+            "a" * 64,
+            "b" * 64,
+            "d" * 64,
+            "avatar.vrm",
+            "c" * 64,
+            "model",
+        ),
         platform="win32",
         window_closer=lambda _pid: False,
     )
@@ -302,7 +447,15 @@ async def test_already_exited_process_is_not_reported_as_clean_shutdown() -> Non
     process = FakeProcess(running=False)
     job = FakeJob()
     supervisor = AvatarStageSupervisor(
-        AvatarStageLaunchConfig("airi.exe", "a" * 64, "b" * 64),
+        AvatarStageLaunchConfig(
+            "airi.exe",
+            "a" * 64,
+            "b" * 64,
+            "d" * 64,
+            "avatar.vrm",
+            "c" * 64,
+            "model",
+        ),
         platform="win32",
     )
     supervisor._process = process

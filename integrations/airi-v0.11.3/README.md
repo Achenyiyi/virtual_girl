@@ -18,6 +18,11 @@ The current implementation includes:
   invokes the renderer over Eventa, writes Live2D/VRM state, and sources model/frame evidence from
   the real renderer callbacks;
 - real WebSocket, lifecycle, concurrency, validation, and renderer-evidence tests.
+- a fail-closed managed-VRM path that validates the local GLB/VRM and SHA-256 in Electron main,
+  exposes only the pinned file through a private protocol, registers it in memory, selects it as
+  the main model, keeps persisted settings and character cards from replacing it while the managed
+  launcher is active, preserves it across model/settings resets, and provides a humanoid nod for
+  VRM acceptance.
 
 The renderer runtime deliberately cannot advance `rendered_state_sequence` or `frame_sequence`
 from a request handler. The supplied patch calls `notifyPresentedFrame()` only after the successful
@@ -38,14 +43,16 @@ The bridge remains disabled unless `COMPANION_AVATAR_TOKEN` is injected into the
 When that token is present, AIRI's updater is also disabled before it can perform its startup check;
 manual check, channel change, download, and install calls become no-ops, and the About page reports
 that Virtual Companion manages the build. This preserves the reviewed executable and `app.asar`
-hash boundary. Unsupported renderer operations fail closed; in particular, VRM one-shot gestures
-and proactive level changes are not reported as successful because AIRI v0.11.3 exposes no matching
-public API.
+hash boundary. Unsupported renderer operations fail closed. The pinned patch supplies the managed
+VRM with a bounded humanoid nod implementation and records renderer-owned expression, gesture,
+proactive-state, visibility, and presented-frame evidence for release acceptance.
 
 For the companion's managed Windows launcher, build or install the unpacked application and pin
-both `airi.exe` and `resources/app.asar` in `providers.avatar.launch`. Pinning only the executable
-is insufficient because electron-builder packages the reviewed main/renderer bridge code inside
-`app.asar`.
+`airi.exe`, `resources/app.asar`, and the local `.vrm` in `providers.avatar.launch`. Set a fixed
+`model_id` matching `identity.avatar_model_id`. Pinning only the executable is insufficient because
+electron-builder packages the reviewed main/renderer bridge code inside `app.asar`. The user model
+is not bundled by this repository; `managed-avatar.json` records the approved local file and its
+hash-bound VRoid Hub commercial-use and redistribution permissions.
 
 Run its checks with:
 
@@ -54,6 +61,17 @@ npm ci --ignore-scripts
 npm test
 npm run typecheck
 ```
+
+The pinned Windows toolchain and verified upstream download digests are recorded in
+`toolchain.json`. To produce a clean unsigned acceptance candidate from an untouched pinned
+checkout, run `scripts/build_airi_windows.ps1`. The script requires the pinned .NET SDK and Godot
+Mono editor with export templates, exports the Windows Godot sidecar, and then packages Electron.
+Use `scripts/verify_airi_windows.ps1` to re-check
+the executable, `app.asar`, local VRM, and Authenticode status. CI uploads the unpacked app only as
+an unsigned short-lived artifact; public release remains blocked until both AIRI-owned executables
+have valid Authenticode signatures and trusted timestamps. For a release candidate, use
+`-RequireAuthenticode -AppVersion <version> -EvidenceJson <windows-stage.json>` to create the
+privacy-safe evidence required by the release gate.
 
 To verify the updater guard in a pinned upstream checkout after the filtered workspace install:
 

@@ -2,7 +2,7 @@
 
 一个本地优先、云端增强、模块可替换、以事件日志为事实源的虚拟生命运行时系统。
 
-> 🚧 **预发布验证中** — 自动化门禁已建立，真实设备与外部舞台验收仍未完成
+> 🚧 **预发布验证中** — Avatar 真实舞台验收已完成，语音端到端验收与签名发行仍待完成
 
 ## 项目目标
 
@@ -91,6 +91,12 @@ python -m companion --voice-input
 `.env`、key 文件、命令参数或启动脚本。设置与轮换步骤见
 [`docs/deployment_preflight.md`](docs/deployment_preflight.md)。
 
+Avatar Bridge 使用本机随机 token，可由程序直接安全初始化且不会回显：
+
+```powershell
+python -m companion --config production.yaml --provision-avatar-token
+```
+
 配置文件采用严格字段校验。未知字段或拼写错误会在任何 Provider 启动前直接报错，避免安全、
 超时、审计或主动策略选项被静默忽略并退回默认值。
 
@@ -100,7 +106,9 @@ python -m companion --voice-input
 
 正式运行要求记忆库、日志和行动审计库位于本地 Windows 卷、目标可真实写入且所在卷至少
 保留 512 MiB 可用空间。不要把实时 SQLite/WAL 数据库直接放到 UNC、网络映射盘或同步盘；
-需要异地保存时使用在线备份文件。
+需要异地保存时使用在线备份文件。安装版配置应设置 `runtime.data_root: user_local`，使这些
+可写数据进入 `%LOCALAPPDATA%\VirtualCompanion`；AIRI 与模型路径仍从配置文件所在的只读
+安装目录解析。
 
 ### 备份记忆
 
@@ -161,8 +169,16 @@ speech-start 边沿立即打断；默认门槛为首音频 900 ms、打断 300 m
 和已呈现帧序号；具体字段及人工视觉签字要求见
 [`docs/avatar_bridge_protocol.md`](docs/avatar_bridge_protocol.md) 和上线预检文档。
 
+本机用户模型 `model/8496491754682859078.vrm` 的固定 ID、大小和 SHA-256 记录在
+[`integrations/airi-v0.11.3/managed-avatar.json`](integrations/airi-v0.11.3/managed-avatar.json)。
+模型二进制仍是本地用户资产并被 Git 忽略；受管启动通过 `model_path`、哈希和固定 ID
+校验后自动注册、选择该 VRM，无需在 AIRI 里手动导入。模型内嵌的 VRoid Hub 许可允许
+企业/个人商用、重新分发和修改且无需署名；许可证据、精确哈希和未来替换约束见
+[`docs/third_party_assets.md`](docs/third_party_assets.md)。
+
 形象舞台默认关闭。桥接协议、鉴权环境变量和 AIRI 当前适配状态见
-[`docs/avatar_bridge_protocol.md`](docs/avatar_bridge_protocol.md)。在真实舞台扩展完成前，不要把
+[`docs/avatar_bridge_protocol.md`](docs/avatar_bridge_protocol.md)。仅在 AIRI、`app.asar`、Godot
+sidecar 和 VRM 的路径与哈希均已固定，且 Avatar token 已进入安全凭据源后，才在生产配置中把
 `providers.avatar.enabled` 设为 `true`。
 
 Windows 行动能力同样默认关闭。目前只提供三个不可变、无参数的只读诊断能力；启用方式、隐私
@@ -180,7 +196,7 @@ Windows 行动能力同样默认关闭。目前只提供三个不可变、无参
 | Phase 0 | 事件 Schema、Provider 接口、协议、威胁模型 | 🟡 本地门禁通过，远程 CI 待跑 |
 | Phase 1 | 可打断 ASR→LLM→流式 TTS→播放 | 🟡 代码完成，真实设备验收待做 |
 | Phase 2 | 事件账本、五层记忆、时间化事实 | 🟢 自动化验证通过 |
-| Phase 3 | 连续情绪状态、表情/动作/TTS一致映射 | 🟡 桥接和映射已验证，AIRI 舞台扩展待做 |
+| Phase 3 | 连续情绪状态、表情/动作/TTS一致映射 | 🟢 AIRI 真实模型、表情、动作和呈现帧验收通过 |
 | Phase 4 | 主动预算、计划/反思、受控电脑工具 | 🟡 Windows 只读能力已验证，写操作保持禁用 |
 | Phase 5 | 纵向实验、全双工升级 | ⬜ 待开始 |
 

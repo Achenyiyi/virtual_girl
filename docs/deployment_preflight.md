@@ -9,7 +9,7 @@ credentials, invalid cloud endpoints, invalid audio settings, and unsafe action 
 The following settings are now authoritative at runtime:
 
 - memory SQLite path, WAL, and FTS configuration;
-- `COMPANION_DB_PATH` as the explicit memory-path environment override;
+- `COMPANION_DB_PATH` as an absolute explicit memory-path environment override;
 - LLM retries, retry delay, timeout, model, endpoint, and credential environment name;
 - Azure TTS region, voice, timeout, credential environment name, and 24 kHz PCM format;
 - microphone/ASR sample rate, language, pre-roll, speech/silence limits, whole-turn timeout, TTS
@@ -19,10 +19,14 @@ The following settings are now authoritative at runtime:
   read-only action settings including pending-confirmation capacity and TTL.
 
 Relative data/log/audit paths in the packaged default resolve under
-`%LOCALAPPDATA%\VirtualCompanion`, independent of the launch directory. Set
-`COMPANION_RUNTIME_DIR` to override that root. Relative paths in an explicitly supplied YAML file
-resolve from that file's directory. An explicit missing config file is an error and never silently
-falls back to defaults.
+`%LOCALAPPDATA%\VirtualCompanion`, independent of the launch directory. A production YAML should
+set `runtime.data_root: user_local` to preserve that boundary when the configuration is supplied
+explicitly from a read-only installation. `COMPANION_RUNTIME_DIR` may override the writable data
+root with an absolute path. Relative AIRI executable and model paths always resolve from the
+explicit configuration file's directory, so moving user data never redirects executable assets.
+For compatibility, an explicit YAML that omits `runtime.data_root` keeps resolving relative data
+paths from its own directory. An explicit missing config file is an error and never silently falls
+back to defaults.
 
 ## Doctor commands
 
@@ -59,6 +63,20 @@ The username field is unused; put the secret in the password field. A custom tar
 with `credential_target` beside the corresponding `api_key_env` or `auth_token_env`. Environment
 variables take precedence for CI and one-off acceptance runs. Remove temporary variables after the
 run.
+
+The Avatar Bridge credential is a local random token, not a third-party API key. Initialize it
+without exposing the value in a shell, process argument, or log:
+
+```powershell
+python -m companion --config production.yaml --provision-avatar-token
+
+# Only when deliberately invalidating the prior local bridge token:
+python -m companion --config production.yaml --rotate-avatar-token
+```
+
+Provisioning refuses to overwrite an existing target. Rotation is explicit; both commands reject
+an active `COMPANION_AVATAR_TOKEN` environment override so the stored credential is immediately
+authoritative.
 
 Never put a secret in YAML, `.env`, a command argument, a key file, or a credential target name.
 After rotation, delete the superseded Generic Credential and create its replacement before running
@@ -146,11 +164,13 @@ only check identifiers and pass/fail messages; it contains no token, model path,
 user content, screenshot, or raw exception text.
 
 For managed AIRI startup, enable `providers.avatar.launch` and configure the installed
-`airi.exe`, its SHA-256, and the SHA-256 of the adjacent `resources/app.asar`. Relative paths in an
-explicit production YAML resolve from that YAML's directory. Local doctor validates both pinned
-files without starting AIRI or opening a GUI. Runtime and `--accept-avatar` launch AIRI before
+`airi.exe`, adjacent `resources/app.asar`, `resources/godot-stage/godot-stage.exe`, local `.vrm`,
+all four SHA-256 values, a fixed `model_id`, and a display name. The launch `model_id` must exactly match
+`identity.avatar_model_id`. Relative paths in an explicit production YAML resolve from that YAML's
+directory. Local doctor validates all four pinned files plus the VRM/GLB structure without starting
+AIRI or opening a GUI. Runtime and `--accept-avatar` launch AIRI before
 bridge health checks and always stop it after the WebSocket provider disconnects. Managed launch
-requires `ws://127.0.0.1:6121/ws` and `COMPANION_AVATAR_TOKEN`; an existing listener is rejected so
+requires `ws://127.0.0.1:6122/ws` and `COMPANION_AVATAR_TOKEN`; an existing listener is rejected so
 acceptance cannot accidentally pass against an unrelated stage.
 
 The avatar JSON report is necessary but not sufficient for visual release approval. While the gate
@@ -186,6 +206,14 @@ devices, network providers, or the single-instance boundary.
 9. Enable managed launch for the pinned AIRI build (or supervise the same pinned files externally),
    run `--accept-avatar-json`, retain its passing report, and record the visual sign-off above.
 10. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.
+
+Before step 9, verify the unpacked AIRI directory with `scripts/verify_airi_windows.ps1`. For a
+release candidate, pass `-RequireAuthenticode`; this must report `Valid` for both `airi.exe` and
+`resources/godot-stage/godot-stage.exe`, with signer and timestamp certificates present. Also pass
+`-AppVersion` and `-EvidenceJson release-evidence\<tag>\windows-stage.json`; evidence mode refuses
+to run without `-RequireAuthenticode` and writes only public hashes, certificate fingerprints, and
+approved model-license fields. An unsigned build is suitable only for local visual acceptance and
+must not be attached to a public GitHub Release.
 
 An action provider timeout is a process-lifetime quarantine, not a retry signal. For execution and
 undo, the external outcome is explicitly unknown because the provider may complete after the

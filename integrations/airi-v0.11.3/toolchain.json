@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "airi_commit": "dbf812488829a61cc2e95909e021b215704d066c",
+  "node_version": "24.9.0",
+  "pnpm_version": "10.33.0",
+  "electron_version": "41.2.1",
+  "electron_builder_version": "26.8.1",
+  "godot_version": "4.6.2.stable.mono",
+  "verified_downloads": {
+    "electron_zip_sha256": "b44d951f36dfc785cd04bf7bbb342672df365a62ef3c966073eb46e5838c13dd",
+    "win_code_sign_2_6_0_sha256": "cdaec7154dda7cc31f88d886e2489379a0625a737d610b5ae7f62a12f16743a4",
+    "godot_engine_sha512": "4b99c9a34e585c64a3838f34b0e67e4e029c978ff1ac25d357be2449bd5fafafac068f2a37c0c16a00b771683259cf867bfd027cc1d9814dab631f4516382efd",
+    "godot_templates_sha512": "8a250be6faf45fd3e590d2c5f68c7a77a7b0a6c2c97cd67cf5322ca9cecec66e8b37749e2544dfa3b03bab18d38e58532561b3d8a27e19be2e0097d9977cfeec"
+  }
+}

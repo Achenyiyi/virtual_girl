@@ -5,12 +5,15 @@ from __future__ import annotations
 import ctypes
 import os
 import re
+import secrets
 import sys
 from ctypes import wintypes
 from dataclasses import dataclass
 
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _CRED_TYPE_GENERIC = 1
+_CRED_PERSIST_LOCAL_MACHINE = 2
+_MAX_CREDENTIAL_BLOB_BYTES = 512
 
 
 @dataclass(frozen=True)
@@ -95,11 +98,64 @@ def read_windows_credential(target: str) -> str:
         cred_free(credential_pointer)
 
 
+def write_windows_credential(target: str, value: str, *, overwrite: bool = False) -> None:
+    """Write one generic credential without exposing its value to a child process."""
+    _validate_reference(credential_target=target)
+    blob = _encode_credential_blob(value)
+    if sys.platform != "win32":
+        raise OSError("Windows Credential Manager is unavailable on this platform")
+    if not overwrite and read_windows_credential(target):
+        raise FileExistsError(f"Windows credential already exists: {target}")
+
+    advapi32 = ctypes.WinDLL("Advapi32.dll", use_last_error=True)
+    cred_write = advapi32.CredWriteW
+    cred_write.argtypes = [ctypes.POINTER(_CredentialW), wintypes.DWORD]
+    cred_write.restype = wintypes.BOOL
+    blob_buffer = (ctypes.c_ubyte * len(blob)).from_buffer_copy(blob)
+    credential = _CredentialW()
+    credential.Flags = 0
+    credential.Type = _CRED_TYPE_GENERIC
+    credential.TargetName = target
+    credential.Comment = "Virtual Companion managed credential"
+    credential.CredentialBlobSize = len(blob)
+    credential.CredentialBlob = ctypes.cast(
+        blob_buffer, ctypes.POINTER(ctypes.c_ubyte)
+    )
+    credential.Persist = _CRED_PERSIST_LOCAL_MACHINE
+    credential.AttributeCount = 0
+    credential.Attributes = None
+    credential.TargetAlias = None
+    credential.UserName = ""
+    try:
+        if not cred_write(ctypes.byref(credential), 0):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        ctypes.memset(ctypes.addressof(blob_buffer), 0, len(blob))
+
+    if read_windows_credential(target) != value:
+        raise OSError("Windows credential write verification failed")
+
+
+def provision_avatar_bridge_credential(target: str, *, overwrite: bool = False) -> None:
+    """Generate and persist a local bridge token without returning or printing it."""
+    token = secrets.token_urlsafe(32)
+    write_windows_credential(target, token, overwrite=overwrite)
+
+
 def _decode_credential_blob(blob: bytes) -> str:
     try:
         return blob.decode("utf-16-le").rstrip("\x00")
     except UnicodeDecodeError:
         return ""
+
+
+def _encode_credential_blob(value: str) -> bytes:
+    if not value or "\x00" in value or any(ord(character) < 32 for character in value):
+        raise ValueError("credential value is invalid")
+    blob = value.encode("utf-16-le")
+    if len(blob) > _MAX_CREDENTIAL_BLOB_BYTES:
+        raise ValueError("credential value is too long")
+    return blob
 
 
 def _validate_reference(*, env_name: str = "", credential_target: str = "") -> None:

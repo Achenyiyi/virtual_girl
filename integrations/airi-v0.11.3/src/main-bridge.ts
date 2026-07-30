@@ -40,7 +40,7 @@ export async function startAvatarBridgeServer(options: AvatarBridgeServerOptions
     throw new Error('avatar bridge token is required')
 
   const host = options.host ?? '127.0.0.1'
-  const port = options.port ?? 6121
+  const port = options.port ?? 6122
   const maxMessageBytes = options.maxMessageBytes ?? 1_048_576
   const maxConcurrentRequests = options.maxConcurrentRequestsPerConnection ?? 32
   if (host !== '127.0.0.1' && host !== '::1')

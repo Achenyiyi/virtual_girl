@@ -52,7 +52,7 @@ experience, and fails closed when a required dependency is unavailable.
 - [x] Generated audio is standards-compliant and device failures are reported accurately.
 - [x] The authenticated, versioned avatar bridge passes a local WebSocket integration scenario,
       including model operations, state synchronization, timeouts, reconnect, and shutdown.
-- [ ] AIRI/avatar rendering and emotion synchronization pass an end-to-end scenario.
+- [x] AIRI/avatar rendering and emotion synchronization pass an end-to-end scenario.
 
 ### Operations and quality
 
@@ -87,8 +87,9 @@ time-versioned preference keys, single-use action confirmation, provider timeout
 LLM readiness status, unknown no-data telemetry, and standards-compliant WAV generation.
 
 Active milestone: confirm revocation of the exposed credential, validate the interruptible voice
-path, and complete target-machine AIRI/voice acceptance. Mutating actions remain out of release
-scope until a separate OS isolation boundary exists.
+path, provision Authenticode signing, and turn the separately verified runtime/stage outputs into a
+single installable release. Mutating actions remain out of release scope until a separate OS
+isolation boundary exists.
 
 Voice implementation status: the code path now includes optional local faster-whisper ASR,
 contextual runtime generation, network-streamed Azure PCM, gapless sounddevice playback,
@@ -110,12 +111,14 @@ Renderer-side loading now invalidates stale model evidence. The patch leaves AIR
 MediaPipe patched dependency and pnpm metadata unchanged, passes `git apply --check`, and supports a
 frozen filtered install of the pinned stage application plus its 31 dependency workspaces with pnpm
 `10.33.0`. The Python runtime can now optionally supervise that Windows build: configuration pins
-both the Electron executable and `resources/app.asar`, child credentials are allowlisted, startup
+the Electron executable, `resources/app.asar`, and executable Godot sidecar; child credentials are
+allowlisted, startup
 uses a suspended process assigned to a kill-on-close Job Object, and runtime/acceptance cleanup owns
 the process tree. Managed bridge mode also disables AIRI's startup update check and every manual
 check/download/install path, preventing the reviewed pinned build from replacing itself with an
-unreviewed upstream release. Doctor validates the installation without launching a GUI. A real
-end-to-end run and visual acceptance remain. AIRI's
+unreviewed upstream release. Doctor validates the installation without launching a GUI. The real
+managed VRM run now passes all six machine checks and the captured frames pass visual review for
+model identity, textures, alpha, framing, animation, expression, and gesture. AIRI's
 remote plugin bootstrap is unfinished at the pinned upstream commit, so no undocumented remote API
 is claimed. See `docs/avatar_bridge_protocol.md`.
 
@@ -129,10 +132,28 @@ Avatar acceptance status: the release CLI now has an LLM-independent `--accept-a
 production stage extension must expose renderer-owned inspection evidence showing the configured
 Live2D/VRM model is loaded and visible, the full state was consumed by the render loop, the expected
 expression/gesture/proactive level was applied, and a later frame was presented. The inspection
-schema is strict and privacy-safe. This machine evidence intentionally does not claim pixel-level
-correctness; the gate remains open until AIRI is launched with an injected avatar token, the real
-`--accept-avatar-json` command passes against it, and an operator signs off the visible model,
-animation, expression, textures, alpha, and clipping.
+schema is strict and privacy-safe. On the target Windows machine, the real
+`--accept-avatar-json` command passed all six checks against the managed VRM and the captured frames
+received operator visual review. Release-specific JSON evidence and sign-off must still be generated
+for each tag as required by `docs/release_process.md`.
+
+Managed VRM status: the user-supplied `Nemesia_pajamas` model is now pinned by local path, size,
+SHA-256, fixed model ID, GLB 2.0 structure, and VRM metadata. Python validates it before process
+creation; AIRI independently validates it again, serves only the approved file through a private
+Electron protocol, registers it without IndexedDB persistence, and selects it as the default main
+stage model. The model binary remains a Git-ignored local user asset. Its embedded VRoid Hub license
+and the owner-confirmed model page allow corporate/personal commercial use, redistribution, and
+modification without attribution; the exact permissions are hash-bound in `managed-avatar.json`
+and documented in `docs/third_party_assets.md`. The patched renderer build completes, includes a
+real humanoid nod, and passed managed-model acceptance. Public distribution remains blocked until
+the AIRI-owned executables are Authenticode-signed and the per-tag evidence record is complete.
+
+Windows AIRI build status: the repository now has a separate 90-minute Windows workflow plus
+PowerShell build and artifact-verification scripts, with the AIRI commit, Node, pnpm, Electron,
+electron-builder, Godot, and verified download digests recorded in a machine-readable manifest.
+The workflow deliberately labels its output an unsigned acceptance candidate. It is not a release
+artifact and cannot pass the release verifier with `-RequireAuthenticode` until a real code-signing
+identity is provisioned.
 
 Action implementation status: a real Windows provider now exposes only `check_system_status`,
 `read_window_title`, and `read_active_app`. It has no shell or generic command surface and rejects
@@ -154,7 +175,10 @@ voice capture parameters, quiet hours, proactive budgets/cooldowns, Azure region
 retention) are now wired into runtime construction. Unsupported advertised providers were removed
 from the default YAML and unsafe or unimplemented configuration fails closed. The new `--doctor`
 family provides human and JSON preflight reports without exposing credential values; online Azure
-health uses the read-only voices-list endpoint. See `docs/deployment_preflight.md`.
+health uses the read-only voices-list endpoint. Production configuration now separates read-only
+config-relative AIRI/model assets from `%LOCALAPPDATA%` databases, logs, and audit state, so a
+Program Files installation does not require write access or redirect executable paths when the data
+root is overridden. See `docs/deployment_preflight.md`.
 
 Credential storage status: LLM, Azure TTS, and avatar token resolution now uses one constrained
 security boundary. A process environment value is an explicit temporary override; otherwise the
@@ -254,13 +278,13 @@ copy, a checkpointed live generation, atomic replacement, and a timestamped roll
 
 The action and perception features must remain disabled until their corresponding gates pass.
 
-## Verification evidence (2026-07-29)
+## Verification evidence (2026-07-30)
 
 - `ruff check companion tests scripts`: passed.
-- `mypy companion scripts`: passed in strict mode for 74 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 393 tests passed with 79.87%
+- `mypy companion scripts`: passed in strict mode for 75 source files.
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 455 tests passed with 78.96%
   total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 83%, voice
-  pipeline 85%, cloud LLM 63%, cloud TTS 81%, avatar acceptance 78%, action service 82%, and the
+  pipeline 85%, cloud LLM 64%, cloud TTS 81%, avatar acceptance 80%, action service 82%, and the
   action audit store 94%.
 - Windows Credential Manager integration passed focused resolution, precedence, validation, and
   native missing-target tests. Environment overrides take precedence; absent or unreadable Generic
@@ -279,10 +303,10 @@ The action and perception features must remain disabled until their correspondin
   negotiation, health, model list/validate/load, full state mapping, timeout, disconnect,
   reconnect, and shutdown all passed. Orchestrator readiness fails for an unhealthy configured
   avatar.
-- The avatar release gate passed against a real loopback WebSocket process implementing the
-  renderer-inspection extension, including strict schema parsing, model load, applied state and
-  command sequences, and presented-frame advancement. The real AIRI extension and visual sign-off
-  remain pending.
+- The avatar release gate passed all six checks against the real managed AIRI process and pinned
+  Nemesia VRM, including authenticated health, model availability/load, visible renderer evidence,
+  applied state and command sequences, and presented-frame advancement. Operator visual review of
+  the intended model, textures, framing, happy expression, animation, and nod also passed.
 - A real Win32 integration test executed the capability-confined system-status action and verified
   the persisted SQLite hash chain. Boundary tests proved `open_app`, parameter injection, forged
   risk/method values, and unknown actions cannot reach provider execution.
@@ -293,14 +317,15 @@ The action and perception features must remain disabled until their correspondin
   previously exposed key. Voice preflight currently fails only because
   `VirtualCompanion/AzureSpeech` is absent.
 - The explicit hardware doctor first downloaded/loaded the configured faster-whisper `base` model
-  in 34.3 seconds. With the cached model, the final implementation loaded it in 2.9 seconds,
-  completed a real CTranslate2 in-memory silence inference in 0.2 seconds, captured 15 microphone
+  in 34.3 seconds. With the cached model, the latest run loaded it in 4.8 seconds,
+  completed a real CTranslate2 in-memory silence inference in 0.2 seconds, captured 16 microphone
   frames through the production stream, and opened the production playback stream with 20 ms of
   silence. Credential-backed Azure synthesis remains pending.
 - The single hash lock now covers runtime, voice, development, and release tooling. CI installs
   only that lock plus the project with `--no-deps`. There is no secondary `requirements.txt`
   dependency entry point.
-- `python -m build --no-isolation`: wheel and sdist built successfully. Automated archive checks
+- The hash-locked `build 1.5.0`/`setuptools 83.0.0` toolchain built the wheel and sdist successfully.
+  Automated archive checks
   require the packaged YAML, metadata, and license; reject databases, tests, key-named files,
   bytecode, unsafe archive paths, and runtime data; and emit `SHA256SUMS`.
 - `pip-audit -r requirements.lock`: no known vulnerabilities in the complete locked dependency
@@ -326,12 +351,10 @@ The action and perception features must remain disabled until their correspondin
 
 ## Open release blockers
 
-- `deepseek_key.txt` is ignored and never read by the application, but the credential it once
-  contained must be revoked/rotated outside this repository before release.
-- The repository owner reports that a DeepSeek credential is now stored in Windows Credential
-  Manager, and the credential-backed online doctor succeeds without exposing its value. Release
-  sign-off must still confirm that every key previously exposed in conversation or files was revoked
-  and that the stored credential is a later replacement before marking this gate complete.
+- `deepseek_key.txt` is ignored and never read by the application. The DeepSeek credential most
+  recently supplied in chat was also disclosed before it was stored in Windows Credential Manager,
+  so it must be revoked again. Release sign-off must prove the stored credential is a later
+  replacement that never appeared in conversation, files, logs, or command arguments.
 - The repository owner enabled `Enable release immutability` on 2026-07-29. GitHub currently
   exposes this as a web setting rather than a public REST or GraphQL read field, so the first real
   Release must still prove it through GitHub's `isImmutable` result. The workflow fails closed and
@@ -347,19 +370,21 @@ The action and perception features must remain disabled until their correspondin
 - Local voice modules and default devices now pass doctor in the isolated release environment, but
   no credential-backed test has yet proven microphone capture, faster-whisper model loading,
   Azure streaming TTS, gapless playback, and barge-in latency together.
-- The pinned AIRI `v0.11.3` patch now includes concrete Live2D/VRM store and component-hook wiring,
-  and the runtime now has a pinned managed launcher, but the approved AIRI build hashes have not
-  been entered and AIRI has not been launched with an injected avatar token; no real
-  `--accept-avatar-json` or human visual acceptance run has completed.
-- Natural runtime one-shot gestures are wired with cooldown, deduplication, and failure quarantine,
-  but the target Live2D model must still be visually accepted for its supported motion names.
+- The pinned AIRI candidate, `app.asar`, Godot sidecar, and managed VRM now have approved hashes and
+  pass the real 6/6 avatar gate. Public release is still blocked because `airi.exe` and
+  `godot-stage.exe` lack Authenticode signatures and trusted timestamps. The release gate now
+  requires a privacy-safe per-tag `windows-stage.json`; the current unsigned candidate is proven to
+  fail closed without emitting that evidence.
+- The repository still publishes only the Python wheel and sdist. A unified, signed Windows desktop
+  installer that includes or provisions the reviewed AIRI stage and approved VRM is still required
+  before this can be handed to ordinary end users as one installable product.
 - Human security review and production sign-off remain pending.
 - The real Windows read-only provider is wired and validated, but file changes, messages,
   application control, input automation, installation, and other mutating actions remain
   unavailable. They require a separate OS isolation boundary and target-device acceptance tests.
-- The current system Python has an unrelated pre-existing `paddlex`/PyYAML version conflict; the
-  project's isolated hash-locked release environment passes `pip check`. Environment overrides are
-  not required because production credentials use Credential Manager. DeepSeek online health now
-  passes there; Azure credential-backed voice acceptance remains pending.
+- The global Anaconda development interpreter is not a supported deployment environment. The
+  project's isolated hash-locked release environment passes `pip check`; production credentials use
+  Credential Manager. DeepSeek online health has passed there, while Azure credential-backed voice
+  acceptance remains pending.
 - Dependency hashes were generated and verified on Windows/Python 3.12. Cross-platform releases
   are not claimed; regenerate and verify the lock on every newly supported OS/Python target.

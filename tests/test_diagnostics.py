@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import struct
 from contextlib import closing
 
 import pytest
@@ -14,6 +15,21 @@ from companion.diagnostics import DiagnosticStatus, render_diagnostic_report, ru
 from companion.memory.memory_service import MemoryServiceConfig
 from companion.providers.implementations.cloud_llm import CloudLLMConfig
 from companion.providers.implementations.cloud_tts import CloudTTSConfig
+
+
+def _write_test_vrm(path) -> bytes:
+    document = json.dumps(
+        {"asset": {"version": "2.0"}, "extensions": {"VRM": {}}},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    document += b" " * (-len(document) % 4)
+    content = (
+        struct.pack("<4sII", b"glTF", 2, 12 + 8 + len(document))
+        + struct.pack("<I4s", len(document), b"JSON")
+        + document
+    )
+    path.write_bytes(content)
+    return content
 
 
 @pytest.mark.asyncio
@@ -164,9 +180,17 @@ async def test_doctor_validates_managed_avatar_installation_without_launching(
     app_asar.parent.mkdir()
     app_asar_content = b"approved-airi-application"
     app_asar.write_bytes(app_asar_content)
+    godot = tmp_path / "resources" / "godot-stage" / "godot-stage.exe"
+    godot.parent.mkdir()
+    godot_content = b"MZapproved-godot-sidecar"
+    godot.write_bytes(godot_content)
+    model = tmp_path / "nemesia.vrm"
+    model_content = _write_test_vrm(model)
     config_path = tmp_path / "companion.yaml"
     config_path.write_text(
-        f"""providers:
+        f"""identity:
+  avatar_model_id: managed-nemesia
+providers:
   llm:
     type: cloud
     cloud:
@@ -180,13 +204,17 @@ async def test_doctor_validates_managed_avatar_installation_without_launching(
   avatar:
     enabled: true
     type: websocket_bridge
-    url: ws://127.0.0.1:6121/ws
+    url: ws://127.0.0.1:6122/ws
     auth_token_env: COMPANION_AVATAR_TOKEN
     launch:
       enabled: true
       executable_path: {executable.as_posix()}
       expected_sha256: {hashlib.sha256(content).hexdigest()}
       expected_app_asar_sha256: {hashlib.sha256(app_asar_content).hexdigest()}
+      expected_godot_sha256: {hashlib.sha256(godot_content).hexdigest()}
+      model_path: {model.as_posix()}
+      expected_model_sha256: {hashlib.sha256(model_content).hexdigest()}
+      model_id: managed-nemesia
 """,
         encoding="utf-8",
     )
@@ -224,9 +252,17 @@ async def test_online_doctor_does_not_launch_or_connect_managed_avatar(
     app_asar.parent.mkdir()
     app_asar_content = b"approved-airi-application"
     app_asar.write_bytes(app_asar_content)
+    godot = tmp_path / "resources" / "godot-stage" / "godot-stage.exe"
+    godot.parent.mkdir()
+    godot_content = b"MZapproved-godot-sidecar"
+    godot.write_bytes(godot_content)
+    model = tmp_path / "nemesia.vrm"
+    model_content = _write_test_vrm(model)
     config_path = tmp_path / "companion.yaml"
     config_path.write_text(
-        f"""providers:
+        f"""identity:
+  avatar_model_id: managed-nemesia
+providers:
   llm:
     type: cloud
     cloud:
@@ -240,13 +276,17 @@ async def test_online_doctor_does_not_launch_or_connect_managed_avatar(
   avatar:
     enabled: true
     type: websocket_bridge
-    url: ws://127.0.0.1:6121/ws
+    url: ws://127.0.0.1:6122/ws
     auth_token_env: COMPANION_AVATAR_TOKEN
     launch:
       enabled: true
       executable_path: {executable.as_posix()}
       expected_sha256: {hashlib.sha256(content).hexdigest()}
       expected_app_asar_sha256: {hashlib.sha256(app_asar_content).hexdigest()}
+      expected_godot_sha256: {hashlib.sha256(godot_content).hexdigest()}
+      model_path: {model.as_posix()}
+      expected_model_sha256: {hashlib.sha256(model_content).hexdigest()}
+      model_id: managed-nemesia
 """,
         encoding="utf-8",
     )

@@ -1,0 +1,58 @@
+name: AIRI Windows Build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "integrations/airi-v0.11.3/**"
+      - "scripts/build_airi_windows.ps1"
+      - "scripts/verify_airi_windows.ps1"
+      - ".github/workflows/airi-windows.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out companion repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.9.0"
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Set up Godot
+        uses: chickensoft-games/setup-godot@f166999204a4f2722c6fe042fbaa3b3ea0d9c789 # v2
+        with:
+          version: "4.6.2"
+          use-dotnet: true
+          include-templates: true
+
+      - name: Check out pinned AIRI source
+        shell: pwsh
+        run: |
+          git clone https://github.com/moeru-ai/airi.git "$env:RUNNER_TEMP\airi"
+          git -C "$env:RUNNER_TEMP\airi" checkout --detach dbf812488829a61cc2e95909e021b215704d066c
+
+      - name: Apply patch and build unpacked Windows app
+        shell: pwsh
+        run: |
+          .\scripts\build_airi_windows.ps1 -CheckoutPath "$env:RUNNER_TEMP\airi" -RepositoryRoot $env:GITHUB_WORKSPACE
+
+      - name: Upload unsigned acceptance candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: airi-v0.11.3-managed-${{ github.sha }}
+          path: ${{ runner.temp }}/airi/apps/stage-tamagotchi/dist/win-unpacked
+          if-no-files-found: error
+          retention-days: 7
