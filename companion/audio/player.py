@@ -208,7 +208,7 @@ class AudioPlayer:
     ) -> bytes:
         """Wrap raw PCM audio bytes in a WAV container.
 
-        This is needed because Azure TTS returns raw PCM, but most
+        This is needed because the cloud TTS provider returns raw PCM, but most
         system audio players expect a WAV container.
         """
         data_size = len(pcm_data)
@@ -244,7 +244,7 @@ class AudioPlayer:
 
         Args:
             pcm_data: Raw 16-bit mono PCM audio
-            sample_rate: Audio sample rate (default 24000 for Azure TTS)
+            sample_rate: Audio sample rate (default 24000 for cloud TTS)
             blocking: If True, wait for playback to finish
 
         Returns:

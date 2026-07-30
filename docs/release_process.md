@@ -112,7 +112,7 @@ into the bundle.
 
 Install the exact signed candidate normally. The installer creates a per-user installation under
 `%LOCALAPPDATA%\Programs\Virtual Companion` and provisions a random local Avatar Bridge credential
-without displaying it. It does not create or replace DeepSeek or Azure credentials. Store newly
+without displaying it. It does not create or replace DeepSeek or Fish Audio credentials. Store newly
 rotated provider credentials in Windows Credential Manager, then run the installed diagnostics and
 the voice/avatar acceptance commands described in `docs/deployment_preflight.md`.
 

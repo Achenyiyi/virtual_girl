@@ -1,4 +1,4 @@
-"""Contract tests for network-streamed Azure PCM synthesis."""
+"""Contract tests for network-streamed Fish Audio PCM synthesis."""
 
 from __future__ import annotations
 
@@ -72,7 +72,7 @@ async def test_cancel_closes_active_http_stream() -> None:
 
 @pytest.mark.asyncio
 async def test_missing_credential_fails_instead_of_yielding_silent_success() -> None:
-    provider = CloudTTSProvider(CloudTTSConfig(api_key_env="TEST_MISSING_AZURE_KEY"))
+    provider = CloudTTSProvider(CloudTTSConfig(api_key_env="TEST_MISSING_FISH_KEY"))
 
     with pytest.raises(CloudTTSError, match="credential"):
         await provider.synthesize(TTSRequest(text="hello", turn_id="missing"))
@@ -125,6 +125,45 @@ async def test_success_status_with_empty_audio_fails_closed() -> None:
             ]
     finally:
         await provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_fish_tts_request_uses_configured_model_and_pcm_payload() -> None:
+    seen: dict[str, object] = {}
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["headers"] = dict(request.headers)
+        seen["json"] = request.read().decode("utf-8")
+        return httpx.Response(200, request=request, content=b"a" * 4800)
+
+    provider = CloudTTSProvider(
+        CloudTTSConfig(
+            api_key="configured-test-credential",
+            model="s2.1-pro-free",
+            reference_id="voice_123",
+        )
+    )
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(capture))
+    try:
+        chunk = await provider.synthesize(
+            TTSRequest(text="你好", turn_id="fish-contract", sample_rate=24000)
+        )
+    finally:
+        await provider.shutdown()
+
+    assert chunk.audio_bytes == b"a" * 4800
+    assert seen["url"] == "https://api.fish.audio/v1/tts"
+    headers = seen["headers"]
+    assert isinstance(headers, dict)
+    assert headers["model"] == "s2.1-pro-free"
+    assert headers["content-type"] == "application/json"
+    auth_scheme, auth_value = headers["authorization"].split(" ", 1)
+    assert auth_scheme == "Bearer"
+    assert auth_value == "configured-test-credential"
+    assert '"format":"pcm"' in str(seen["json"]).replace(" ", "")
+    assert '"sample_rate":24000' in str(seen["json"]).replace(" ", "")
+    assert '"reference_id":"voice_123"' in str(seen["json"]).replace(" ", "")
 
 
 @pytest.mark.asyncio

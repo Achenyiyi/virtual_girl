@@ -90,14 +90,14 @@ authoritative event persistence, causal fact references, atomic memory rebuild, 
 time-versioned preference keys, single-use action confirmation, provider timeouts, strict
 LLM readiness status, unknown no-data telemetry, and standards-compliant WAV generation.
 
-Active milestone: revoke the credential disclosed in chat, validate the interruptible voice path
-with a never-disclosed DeepSeek key and Azure credential, provision Authenticode signing, produce
+Active milestone: revoke every credential disclosed in chat, validate the interruptible voice path
+with never-disclosed DeepSeek and Fish Audio credentials, provision Authenticode signing, produce
 the first signed installer from the real AIRI stage, and complete human security/visual sign-off.
 The unified installer pipeline itself is implemented and has passed an unsigned lifecycle test.
 Mutating actions remain out of release scope until a separate OS isolation boundary exists.
 
 Voice implementation status: the code path now includes optional local faster-whisper ASR,
-contextual runtime generation, network-streamed Azure PCM, gapless sounddevice playback,
+contextual runtime generation, network-streamed Fish Audio PCM, gapless sounddevice playback,
 played-audio confirmation, and barge-in cancellation. Voice turn admission is serialized while
 the explicit barge-in path remains concurrent; ASR/LLM/TTS/playback failures emit sanitized durable
 terminal events, cancellation cannot leave a started turn dangling, and interruption checks prevent
@@ -176,16 +176,16 @@ store and makes all subsequent actions fail closed. Detached tasks have eventual
 consumed, but operators must reconcile any unknown external side effect before restart.
 
 Deployment status: configuration values that were previously documentary-only (memory path,
-voice capture parameters, quiet hours, proactive budgets/cooldowns, Azure region, and event-log
+voice capture parameters, quiet hours, proactive budgets/cooldowns, Fish Audio TTS settings, and event-log
 retention) are now wired into runtime construction. Unsupported advertised providers were removed
 from the default YAML and unsafe or unimplemented configuration fails closed. The new `--doctor`
-family provides human and JSON preflight reports without exposing credential values; online Azure
-health uses the read-only voices-list endpoint. Production configuration now separates read-only
+family provides human and JSON preflight reports without exposing credential values; online Fish Audio
+health uses the read-only wallet credit endpoint. Production configuration now separates read-only
 config-relative AIRI/model assets from `%LOCALAPPDATA%` databases, logs, and audit state, so a
 Program Files installation does not require write access or redirect executable paths when the data
 root is overridden. See `docs/deployment_preflight.md`.
 
-Credential storage status: LLM, Azure TTS, and avatar token resolution now uses one constrained
+Credential storage status: LLM, Fish Audio TTS, and avatar token resolution now uses one constrained
 security boundary. A process environment value is an explicit temporary override; otherwise the
 runtime reads only the configured Windows Generic Credential through `CredReadW` and never
 enumerates the vault. Legacy LLM key-file loading was removed, and YAML rejects both inline and
@@ -320,12 +320,12 @@ The action and perception features must remain disabled until their correspondin
   doctor resolved DeepSeek from `VirtualCompanion/DeepSeek` and completed the provider health check
   without exposing the credential. This proves current credential usability, not revocation of any
   previously exposed key. Voice preflight currently fails only because
-  `VirtualCompanion/AzureSpeech` is absent.
+  `VirtualCompanion/FishAudio` has not yet passed credential-backed target-machine acceptance.
 - The explicit hardware doctor first downloaded/loaded the configured faster-whisper `base` model
   in 34.3 seconds. With the cached model, the latest run loaded it in 4.8 seconds,
   completed a real CTranslate2 in-memory silence inference in 0.2 seconds, captured 16 microphone
   frames through the production stream, and opened the production playback stream with 20 ms of
-  silence. Credential-backed Azure synthesis remains pending.
+  silence. Credential-backed Fish Audio synthesis remains pending.
 - `requirements.lock` pins runtime, voice, development, and release tooling for CI/build hosts;
   `requirements-runtime.lock` is a constrained runtime-only subset used inside the installer and
   isolated wheel checks. There is no unhashed `requirements.txt` dependency entry point.
@@ -388,7 +388,7 @@ The action and perception features must remain disabled until their correspondin
   and the audited `requirements.lock`.
 - Local voice modules and default devices now pass doctor in the isolated release environment, but
   no credential-backed test has yet proven microphone capture, faster-whisper model loading,
-  Azure streaming TTS, gapless playback, and barge-in latency together.
+  Fish Audio streaming TTS, gapless playback, and barge-in latency together.
 - The pinned AIRI candidate, `app.asar`, Godot sidecar, and managed VRM now have approved hashes and
   pass the real 6/6 avatar gate. Public release is still blocked because `airi.exe` and
   `godot-stage.exe` lack Authenticode signatures and trusted timestamps. The release gate now
@@ -405,6 +405,6 @@ The action and perception features must remain disabled until their correspondin
   later requires a separate OS isolation boundary and target-device acceptance tests.
 - End users run the bundled CPython runtime, not the global Anaconda interpreter. Trusted source
   builders require CPython 3.12 x64 plus the full hash lock. DeepSeek online health passed in an
-  isolated environment, while Azure credential-backed voice acceptance remains pending.
+  isolated environment, while Fish Audio credential-backed voice acceptance remains pending.
 - Dependency hashes were generated and verified on Windows/Python 3.12. Cross-platform releases
   are not claimed; regenerate and verify the lock on every newly supported OS/Python target.

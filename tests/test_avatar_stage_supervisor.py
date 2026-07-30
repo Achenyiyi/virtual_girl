@@ -204,7 +204,7 @@ def test_child_environment_excludes_credentials_proxy_and_debug_hooks() -> None:
             "PATH": "C:\\Windows",
             "USERPROFILE": "C:\\Users\\operator",
             "DEEPSEEK_API_KEY": "must-not-leak",
-            "AZURE_SPEECH_KEY": "must-not-leak",
+            "FISH_API_KEY": "must-not-leak",
             "HTTPS_PROXY": "must-not-leak",
             "NODE_OPTIONS": "must-not-leak",
             "ELECTRON_RUN_AS_NODE": "must-not-leak",
