@@ -44,6 +44,8 @@ def test_airi_build_script_pins_pnpm_for_builder_subprocesses() -> None:
     assert 'rollForward = "disable"' in script
     assert "$actualDotnetSdkVersion = (dotnet --version).Trim()" in script
     assert "$actualDotnetSdkVersion -ne $DotnetSdkVersion" in script
+    assert "$null -eq $godotVersionOutput" in script
+    assert "use the Windows console executable" in script
     assert "Godot 4.6.2 stable Mono is required" in script
     assert '[string]$GodotUserPath = ""' in script
     assert "GODOT_USER_HOME" not in script
@@ -73,6 +75,9 @@ def test_airi_workflow_pins_exact_dotnet_sdk() -> None:
 
     assert 'dotnet-version: "8.0.206"' in workflow
     assert 'dotnet-version: "8.0.x"' not in workflow
+    assert '"Godot_v4.6.2-stable_mono_*_console.exe"' in workflow
+    assert "$godotConsoles.Count -ne 1" in workflow
+    assert "-GodotPath $godotConsoles[0].FullName" in workflow
 
 
 def test_ci_secret_scan_excludes_only_pinned_digest_assignments() -> None:

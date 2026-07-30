@@ -42,7 +42,11 @@ $hasPinnedDotnetSdk = $installedDotnetSdks | Where-Object {
 if (-not $hasPinnedDotnetSdk) {
     throw ".NET SDK $DotnetSdkVersion is required for the approved Windows build"
 }
-$actualGodotVersion = ((& $GodotPath --version) | Select-Object -First 1).Trim()
+$godotVersionOutput = (& $GodotPath --version) | Select-Object -First 1
+if ($null -eq $godotVersionOutput) {
+    throw "Godot version check produced no output; use the Windows console executable"
+}
+$actualGodotVersion = $godotVersionOutput.ToString().Trim()
 if (-not $actualGodotVersion.StartsWith($GodotVersionPrefix)) {
     throw "Godot 4.6.2 stable Mono is required for the approved Windows build"
 }
