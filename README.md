@@ -2,7 +2,8 @@
 
 一个本地优先、云端增强、模块可替换、以事件日志为事实源的虚拟生命运行时系统。
 
-> 🚧 **预发布验证中** — Avatar 真实舞台验收已完成，语音端到端验收与签名发行仍待完成
+> 🚧 **预发布验证中** — Avatar 真实舞台与 Windows 安装链已验证；真实语音端到端、
+> 正式 Authenticode 签名和最终发行签字仍待完成
 
 ## 项目目标
 
@@ -57,12 +58,13 @@ docs/              # 文档
 python -m venv .venv
 .venv\Scripts\activate
 
-# 安装依赖
+# 开发、测试和发布工具依赖
 pip install --require-hashes -r requirements.lock
 pip install --no-deps -e .
 
-# 需要本地语音输入/流式播放时
-# requirements.lock 已包含 Windows 语音、开发和发布工具依赖
+# 仅运行应用或验证发布 wheel 时，改用更小的运行时锁
+# pip install --require-hashes -r requirements-runtime.lock
+# pip install --no-deps virtual_companion-0.1.0-py3-none-any.whl
 
 # 运行测试
 pytest tests/ -v
@@ -75,7 +77,15 @@ pip install -e ".[release]"
 pip-compile --extra voice --extra dev --extra release --strip-extras \
   --generate-hashes --allow-unsafe \
   --no-emit-index-url --output-file requirements.lock pyproject.toml
+pip-compile --constraint requirements.lock --extra voice --strip-extras \
+  --generate-hashes --allow-unsafe \
+  --no-emit-index-url --output-file requirements-runtime.lock pyproject.toml
 ```
+
+普通 Windows 用户不需要预装 Python。正式 Release 提供的签名安装包会携带固定的
+CPython 3.12.10、仅运行时依赖、AIRI 舞台和经许可审核的 VRM；完整构建与验收流程见
+[`docs/release_process.md`](docs/release_process.md)。在正式签名 Release 发布前，不要把 CI
+中的 Python wheel/sdist 当作面向最终用户的桌面安装包。
 
 开发或一次性验收可通过环境变量临时注入云端凭据：
 
@@ -193,7 +203,7 @@ Windows 行动能力同样默认关闭。目前只提供三个不可变、无参
 
 | Phase | 目标 | 状态 |
 |---|---|---|
-| Phase 0 | 事件 Schema、Provider 接口、协议、威胁模型 | 🟡 本地门禁通过，远程 CI 待跑 |
+| Phase 0 | 事件 Schema、Provider 接口、协议、威胁模型 | 🟢 本地与远程 CI 门禁通过 |
 | Phase 1 | 可打断 ASR→LLM→流式 TTS→播放 | 🟡 代码完成，真实设备验收待做 |
 | Phase 2 | 事件账本、五层记忆、时间化事实 | 🟢 自动化验证通过 |
 | Phase 3 | 连续情绪状态、表情/动作/TTS一致映射 | 🟢 AIRI 真实模型、表情、动作和呈现帧验收通过 |

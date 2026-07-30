@@ -72,6 +72,10 @@ experience, and fails closed when a required dependency is unavailable.
 - [x] Ruff and mypy pass for production code; critical production paths meet agreed coverage.
 - [x] Public releases require matching source/tag/wheel versions, prior green main CI, real voice
       and avatar evidence, human/security sign-off, checksums, and GitHub provenance attestations.
+- [x] The Windows installer build pins CPython/Inno inputs, requires one valid Code Signing identity
+      for AIRI, Godot, Setup, and Uninstall,
+      binds the approved AIRI/VRM stage into a full-file manifest, and proves silent install,
+      immutable runtime smoke checks, and uninstall before evidence can be emitted.
 - [x] A no-bypass repository ruleset prevents `v*` release tags from being updated or deleted;
       release publication fails closed unless GitHub marks the complete asset set immutable.
 - [x] GitHub CodeQL default setup covers Python and Actions, and Dependabot vulnerability alerts
@@ -86,10 +90,11 @@ authoritative event persistence, causal fact references, atomic memory rebuild, 
 time-versioned preference keys, single-use action confirmation, provider timeouts, strict
 LLM readiness status, unknown no-data telemetry, and standards-compliant WAV generation.
 
-Active milestone: confirm revocation of the exposed credential, validate the interruptible voice
-path, provision Authenticode signing, and turn the separately verified runtime/stage outputs into a
-single installable release. Mutating actions remain out of release scope until a separate OS
-isolation boundary exists.
+Active milestone: revoke the credential disclosed in chat, validate the interruptible voice path
+with a never-disclosed DeepSeek key and Azure credential, provision Authenticode signing, produce
+the first signed installer from the real AIRI stage, and complete human security/visual sign-off.
+The unified installer pipeline itself is implemented and has passed an unsigned lifecycle test.
+Mutating actions remain out of release scope until a separate OS isolation boundary exists.
 
 Voice implementation status: the code path now includes optional local faster-whisper ASR,
 contextual runtime generation, network-streamed Azure PCM, gapless sounddevice playback,
@@ -281,8 +286,8 @@ The action and perception features must remain disabled until their correspondin
 ## Verification evidence (2026-07-30)
 
 - `ruff check companion tests scripts`: passed.
-- `mypy companion scripts`: passed in strict mode for 75 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 455 tests passed with 78.96%
+- `mypy companion scripts`: passed in strict mode for 78 source files.
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 478 tests passed with 78.96%
   total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 83%, voice
   pipeline 85%, cloud LLM 64%, cloud TTS 81%, avatar acceptance 80%, action service 82%, and the
   action audit store 94%.
@@ -321,18 +326,28 @@ The action and perception features must remain disabled until their correspondin
   completed a real CTranslate2 in-memory silence inference in 0.2 seconds, captured 16 microphone
   frames through the production stream, and opened the production playback stream with 20 ms of
   silence. Credential-backed Azure synthesis remains pending.
-- The single hash lock now covers runtime, voice, development, and release tooling. CI installs
-  only that lock plus the project with `--no-deps`. There is no secondary `requirements.txt`
-  dependency entry point.
+- `requirements.lock` pins runtime, voice, development, and release tooling for CI/build hosts;
+  `requirements-runtime.lock` is a constrained runtime-only subset used inside the installer and
+  isolated wheel checks. There is no unhashed `requirements.txt` dependency entry point.
 - The hash-locked `build 1.5.0`/`setuptools 83.0.0` toolchain built the wheel and sdist successfully.
   Automated archive checks
   require the packaged YAML, metadata, and license; reject databases, tests, key-named files,
   bytecode, unsafe archive paths, and runtime data; and emit `SHA256SUMS`.
-- `pip-audit -r requirements.lock`: no known vulnerabilities in the complete locked dependency
-  tree.
+- `pip-audit -r requirements.lock` and `pip-audit -r requirements-runtime.lock`: no known
+  vulnerabilities in either locked dependency boundary.
 - A fresh Python 3.12 virtual environment installed `requirements.lock` with `--require-hashes`,
   installed the wheel with `--no-deps`, passed `pip check`, imported `companion`,
   `faster_whisper`, `sounddevice`, and `numpy`, and completed a CLI help smoke test.
+- The pinned CPython 3.12.10 embeddable archive was assembled with the runtime-only lock, current
+  wheel, and approved 30,688,684-byte Nemesia VRM. Its isolated interpreter imported `companion`,
+  CTranslate2, faster-whisper, NumPy, and sounddevice, validated the generated production config,
+  ran CLI help, and left the complete 5,110-file bundle unchanged after runtime checks.
+- Inno Setup 7.0.2 passed its pinned digest, `Pyrsys B.V.` signature, and timestamp checks. It
+  compiled that real runtime/VRM bundle from and into paths containing spaces; the resulting
+  103,882,173-byte unsigned lifecycle fixture installed silently, passed full bundle verification
+  both before and after runtime imports, uninstalled silently, and removed its installation
+  directory. Synthetic AIRI placeholder files were used because no release signing certificate is
+  currently available; this is not final signed-installer evidence.
 - A wheel-only installation loaded its packaged default YAML from an unrelated empty working
   directory; the sdist excludes tests and includes the hash-locked runtime requirements.
 - A wheel-only installation created a live WAL-backed memory database in a previously missing
@@ -348,6 +363,9 @@ The action and perception features must remain disabled until their correspondin
 - Release-source `detect-secrets` reported zero candidates. `pip-audit` reported no known
   vulnerabilities. A hash-locked isolated environment passed `pip check`; the newly built wheel
   installed there and loaded packaged configuration from an unrelated working directory.
+- AIRI's bridge suite passed 39 Node tests and TypeScript type checking. GitHub workflow syntax and
+  expressions passed checksum-verified `actionlint 1.7.12` in addition to PowerShell parser and YAML
+  parser checks.
 
 ## Open release blockers
 
@@ -358,7 +376,8 @@ The action and perception features must remain disabled until their correspondin
 - The repository owner enabled `Enable release immutability` on 2026-07-29. GitHub currently
   exposes this as a web setting rather than a public REST or GraphQL read field, so the first real
   Release must still prove it through GitHub's `isImmutable` result. The workflow fails closed and
-  removes any accidentally mutable Release.
+  leaves the mutable Draft Release in place for explicit inspection; it never silently deletes or
+  replaces staged assets.
 - The initial CodeQL default-setup analysis completed successfully on 2026-07-29. Its two
   clear-text-logging findings in the application startup path were addressed by keeping configured
   credential source identifiers out of those terminal messages; a subsequent main analysis must
@@ -375,16 +394,17 @@ The action and perception features must remain disabled until their correspondin
   `godot-stage.exe` lack Authenticode signatures and trusted timestamps. The release gate now
   requires a privacy-safe per-tag `windows-stage.json`; the current unsigned candidate is proven to
   fail closed without emitting that evidence.
-- The repository still publishes only the Python wheel and sdist. A unified, signed Windows desktop
-  installer that includes or provisions the reviewed AIRI stage and approved VRM is still required
-  before this can be handed to ordinary end users as one installable product.
+- The unified Windows installer and immutable Draft Release promotion pipeline now exist and the
+  runtime/VRM lifecycle passes unsigned validation. Public release remains blocked until a trusted
+  certificate signs and timestamps the real AIRI executable, Godot sidecar, final installer, and
+  generated uninstaller, producing matching `windows-stage.json` and `windows-installer.json`
+  evidence.
 - Human security review and production sign-off remain pending.
-- The real Windows read-only provider is wired and validated, but file changes, messages,
-  application control, input automation, installation, and other mutating actions remain
-  unavailable. They require a separate OS isolation boundary and target-device acceptance tests.
-- The global Anaconda development interpreter is not a supported deployment environment. The
-  project's isolated hash-locked release environment passes `pip check`; production credentials use
-  Credential Manager. DeepSeek online health has passed there, while Azure credential-backed voice
-  acceptance remains pending.
+- File changes, messages, application control, input automation, and other mutating actions remain
+  deliberately unavailable. This does not block the current read-only release scope; enabling them
+  later requires a separate OS isolation boundary and target-device acceptance tests.
+- End users run the bundled CPython runtime, not the global Anaconda interpreter. Trusted source
+  builders require CPython 3.12 x64 plus the full hash lock. DeepSeek online health passed in an
+  isolated environment, while Azure credential-backed voice acceptance remains pending.
 - Dependency hashes were generated and verified on Windows/Python 3.12. Cross-platform releases
   are not claimed; regenerate and verify the lock on every newly supported OS/Python target.

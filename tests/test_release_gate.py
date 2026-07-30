@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import zipfile
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -97,7 +98,7 @@ def _windows_stage(version: str) -> dict[str, object]:
             },
             "godot_stage_exe": {
                 "status": "Valid",
-                "signer_certificate_sha256": "6" * 64,
+                "signer_certificate_sha256": "4" * 64,
                 "timestamp_certificate_sha256": "7" * 64,
             },
         },
@@ -122,6 +123,38 @@ def _windows_stage(version: str) -> dict[str, object]:
     }
 
 
+def _windows_installer(version: str, stage_evidence_sha256: str) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "app_version": version,
+        "source_commit": "a" * 40,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "passed": True,
+        "installer": {
+            "filename": f"VirtualCompanion-{version}-windows-x64.exe",
+            "size_bytes": 123_456,
+            "sha256": "8" * 64,
+        },
+        "authenticode": {
+            "status": "Valid",
+            "signer_certificate_sha256": "4" * 64,
+            "timestamp_certificate_sha256": "9" * 64,
+        },
+        "bundle_manifest_sha256": "b" * 64,
+        "windows_stage_evidence_sha256": stage_evidence_sha256,
+        "smoke": {
+            "silent_install": True,
+            "bundle_integrity": True,
+            "config_validation": True,
+            "runtime_import": True,
+            "cli_help": True,
+            "uninstaller_authenticode": True,
+            "silent_uninstall": True,
+            "install_directory_removed": True,
+        },
+    }
+
+
 def _write_evidence(root: Path, tag: str) -> Path:
     evidence = root / tag
     evidence.mkdir(parents=True)
@@ -131,8 +164,16 @@ def _write_evidence(root: Path, tag: str) -> Path:
     (evidence / "avatar-acceptance.json").write_text(
         json.dumps(_acceptance("avatar", tag.removeprefix("v"))), encoding="utf-8"
     )
-    (evidence / "windows-stage.json").write_text(
+    stage_path = evidence / "windows-stage.json"
+    stage_path.write_text(
         json.dumps(_windows_stage(tag.removeprefix("v"))), encoding="utf-8"
+    )
+    stage_evidence_sha256 = sha256(stage_path.read_bytes()).hexdigest()
+    (evidence / "windows-installer.json").write_text(
+        json.dumps(
+            _windows_installer(tag.removeprefix("v"), stage_evidence_sha256)
+        ),
+        encoding="utf-8",
     )
     common = {"reviewer": "release owner", "observed_at": datetime.now(UTC).isoformat()}
     (evidence / "visual-signoff.json").write_text(
@@ -259,6 +300,67 @@ def test_release_evidence_requires_windows_stage(tmp_path) -> None:
     (evidence / "windows-stage.json").unlink()
 
     with pytest.raises(ValueError, match="windows-stage.json"):
+        verify_evidence(tmp_path, "v1.2.3")
+
+
+def test_release_evidence_requires_windows_installer(tmp_path) -> None:
+    evidence = _write_evidence(tmp_path, "v1.2.3")
+    (evidence / "windows-installer.json").unlink()
+
+    with pytest.raises(ValueError, match="windows-installer.json"):
+        verify_evidence(tmp_path, "v1.2.3")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("source_commit", "not-a-commit", "source_commit"),
+        ("passed", False, "did not pass"),
+    ],
+)
+def test_release_evidence_rejects_invalid_installer_report(
+    tmp_path, field, value, message
+) -> None:
+    evidence = _write_evidence(tmp_path, "v1.2.3")
+    path = evidence / "windows-installer.json"
+    installer = json.loads(path.read_text(encoding="utf-8"))
+    installer[field] = value
+    path.write_text(json.dumps(installer), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        verify_evidence(tmp_path, "v1.2.3")
+
+
+def test_release_evidence_requires_complete_installer_smoke(tmp_path) -> None:
+    evidence = _write_evidence(tmp_path, "v1.2.3")
+    path = evidence / "windows-installer.json"
+    installer = json.loads(path.read_text(encoding="utf-8"))
+    installer["smoke"]["silent_uninstall"] = False
+    path.write_text(json.dumps(installer), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="smoke.silent_uninstall"):
+        verify_evidence(tmp_path, "v1.2.3")
+
+
+def test_release_evidence_requires_one_windows_signing_identity(tmp_path) -> None:
+    evidence = _write_evidence(tmp_path, "v1.2.3")
+    path = evidence / "windows-installer.json"
+    installer = json.loads(path.read_text(encoding="utf-8"))
+    installer["authenticode"]["signer_certificate_sha256"] = "c" * 64
+    path.write_text(json.dumps(installer), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="one signing identity"):
+        verify_evidence(tmp_path, "v1.2.3")
+
+
+def test_release_evidence_binds_installer_to_windows_stage_evidence(tmp_path) -> None:
+    evidence = _write_evidence(tmp_path, "v1.2.3")
+    path = evidence / "windows-installer.json"
+    installer = json.loads(path.read_text(encoding="utf-8"))
+    installer["windows_stage_evidence_sha256"] = "f" * 64
+    path.write_text(json.dumps(installer), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match windows-stage.json"):
         verify_evidence(tmp_path, "v1.2.3")
 
 

@@ -1,3 +1,5 @@
 prune tests
+prune release-evidence
 include requirements.lock
+include requirements-runtime.lock
 global-exclude __pycache__ *.py[cod]
