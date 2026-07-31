@@ -171,7 +171,10 @@ python -m companion --doctor-online --voice-input
 # 自动化消费
 python -m companion --doctor-json --voice-input
 
-# 轮换凭据注入后的真实语音上线验收；交互提示走 stderr，结果写入 JSON
+# Windows 首选：同一终端实时中文引导，自动保存 JSON，并要求 8/8 全部通过
+.\scripts\run_voice_acceptance.ps1
+
+# 底层自动化入口：交互提示走 stderr，结构化结果走 stdout
 python -m companion --accept-voice-json 1>voice-acceptance.json
 
 # AIRI/Live2D/VRM 扩展启动后，验收模型加载、状态应用和真实渲染帧推进

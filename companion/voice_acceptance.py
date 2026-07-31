@@ -106,6 +106,16 @@ _VOICE_EVENT_TYPES = (
     "conversation.turn.failed",
 )
 
+_MAX_NO_SPEECH_ATTEMPTS = 3
+_COMPLETE_TURN_REQUEST = (
+    "请先只说一句好的并用句号结束，然后不换行，写一个至少三百字的故事，"
+    "中间只用逗号，最后才用句号，不要解释。"
+)
+_INTERRUPTION_REQUEST = (
+    "请先只说一句好的并用句号结束，然后不换行，写一个至少六百字的故事，"
+    "中间只用逗号，最后才用句号，不要解释。"
+)
+
 
 async def run_voice_acceptance(
     *,
@@ -134,33 +144,56 @@ async def run_voice_acceptance(
     for event_type in _VOICE_EVENT_TYPES:
         event_bus.subscribe(event_type, capture)
     try:
-        output("Speak a short sentence for the complete spoken-turn test.")
-        first_audio = await microphone.get_speech_audio(timeout=utterance_timeout_seconds)
-        if not _usable_utterance(first_audio, sample_rate):
-            return VoiceAcceptanceReport(
-                [
-                    VoiceAcceptanceCheck(
-                        "voice.complete_input",
-                        False,
-                        "No usable microphone utterance was captured before the deadline.",
-                    )
-                ]
+        output(
+            "【第一轮：完整播放】现在请对着麦克风清晰说出下面这句话，说完后保持安静，"
+            f"等待 AD学姐完整播放结束：\n{_COMPLETE_TURN_REQUEST}"
+        )
+        complete_deadline = time.monotonic() + (
+            utterance_timeout_seconds + turn_timeout_seconds
+        )
+        first_events: list[BaseEvent] = []
+        for attempt in range(1, _MAX_NO_SPEECH_ATTEMPTS + 1):
+            capture_timeout = _remaining_timeout(
+                complete_deadline, utterance_timeout_seconds
             )
-        assert first_audio is not None
+            first_audio = await microphone.get_speech_audio(timeout=capture_timeout)
+            if not _usable_utterance(first_audio, sample_rate):
+                return VoiceAcceptanceReport(
+                    [
+                        VoiceAcceptanceCheck(
+                            "voice.complete_input",
+                            False,
+                            "No usable microphone utterance was captured before the deadline.",
+                        )
+                    ]
+                )
+            assert first_audio is not None
 
-        first_start = len(events)
-        try:
-            await _run_turn(
-                pipeline.process_audio_input(first_audio), timeout_seconds=turn_timeout_seconds
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            return failed_voice_acceptance_report(
-                "voice.complete_turn",
-                f"The complete spoken turn failed: {type(exc).__name__}.",
-            )
-        first_events = events[first_start:]
+            first_start = len(events)
+            try:
+                await _run_turn(
+                    pipeline.process_audio_input(first_audio),
+                    timeout_seconds=_remaining_timeout(
+                        complete_deadline, turn_timeout_seconds
+                    ),
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                return failed_voice_acceptance_report(
+                    "voice.complete_turn",
+                    f"The complete spoken turn failed: {type(exc).__name__}.",
+                )
+            first_events = events[first_start:]
+            if not _is_no_speech_failure(first_events):
+                break
+            if (
+                attempt == _MAX_NO_SPEECH_ATTEMPTS
+                or time.monotonic() >= complete_deadline
+            ):
+                break
+            output("没有识别到语音，请立即把上面的完整句子再说一次。")
+
         checks = _complete_turn_checks(
             first_events,
             snapshot=pipeline.get_voice_acceptance_snapshot(),
@@ -169,28 +202,65 @@ async def run_voice_acceptance(
         if not all(check.passed for check in checks):
             return VoiceAcceptanceReport(checks)
 
-        output("Speak another sentence to start the interruption test.")
-        second_audio = await microphone.get_speech_audio(timeout=utterance_timeout_seconds)
-        if not _usable_utterance(second_audio, sample_rate):
-            checks.append(
-                VoiceAcceptanceCheck(
-                    "voice.interrupt_input",
-                    False,
-                    "No usable microphone utterance was captured for the interruption test.",
-                )
-            )
-            return VoiceAcceptanceReport(checks)
-        assert second_audio is not None
-
+        output(
+            "【第二轮：打断】现在请对着麦克风清晰说出下面这句话，说完后保持安静，"
+            f"等待 AD学姐开始播放：\n{_INTERRUPTION_REQUEST}"
+        )
+        interruption_deadline = time.monotonic() + (
+            utterance_timeout_seconds + turn_timeout_seconds
+        )
         second_start = len(events)
-        response_task = asyncio.create_task(pipeline.process_audio_input(second_audio))
+        response_task: asyncio.Task[str] | None = None
         barge_in_task: asyncio.Task[bytes | None] | None = None
         try:
-            speaking = await _wait_until_speaking(
-                pipeline, response_task, timeout_seconds=turn_timeout_seconds
-            )
-            if not speaking:
+            for attempt in range(1, _MAX_NO_SPEECH_ATTEMPTS + 1):
+                capture_timeout = _remaining_timeout(
+                    interruption_deadline, utterance_timeout_seconds
+                )
+                second_audio = await microphone.get_speech_audio(timeout=capture_timeout)
+                if not _usable_utterance(second_audio, sample_rate):
+                    checks.append(
+                        VoiceAcceptanceCheck(
+                            "voice.interrupt_input",
+                            False,
+                            "No usable microphone utterance was captured "
+                            "for the interruption test.",
+                        )
+                    )
+                    return VoiceAcceptanceReport(checks)
+                assert second_audio is not None
+
+                second_start = len(events)
+                response_task = asyncio.create_task(
+                    pipeline.process_audio_input(second_audio)
+                )
+                speaking = await _wait_until_speaking(
+                    pipeline,
+                    response_task,
+                    timeout_seconds=_remaining_timeout(
+                        interruption_deadline, turn_timeout_seconds
+                    ),
+                )
+                if speaking:
+                    break
+
                 await _settle_task(response_task)
+                second_events = events[second_start:]
+                response_task = None
+                if not _is_no_speech_failure(second_events):
+                    checks.append(_interruption_setup_failure(second_events))
+                    return VoiceAcceptanceReport(checks)
+                if (
+                    attempt == _MAX_NO_SPEECH_ATTEMPTS
+                    or time.monotonic() >= interruption_deadline
+                ):
+                    checks.append(_interruption_setup_failure(second_events))
+                    return VoiceAcceptanceReport(checks)
+                output(
+                    "没有识别到语音，请立即把第二轮的完整句子再说一次。"
+                )
+
+            if response_task is None:
                 checks.append(_interruption_setup_failure(events[second_start:]))
                 return VoiceAcceptanceReport(checks)
 
@@ -218,7 +288,7 @@ async def run_voice_acceptance(
                     checks.append(_interruption_setup_failure(events[second_start:]))
                     return VoiceAcceptanceReport(checks)
 
-            output("The companion is speaking. Speak now to test barge-in.")
+            output("【现在打断】AD学姐已经开始说话，请立刻持续说话 2 至 3 秒。")
             detected_sequence = await microphone.wait_for_speech_start(
                 speech_start_sequence, timeout=utterance_timeout_seconds
             )
@@ -313,7 +383,8 @@ async def run_voice_acceptance(
             )
             return VoiceAcceptanceReport(checks)
         finally:
-            _cancel_and_detach(response_task)
+            if response_task is not None:
+                _cancel_and_detach(response_task)
             if barge_in_task is not None:
                 _cancel_and_detach(barge_in_task)
     finally:
@@ -378,6 +449,20 @@ async def _wait_until_speaking(
 
 def _usable_utterance(audio: bytes | None, sample_rate: int) -> bool:
     return audio is not None and len(audio) >= sample_rate * 2 // 10
+
+
+def _remaining_timeout(deadline: float, maximum_seconds: float) -> float:
+    return max(0.0, min(maximum_seconds, deadline - time.monotonic()))
+
+
+def _is_no_speech_failure(events: list[BaseEvent]) -> bool:
+    terminals = _terminal_events(events)
+    return (
+        len(terminals) == 1
+        and isinstance(terminals[0], ConversationTurnFailedEvent)
+        and terminals[0].stage == "asr"
+        and terminals[0].error_type == "no_speech_recognized"
+    )
 
 
 def _complete_turn_checks(
@@ -448,7 +533,10 @@ def _complete_turn_checks(
             incremental_ok,
             "The first played audio began before the LLM stream completed."
             if incremental_ok
-            else "The first played audio did not begin before the LLM stream completed.",
+            else (
+                "The first played audio did not begin before the LLM stream completed; "
+                "repeat the gate using the supplied multi-sentence request."
+            ),
         )
     )
     continuity_ok = (
