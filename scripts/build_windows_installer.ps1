@@ -101,7 +101,8 @@ if ($LASTEXITCODE -ne 0 -or $sourceCommit -cnotmatch '^[0-9a-f]{40}$') {
     throw "Unable to resolve the installer source commit"
 }
 
-$hostPython = Get-Command python -CommandType Application -ErrorAction Stop
+$hostPython = Get-Command python -CommandType Application -ErrorAction Stop |
+    Select-Object -First 1
 $script:ResolvedPython = (Resolve-Path -LiteralPath $hostPython.Source).Path
 $pythonProbeJson = & $script:ResolvedPython -I -s -c @'
 import json, platform, struct, sys

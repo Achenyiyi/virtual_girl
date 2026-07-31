@@ -86,10 +86,10 @@ jobs:
           python -m pip_audit -r requirements-runtime.lock
           python -m pip_audit -r requirements.lock
 
-      - name: Build release artifacts
+      - name: Build package for validation
         run: python -m build --no-isolation
 
-      - name: Verify release artifact contents
+      - name: Verify package contents
         run: python scripts/verify_release_artifacts.py dist
 
       - name: Test the built wheel in isolation
@@ -112,11 +112,3 @@ jobs:
           } finally {
             Pop-Location
           }
-
-      - name: Upload verified release artifacts
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: virtual-companion-${{ github.sha }}
-          path: dist/*
-          if-no-files-found: error
-          retention-days: 14
