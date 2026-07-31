@@ -44,7 +44,7 @@ jobs:
           git clone https://github.com/moeru-ai/airi.git "$env:RUNNER_TEMP\airi"
           git -C "$env:RUNNER_TEMP\airi" checkout --detach dbf812488829a61cc2e95909e021b215704d066c
 
-      - name: Apply patch and build unpacked Windows app
+      - name: Apply patch and build unpacked Windows app for validation
         shell: pwsh
         run: |
           $godotConsoles = @(
@@ -54,11 +54,3 @@ jobs:
             throw "Expected exactly one Godot 4.6.2 Mono console executable, found $($godotConsoles.Count)"
           }
           .\scripts\build_airi_windows.ps1 -CheckoutPath "$env:RUNNER_TEMP\airi" -RepositoryRoot $env:GITHUB_WORKSPACE -GodotPath $godotConsoles[0].FullName
-
-      - name: Upload unsigned acceptance candidate
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: airi-v0.11.3-managed-${{ github.sha }}
-          path: ${{ runner.temp }}/airi/apps/stage-tamagotchi/dist/win-unpacked
-          if-no-files-found: error
-          retention-days: 7

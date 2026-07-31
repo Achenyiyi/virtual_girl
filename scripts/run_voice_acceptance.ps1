@@ -32,7 +32,9 @@ if ($IsolatedRuntime -and -not ($explicitPython -and $explicitConfig -and $expli
 }
 
 if ([string]::IsNullOrWhiteSpace($PythonPath)) {
-    $python = (Get-Command python -ErrorAction Stop).Source
+    $pythonCommand = Get-Command python -CommandType Application -ErrorAction Stop |
+        Select-Object -First 1
+    $python = (Resolve-Path -LiteralPath $pythonCommand.Source).Path
 } else {
     $python = (Resolve-Path -LiteralPath $PythonPath).Path
 }

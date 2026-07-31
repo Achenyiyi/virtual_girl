@@ -6,11 +6,12 @@ Deliver a Windows virtual-companion application that is safe for real user data,
 recovers cleanly after restart or failure, provides a complete interruptible voice
 experience, and fails closed when a required dependency is unavailable.
 
-## Release gates
+## Source-deployment gates
 
 ### Security and privacy
 
-- [ ] No plaintext API credentials exist in the project or release artifacts.
+- [x] No plaintext API credentials exist in tracked source or public downloads; CI secret scanning
+      reports zero candidates, and local credentials remain outside Git.
 - [x] Production credentials come from an environment override or native Windows Credential
       Manager lookup; YAML and key-file credentials are rejected.
 - [x] Secret scanning and dependency vulnerability scanning pass for release sources and the
@@ -68,33 +69,34 @@ experience, and fails closed when a required dependency is unavailable.
       512 MiB free before providers start.
 - [x] An unclean-exit marker forces full SQLite integrity and ownership/schema validation before
       cloud startup, and is cleared only after every runtime/provider shutdown succeeds.
-- [x] Unit, integration, recovery, security, and packaged-wheel suites pass in Windows CI.
+- [x] Unit, integration, recovery, security, and package-validation suites pass in Windows CI.
 - [x] Ruff and mypy pass for production code; critical production paths meet agreed coverage.
-- [x] Public releases require matching source/tag/wheel versions, prior green main CI, real voice
-      and avatar evidence, human/security sign-off, checksums, and GitHub provenance attestations.
+- [x] Public GitHub distribution is source-only: no Releases, uploaded Actions artifacts, Windows
+      binaries, wheel/sdist downloads, package-registry publication, or binary attestations.
 - [x] The Windows installer build pins CPython/Inno inputs, requires one valid Code Signing identity
       for AIRI, Godot, Setup, and Uninstall,
       binds the approved AIRI/VRM stage into a full-file manifest, and proves silent install,
-      immutable runtime smoke checks, and uninstall before evidence can be emitted.
-- [x] A no-bypass repository ruleset prevents `v*` release tags from being updated or deleted;
-      release publication fails closed unless GitHub marks the complete asset set immutable.
+      immutable runtime smoke checks, and uninstall before evidence can be emitted. It is dormant
+      under source-only publication and retains no unsigned bypass.
+- [x] Protected `main` requires the `quality` check and blocks force pushes/deletion; source changes
+      merge only through the reviewed branch workflow.
 - [x] GitHub CodeQL default setup covers Python and Actions, and Dependabot vulnerability alerts
       and security updates are enabled.
 
 ## Current status
 
-Status: **not production ready**.
+Status: **ready for source-only GitHub publication and personal local use**.
 
 Completed in the current milestone: environment/Credential Manager credential resolution,
 authoritative event persistence, causal fact references, atomic memory rebuild, stable
 time-versioned preference keys, single-use action confirmation, provider timeouts, strict
 LLM readiness status, unknown no-data telemetry, and standards-compliant WAV generation.
 
-Active milestone: revoke every credential disclosed in chat, retain per-tag voice/avatar evidence
-with never-disclosed DeepSeek and Fish Audio credentials, provision Authenticode signing, produce the
-first signed installer from the real AIRI stage, and complete human security/visual sign-off. The
-unified installer pipeline itself is implemented and has passed an unsigned lifecycle test. Mutating
-actions remain out of release scope until a separate OS isolation boundary exists.
+Current milestone: publish only reviewed source through protected `main`, retain the user's current
+DeepSeek and Fish Audio credentials solely in the local Windows credential boundary, and keep all
+program binaries and build artifacts off GitHub. The unified installer pipeline remains dormant and
+still requires Authenticode if binary distribution is reconsidered. Mutating actions remain out of
+scope until a separate OS isolation boundary exists.
 
 Voice implementation status: the code path now includes optional local faster-whisper ASR,
 contextual runtime generation, network-streamed Fish Audio PCM, gapless sounddevice playback,
@@ -102,10 +104,11 @@ played-audio confirmation, and barge-in cancellation. Voice turn admission is se
 the explicit barge-in path remains concurrent; ASR/LLM/TTS/playback failures emit sanitized durable
 terminal events, cancellation cannot leave a started turn dangling, and interruption checks prevent
 late provider or event commits from resuming generation or playback. On the target Windows machine,
-the credential-backed path passed `--accept-voice-json` with the current free Fish budget: first
-audio 5,592 ms against a 30,000 ms target and interruption 27 ms against a 300 ms target. This proves
-current connectivity and barge-in behavior; paid-model low-latency targets must be revalidated after
-switching away from the free model.
+the final credential-backed path passed all eight `--accept-voice-json` checks with the current free
+Fish budget: first audio 2,248 ms against a 30,000 ms target and interruption 19 ms against a 300 ms
+target. This proves current connectivity, incremental playback, history accounting, and barge-in
+behavior; paid-model low-latency targets must be revalidated after switching away from the free
+model.
 
 Avatar implementation status: the Python runtime now owns a versioned, authenticated WebSocket
 bridge with bounded messages and timeouts, concurrent request correlation, model validation/load,
@@ -136,14 +139,14 @@ recently repeated gesture in favor of the next eligible suggestion, and quaranti
 for five minutes. Startup and full-state synchronization never trigger one-shot gestures, and an
 unsupported model motion is logged without changing the already-completed dialogue result.
 
-Avatar acceptance status: the release CLI now has an LLM-independent `--accept-avatar` gate. A
+Avatar acceptance status: the runtime CLI now has an LLM-independent `--accept-avatar` gate. A
 production stage extension must expose renderer-owned inspection evidence showing the configured
 Live2D/VRM model is loaded and visible, the full state was consumed by the render loop, the expected
 expression/gesture/proactive level was applied, and a later frame was presented. The inspection
 schema is strict and privacy-safe. On the target Windows machine, the real
 `--accept-avatar-json` command passed all six checks against the managed VRM and the captured frames
-received operator visual review. Release-specific JSON evidence and sign-off must still be generated
-for each tag as required by `docs/release_process.md`.
+received operator visual review. The privacy-safe report remains a local, Git-ignored personal-use
+record and is not a GitHub release asset.
 
 Managed VRM status: the user-supplied `Nemesia_pajamas` model is now pinned by local path, size,
 SHA-256, fixed model ID, GLB 2.0 structure, and VRM metadata. Python validates it before process
@@ -153,15 +156,15 @@ stage model. The model binary remains a Git-ignored local user asset. Its embedd
 and the owner-confirmed model page allow corporate/personal commercial use, redistribution, and
 modification without attribution; the exact permissions are hash-bound in `managed-avatar.json`
 and documented in `docs/third_party_assets.md`. The patched renderer build completes, includes a
-real humanoid nod, and passed managed-model acceptance. Public distribution remains blocked until
-the AIRI-owned executables are Authenticode-signed and the per-tag evidence record is complete.
+real humanoid nod, and passed managed-model acceptance. The VRM and AIRI executables remain local and
+are not part of the source-only GitHub publication.
 
 Windows AIRI build status: the repository now has a separate 90-minute Windows workflow plus
 PowerShell build and artifact-verification scripts, with the AIRI commit, Node, pnpm, Electron,
 electron-builder, Godot, and verified download digests recorded in a machine-readable manifest.
-The workflow deliberately labels its output an unsigned acceptance candidate. It is not a release
-artifact and cannot pass the release verifier with `-RequireAuthenticode` until a real code-signing
-identity is provisioned.
+The workflow builds an unsigned acceptance candidate only inside its ephemeral runner and does not
+upload it. It is not a public artifact. If binary distribution is restored, it cannot pass the
+release verifier with `-RequireAuthenticode` until a real code-signing identity is provisioned.
 
 Action implementation status: a real Windows provider now exposes only `check_system_status`,
 `read_window_title`, and `read_active_app`. It has no shell or generic command surface and rejects
@@ -299,21 +302,20 @@ copy, a checkpointed live generation, atomic replacement, and a timestamped roll
 
 The action and perception features must remain disabled until their corresponding gates pass.
 
-## Verification evidence (2026-07-30)
+## Verification evidence (2026-07-31)
 
 - `ruff check companion tests scripts`: passed.
-- `mypy companion scripts`: passed in strict mode for 78 source files.
-- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 478 tests passed with 78.96%
+- `mypy companion scripts`: passed in strict mode for 79 source files.
+- `pytest -q --cov=companion --cov-report=term --cov-fail-under=70`: 530 tests passed with 79.35%
   total coverage; the Windows read-only provider is 92%, WebSocket avatar provider 83%, voice
-  pipeline 85%, cloud LLM 64%, cloud TTS 81%, avatar acceptance 80%, action service 82%, and the
+  pipeline 81%, cloud LLM 65%, cloud TTS 84%, avatar acceptance 80%, action service 82%, and the
   action audit store 94%.
 - Windows Credential Manager integration passed focused resolution, precedence, validation, and
   native missing-target tests. Environment overrides take precedence; absent or unreadable Generic
   Credentials fail closed without enumerating the vault or exposing credential content.
 - Configuration loading rejects unknown fields at every supported nesting level, preventing
   misspelled security, timeout, audit, provider, and proactive-policy options from silently falling
-  back to defaults. The side-effect-free `--validate-config` command is enforced by both CI and the
-  tag release workflow.
+  back to defaults. The side-effect-free `--validate-config` command is enforced by CI.
 - The Windows single-instance boundary passed same-process and real child-process contention tests,
   profile-path normalization, independent-profile, idempotent release, and pre-provider CLI exit
   cases. The named mutex discloses only a truncated SHA-256 digest.
@@ -324,18 +326,18 @@ The action and perception features must remain disabled until their correspondin
   negotiation, health, model list/validate/load, full state mapping, timeout, disconnect,
   reconnect, and shutdown all passed. Orchestrator readiness fails for an unhealthy configured
   avatar.
-- The avatar release gate passed all six checks against the real managed AIRI process and pinned
+- The avatar acceptance gate passed all six checks against the real managed AIRI process and pinned
   Nemesia VRM, including authenticated health, model availability/load, visible renderer evidence,
   applied state and command sequences, and presented-frame advancement. Operator visual review of
   the intended model, textures, framing, happy expression, animation, and nod also passed.
 - A real Win32 integration test executed the capability-confined system-status action and verified
   the persisted SQLite hash chain. Boundary tests proved `open_app`, parameter injection, forged
   risk/method values, and unknown actions cannot reach provider execution.
-- On the target machine's isolated release environment, doctor found faster-whisper, NumPy,
+- On the target machine's isolated local environment, doctor found faster-whisper, NumPy,
   sounddevice, a usable default microphone, and a usable default output device. A separate online
   doctor resolved DeepSeek from `VirtualCompanion/DeepSeek` and Fish Audio from
   `VirtualCompanion/FishAudio`, then completed provider health checks without exposing credentials.
-  This proves current credential usability, not revocation of any previously exposed key.
+  This proves the current locally accepted credentials are usable.
 - The explicit hardware doctor first downloaded/loaded the configured faster-whisper `base` model
   in 34.3 seconds. With the cached model, the latest run loaded it in 4.8 seconds,
   completed a real CTranslate2 in-memory silence inference in 0.2 seconds, captured 16 microphone
@@ -370,58 +372,39 @@ The action and perception features must remain disabled until their correspondin
   directory, produced and verified an online backup from an unrelated working directory, and then
   verified the backup again after its source YAML was removed. Corrupt, incomplete, same-path,
   in-memory, and accidental-overwrite cases are rejected by tests.
-- `.github/workflows/ci.yml` reproduces lint, type, coverage, secret, vulnerability, artifact,
+- `.github/workflows/ci.yml` reproduces lint, type, coverage, secret, vulnerability, package-content,
   checksum, and isolated-wheel-install gates on Windows. Third-party Actions are pinned to full
-  immutable commit SHAs and the job has read-only repository permissions. GitHub Actions run
-  `30410669222` passed every gate on the remote `main` branch and uploaded verified artifacts.
+  immutable commit SHAs and the job has read-only repository permissions. Package outputs remain
+  ephemeral and are not uploaded for download.
 - Git history now has a clean `main` baseline commit. Ignored local credentials, memory data,
   virtual environments, and build artifacts were excluded before staging.
-- Release-source `detect-secrets` reported zero candidates. `pip-audit` reported no known
+- Tracked-source `detect-secrets` reported zero candidates. `pip-audit` reported no known
   vulnerabilities. A hash-locked isolated environment passed `pip check`; the newly built wheel
   installed there and loaded packaged configuration from an unrelated working directory.
 - AIRI's bridge suite passed 39 Node tests and TypeScript type checking. GitHub workflow syntax and
   expressions passed checksum-verified `actionlint 1.7.12` in addition to PowerShell parser and YAML
   parser checks.
 
-## Open release blockers
+## Remaining boundaries and future blockers
 
-- `deepseek_key.txt` is ignored and never read by the application. The DeepSeek credential most
-  recently supplied in chat was also disclosed before it was stored in Windows Credential Manager,
-  so it must be revoked again. Release sign-off must prove the stored credential is a later
-  replacement that never appeared in conversation, files, logs, or command arguments.
-- The repository owner enabled `Enable release immutability` on 2026-07-29. GitHub currently
-  exposes this as a web setting rather than a public REST or GraphQL read field, so the first real
-  Release must still prove it through GitHub's `isImmutable` result. The workflow fails closed and
-  leaves the mutable Draft Release in place for explicit inspection; it never silently deletes or
-  replaces staged assets.
-- The initial CodeQL default-setup analysis completed successfully on 2026-07-29. Its two
-  clear-text-logging findings in the application startup path were addressed by keeping configured
-  credential source identifiers out of those terminal messages; a subsequent main analysis must
-  confirm that those high-severity alerts close.
-- Dependabot vulnerability alerts and security updates are enabled. The initial dependency-graph
-  job exposed an incompatible `requirements.txt` indirection and that compatibility wrapper was
-  removed; a subsequent main-branch graph job must confirm successful ingestion of `pyproject.toml`
-  and the audited `requirements.lock`.
-- Local voice modules, default devices, credential-backed Fish Audio synthesis, gapless playback,
-  and barge-in latency now pass together on the target machine. Each public tag still needs fresh
-  privacy-safe `voice-acceptance.json` evidence generated from the signed installed runtime.
-- The pinned AIRI candidate, `app.asar`, Godot sidecar, and managed VRM now have approved hashes and
-  pass the real 6/6 avatar gate. Public release is still blocked because `airi.exe` and
-  `godot-stage.exe` lack Authenticode signatures and trusted timestamps. The release gate now
-  requires a privacy-safe per-tag `windows-stage.json`; the current unsigned candidate is proven to
-  fail closed without emitting that evidence.
-- The unified Windows installer and immutable Draft Release promotion pipeline now exist and the
-  runtime/VRM lifecycle passes unsigned validation. Public release remains blocked until a trusted
-  certificate signs and timestamps the real AIRI executable, Godot sidecar, final installer, and
-  generated uninstaller, producing matching `windows-stage.json` and `windows-installer.json`
-  evidence.
-- Human security review and production sign-off remain pending.
+- The current public surface is source-only. GitHub must continue to have no Release, uploaded
+  program artifact, package publication, or binary attestation; historical downloadable program
+  artifacts should be removed after the source-only workflow reaches `main`.
+- The current DeepSeek and Fish Audio credentials are accepted for personal local use and remain in
+  Windows Credential Manager. Their values must never enter source, reports, logs, or command
+  arguments; revoke them immediately if compromise is suspected.
+- Local voice modules, default devices, Fish Audio synthesis, gapless playback, history accounting,
+  and barge-in passed together 8/8 on the target machine. The local privacy-safe report is ignored by
+  Git and is not public release evidence.
+- The pinned AIRI candidate, `app.asar`, Godot sidecar, and managed VRM have approved hashes and pass
+  the real 6/6 avatar gate plus operator visual confirmation. They remain local assets and are not
+  uploaded to GitHub.
+- Authenticode is not required for publishing source or running it personally. It becomes mandatory
+  again before any future public Windows executable or installer distribution; the dormant build
+  and verifier scripts intentionally provide no unsigned bypass.
 - File changes, messages, application control, input automation, and other mutating actions remain
-  deliberately unavailable. This does not block the current read-only release scope; enabling them
-  later requires a separate OS isolation boundary and target-device acceptance tests.
-- End users run the bundled CPython runtime, not the global Anaconda interpreter. Trusted source
-  builders require CPython 3.12 x64 plus the full hash lock. DeepSeek and Fish Audio online health
-  passed in an isolated environment; public release still requires never-disclosed replacement keys
-  and per-tag evidence from the signed installer.
-- Dependency hashes were generated and verified on Windows/Python 3.12. Cross-platform releases
-  are not claimed; regenerate and verify the lock on every newly supported OS/Python target.
+  deliberately unavailable. Enabling them later requires a separate OS isolation boundary and
+  target-device acceptance tests.
+- Dependency hashes were generated and verified on Windows/Python 3.12. Cross-platform binary
+  deployment is not claimed; regenerate and verify the lock on every newly supported OS/Python
+  target.

@@ -30,7 +30,7 @@ back to defaults.
 
 ## Doctor commands
 
-Run from the exact Python environment used to start the release:
+Run from the exact local Python environment used to start the application:
 
 ```powershell
 python -m companion --doctor
@@ -51,7 +51,7 @@ No diagnostic message or JSON field includes credential values.
 
 ## Windows credential setup
 
-For an installed desktop release, store each rotated secret as a Windows **Generic Credential**
+For personal local use, store each secret as a Windows **Generic Credential**
 for the same Windows account that runs the companion. Open **Credential Manager > Windows
 Credentials > Add a generic credential** and use these default Internet or network addresses:
 
@@ -90,7 +90,7 @@ the user's credential vault.
 The interactive runtime, voice acceptance gate, and avatar acceptance gate acquire a Windows
 session-scoped mutex derived from the resolved memory database path. A second process using the same
 companion profile exits before constructing providers or opening microphone, playback, avatar, or
-action resources. Windows releases must not work around this guard.
+action resources. Windows deployments must not work around this guard.
 
 Doctor and online memory backup remain available while the runtime is active: doctor is read-only,
 and backup uses SQLite's consistent online backup boundary. A separate development instance must
@@ -139,7 +139,7 @@ silence. It doesn't persist captured audio or make cloud requests. On Windows wi
 Mode, the Hugging Face cache may warn that symlink deduplication is unavailable; this increases
 cache disk use but does not invalidate the model/inference check.
 
-`--accept-voice` is the credential-backed target-machine release gate. It first asks for one real
+`--accept-voice` is the credential-backed target-machine acceptance gate. It first asks for one real
 microphone utterance and requires the durable event chain `ASR -> LLM -> streaming TTS -> audio
 played -> completed`. It then asks for a second utterance and, while the companion is speaking,
 asks the operator to speak again; this must stop provider work and playback, and persist exactly one
@@ -162,7 +162,7 @@ playback before the LLM stream completes, reuse one output stream without underf
 history that exactly matches the text confirmed as played. The interrupted turn must likewise
 commit no unheard continuation. Both latency targets are configured under `providers.asr.capture`.
 The current defaults are 30,000 ms for first played audio and 300 ms for interruption because the
-free Fish `s2.1-pro-free` model has no SLA/TTFA guarantee. This release intentionally remains on
+free Fish `s2.1-pro-free` model has no SLA/TTFA guarantee. This deployment intentionally remains on
 the free model. A later paid-mode migration only changes the Fish `model` value; regenerate
 target-machine evidence with the desired lower latency budget after that change.
 
@@ -173,38 +173,34 @@ improves cancellation response, and limits the scope of one failed request. It d
 long companion replies and does not change the local faster-whisper ASR path.
 
 The JSON variant writes interactive prompts to stderr and exactly one machine-readable report to
-stdout. Redirect stdout to retain release evidence. The report contains only check identifiers,
-pass/fail state, latency values, targets, event-stage failure categories, and exit code. It never
+stdout. Redirect stdout to retain local acceptance evidence. The report contains only check
+identifiers, pass/fail state, latency values, targets, event-stage failure categories, and exit code. It never
 contains microphone audio, transcripts, generated replies, credentials, or raw exception text.
 
 On Windows, `scripts/run_voice_acceptance.ps1` is the preferred operator-facing wrapper. It calls
 the same production `--accept-voice-json` entry point, keeps the Chinese microphone and barge-in
 prompts live in the current terminal, validates the exact privacy-safe report fields and eight
 required checks, and returns zero only for an 8/8 pass. By default it tests the current worktree and
-saves the report under the ignored `.tmp/voice-acceptance/` directory; this is a pre-build gate, not
-tag evidence. After installing the exact signed release candidate, invoke the same wrapper against
-the installed isolated runtime so repository source cannot shadow the installed wheel:
+saves the report under the ignored `.tmp/voice-acceptance/` directory. For the current source-only,
+personal deployment, this is the authoritative local voice check:
 
 ```powershell
-$installRoot = Join-Path $env:LOCALAPPDATA "Programs\Virtual Companion"
 .\scripts\run_voice_acceptance.ps1 `
-  -PythonPath (Join-Path $installRoot "runtime\python.exe") `
-  -Config (Join-Path $installRoot "config\production.yaml") `
-  -RuntimeWorkingDirectory $installRoot `
-  -IsolatedRuntime `
-  -OutputPath "release-evidence\<tag>\voice-acceptance.json"
+  -PythonPath .\.venv\Scripts\python.exe `
+  -Config .\production.yaml `
+  -OutputPath .\.tmp\voice-acceptance\voice-acceptance.json
 ```
 
 `--accept-avatar` is independent of LLM and voice readiness. It requires an explicitly enabled
 avatar bridge, a non-empty `identity.avatar_model_id`, the configured token credential source,
-and a real stage implementing the optional `stage.inspect` release-gate extension documented in
+and a real stage implementing the optional `stage.inspect` acceptance extension documented in
 `docs/avatar_bridge_protocol.md`. The command proves authenticated health, Live2D/VRM model
 enumeration/validation/load, full-state application, expression and gesture commands, proactive
 level, renderer-consumed state sequence, and a newly presented frame. Its JSON output contains
 only check identifiers and pass/fail messages; it contains no token, model path, state payload,
 user content, screenshot, or raw exception text.
 
-For managed AIRI startup, enable `providers.avatar.launch` and configure the installed
+For managed AIRI startup, enable `providers.avatar.launch` and configure the local
 `airi.exe`, adjacent `resources/app.asar`, `resources/godot-stage/godot-stage.exe`, local `.vrm`,
 all four SHA-256 values, a fixed `model_id`, and a display name. The launch `model_id` must exactly match
 `identity.avatar_model_id`. Relative paths in an explicit production YAML resolve from that YAML's
@@ -214,16 +210,17 @@ bridge health checks and always stop it after the WebSocket provider disconnects
 requires `ws://127.0.0.1:6122/ws` and `COMPANION_AVATAR_TOKEN`; an existing listener is rejected so
 acceptance cannot accidentally pass against an unrelated stage.
 
-The avatar JSON report is necessary but not sufficient for visual release approval. While the gate
+The avatar JSON report is necessary but not sufficient for visual approval. While the gate
 runs, an operator must confirm the intended character/model is visible, the happy expression and
-nod are visibly applied, animation does not freeze, and there is no release-blocking clipping,
+nod are visibly applied, animation does not freeze, and there is no unacceptable clipping,
 missing texture, broken alpha, or severe lip/expression mismatch. Record that human sign-off next
 to the machine report. A self-reported `stage.inspect` result without this visual observation does
-not close the AIRI/Live2D/VRM release gate.
+not close the AIRI/Live2D/VRM acceptance gate.
 
-## Target-machine release sequence
+## Target-machine source deployment sequence
 
-Follow `docs/release_process.md` for version, evidence, tag, provenance, and GitHub Release gates.
+Follow `docs/release_process.md` for the source-only GitHub publication boundary. The commands below
+validate the personal local deployment; their reports stay Git-ignored and are not release assets.
 
 Configuration parsing rejects unknown fields at every supported nesting level. Treat an unknown
 field error as a deployment defect; correct the spelling or remove the unsupported option instead
@@ -234,33 +231,26 @@ automation. It validates the complete supported schema, types, ranges, provider 
 rules, and safety constraints, then exits without reading credentials or touching runtime storage,
 devices, network providers, or the single-instance boundary.
 
-1. Revoke every credential that ever appeared in chat, a file, a log, or a command argument.
-2. Store only never-disclosed replacements using the Generic Credential targets above.
-3. Verify the signed Windows installer's Authenticode signature, timestamp, attestation, and
-   `SHA256SUMS` entry, then install it for the current user. It already contains the pinned CPython
-   runtime, `requirements-runtime.lock` environment, AIRI stage, and approved VRM.
-4. For Python-artifact acceptance only, install `requirements-runtime.lock` with hashes, install the
-   wheel with `--no-deps`, verify the wheel/sdist against `SHA256SUMS`, and run `pip check`. Do not
-   use the development/release-tool lock as the installed desktop runtime.
-5. Run local doctor with `--voice-input` from the exact installed runtime.
-6. Run online doctor with the rotated DeepSeek and Fish Audio credentials available from Credential
-   Manager or temporary environment overrides.
-7. Run `python -m companion --accept-voice-json 1>voice-acceptance.json`; follow the stderr prompts
-   and retain the passing JSON report with the release evidence.
-8. Enable managed launch for the pinned AIRI build (or supervise the same pinned files externally),
-   run `--accept-avatar-json`, retain its passing report, and record the visual sign-off above.
-9. Confirm `windows-installer.json` binds the installed bundle to the exact `windows-stage.json`,
-   and record the security sign-off required by `docs/release_process.md`.
-10. Keep mutating computer actions disabled; the shipped Windows provider remains read-only.
+1. Clone or update to the reviewed protected-`main` source revision.
+2. Create a Python 3.12 virtual environment, install `requirements.lock` with hashes, install the
+   project editable with `--no-deps`, and run `pip check`.
+3. Keep the current DeepSeek and Fish Audio credentials in Windows Credential Manager. Never write
+   their values into source, YAML, logs, reports, or command arguments; revoke them if compromise is
+   suspected.
+4. Keep `production.yaml`, the approved VRM, and the pinned AIRI files local and Git-ignored.
+5. Run config validation and local doctor with `--voice-input` from the exact source environment.
+6. Run online doctor with credentials resolved from Credential Manager.
+7. Run `scripts/run_voice_acceptance.ps1`; follow the live prompts and retain its passing report only
+   under the ignored `.tmp/voice-acceptance/` directory.
+8. Enable managed launch for the pinned AIRI build, run `--accept-avatar-json`, retain its passing
+   local report, and complete the visual observation above.
+9. Keep mutating computer actions disabled; the Windows provider remains read-only.
 
-Before building the installer, verify the unpacked AIRI directory with
-`scripts/verify_airi_windows.ps1`. For a
-release candidate, pass `-RequireAuthenticode`; this must report `Valid` for both `airi.exe` and
-`resources/godot-stage/godot-stage.exe`, with signer and timestamp certificates present. Also pass
-`-AppVersion` and `-EvidenceJson release-evidence\<tag>\windows-stage.json`; evidence mode refuses
-to run without `-RequireAuthenticode` and writes only public hashes, certificate fingerprints, and
-approved model-license fields. An unsigned build is suitable only for local visual acceptance and
-must not be attached to a public GitHub Release.
+Use `scripts/verify_airi_windows.ps1` to verify the unpacked AIRI directory for local acceptance.
+The current source-only publication does not upload that directory or any executable. If Windows
+binary distribution is explicitly restored later, pass `-RequireAuthenticode`, `-AppVersion`, and
+`-EvidenceJson`; evidence mode deliberately refuses to run without valid AIRI/Godot signatures and
+trusted timestamps. Do not attach an unsigned build to a GitHub Release or add a bypass.
 
 An action provider timeout is a process-lifetime quarantine, not a retry signal. For execution and
 undo, the external outcome is explicitly unknown because the provider may complete after the
@@ -326,7 +316,7 @@ live `.db-wal` files. It is written to a random temporary file, checked with `PR
 checked for the supported ownership marker, schema version, tables, and runtime columns, and
 atomically moved into place. Existing targets are protected unless `--overwrite-backup` is
 explicitly supplied. Store at least one copy outside the runtime directory and test verification
-from the installed wheel before relying on it.
+from the exact source environment used to run the application before relying on it.
 
 Current databases use SQLite `application_id` and `user_version` markers. A complete legacy
 companion database with both markers at zero is adopted in place on first startup without deleting

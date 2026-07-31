@@ -117,6 +117,7 @@ def test_installer_scripts_parse_and_require_signing_without_a_bypass() -> None:
     )
     assert "SigningCertificateThumbprint" in build
     assert "--untracked-files=all" in build
+    assert "Select-Object -First 1" in build
     assert "Installer builds require CPython" in build
     assert "Code Signing EKU" in build
     assert "/tr $toolchain.signing.timestamp_url" in build
@@ -135,37 +136,36 @@ def test_installer_scripts_parse_and_require_signing_without_a_bypass() -> None:
     assert "Silent uninstaller smoke test" in verify
 
 
-def test_release_workflow_consumes_only_the_evidenced_staging_draft() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
-        encoding="utf-8"
+def test_github_publication_is_source_only() -> None:
+    workflows = ROOT / ".github" / "workflows"
+    release_policy = (ROOT / "docs" / "release_process.md").read_text(encoding="utf-8")
+
+    assert not (workflows / "release.yml").exists()
+    assert "GitHub Releases are not created" in release_policy
+    assert "Authenticode" in release_policy
+    assert "does not weaken" in release_policy
+
+    forbidden_publishers = (
+        "actions/upload-artifact",
+        "actions/create-release",
+        "actions/upload-release-asset",
+        "actions/attest",
+        "attestations: write",
+        "contents: write",
+        "gh release create",
+        "gh release upload",
+        "gh release edit",
+        "id-token: write",
+        "ncipollo/release-action",
+        "packages: write",
+        "pypa/gh-action-pypi-publish",
+        "softprops/action-gh-release",
+        "twine upload",
     )
-
-    assert "windows-installer.json" in workflow
-    assert "source_commit" in workflow
-    assert "git merge-base --is-ancestor" in workflow
-    assert "The staged draft must contain exactly" in workflow
-    assert "verify_windows_installer.ps1" in workflow
-    assert "-StageEvidenceJson" in workflow
-    assert ".digest -cne" in workflow
-    assert "$version = $tag.Substring(1)" in workflow
-    assert '"${{ github.ref_name }}".Substring(1)' not in workflow
-    assert "dist/*.exe" in workflow
-    assert "left the draft for inspection" in workflow
-    assert "gh release delete" not in workflow
-
-
-def test_release_workflow_requires_a_github_verified_annotated_tag() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
-        encoding="utf-8"
-    )
-
-    assert 'git/ref/tags/$tag' in workflow
-    assert 'git/tags/$($ref.object.sha)' in workflow
-    assert '$ref.object.type -cne "tag"' in workflow
-    assert "$tagObject.tag -cne $tag" in workflow
-    assert '$tagObject.object.type -cne "commit"' in workflow
-    assert "$tagObject.object.sha -cne $env:GITHUB_SHA" in workflow
-    assert "$tagObject.verification.verified -ne $true" in workflow
+    for path in (*workflows.glob("*.yml"), *workflows.glob("*.yaml")):
+        workflow = path.read_text(encoding="utf-8")
+        for publisher in forbidden_publishers:
+            assert publisher not in workflow
 
 
 def test_toolchain_manifest_has_no_unreviewed_fields() -> None:

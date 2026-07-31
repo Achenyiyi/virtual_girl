@@ -108,6 +108,9 @@ def test_voice_acceptance_script_parses_as_powershell() -> None:
         text=True,
     )
 
+    script = SCRIPT.read_text(encoding="utf-8")
+    assert "Select-Object -First 1" in script
+
 
 def test_voice_acceptance_script_requires_complete_isolated_runtime_arguments() -> None:
     pwsh = shutil.which("pwsh")

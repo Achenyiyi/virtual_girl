@@ -2,8 +2,9 @@
 
 一个本地优先、云端增强、模块可替换、以事件日志为事实源的虚拟生命运行时系统。
 
-> 🚧 **预发布验证中** — Avatar 真实舞台与 Windows 安装链已验证；真实语音端到端、
-> 正式 Authenticode 签名和最终发行签字仍待完成
+> **源码公开 / 个人本地使用** — GitHub 仅提供仓库源码和 GitHub 自动生成的源码归档；
+> 不发布 Windows 安装包、可执行文件、wheel、sdist 或其他程序下载。真实语音和 Avatar
+> 已在目标 Windows 机器完成验收。
 
 ## 项目目标
 
@@ -58,13 +59,13 @@ docs/              # 文档
 python -m venv .venv
 .venv\Scripts\activate
 
-# 开发、测试和发布工具依赖
+# 开发、测试和本地运行依赖
 pip install --require-hashes -r requirements.lock
 pip install --no-deps -e .
 
-# 仅运行应用或验证发布 wheel 时，改用更小的运行时锁
+# 仅本地运行且不执行开发检查时，可改用更小的运行时锁
 # pip install --require-hashes -r requirements-runtime.lock
-# pip install --no-deps virtual_companion-0.1.0-py3-none-any.whl
+# pip install --no-deps -e .
 
 # 运行测试
 pytest tests/ -v
@@ -82,10 +83,12 @@ pip-compile --constraint requirements.lock --extra voice --strip-extras \
   --no-emit-index-url --output-file requirements-runtime.lock pyproject.toml
 ```
 
-普通 Windows 用户不需要预装 Python。正式 Release 提供的签名安装包会携带固定的
-CPython 3.12.10、仅运行时依赖、AIRI 舞台和经许可审核的 VRM；完整构建与验收流程见
-[`docs/release_process.md`](docs/release_process.md)。在正式签名 Release 发布前，不要把 CI
-中的 Python wheel/sdist 当作面向最终用户的桌面安装包。
+当前公开发布面只有 Git 仓库源码，以及 GitHub 在代码页面按需生成的源码 ZIP。仓库不会创建
+GitHub Release，也不会上传 Windows 安装包、AIRI 可执行文件、wheel、sdist、VRM 或 CI
+构建产物。个人使用者需要从源码创建本地 Python 环境，并自行准备 Git 忽略的 AIRI/VRM
+本地资产。完整边界见 [`docs/release_process.md`](docs/release_process.md)。仓库保留的 Windows
+安装器工具只服务于未来可能重新评估的二进制分发；该工具仍强制要求可信 Authenticode
+证书和时间戳，当前不会执行或发布其输出。
 
 开发或一次性验收可通过环境变量临时注入云端凭据：
 
@@ -106,8 +109,8 @@ faster-whisper。语音回复使用官方 `/v1/tts/stream/with-timestamp` SSE �
 分句尽早送入 24 kHz PCM 合成，并用时间戳 alignment 只提交实际播放到的文本。默认参数面向
 对话体验：`latency: balanced`、较短 `chunk_length`/`min_chunk_length`、跨块上下文一致性，
 并把长回复拆成约 480 bytes 的 Fish 文本片段，以降低首音等待、提高取消响应并缩小单次请求
-故障范围；完整回复仍会全部分段合成，不会截断。上线前仍需把任何曾出现在聊天、日志或命令中
-的 Fish/DeepSeek 密钥轮换为从未披露的新值。
+故障范围；完整回复仍会全部分段合成，不会截断。Fish/DeepSeek 密钥只保存在本机安全凭据源，
+不得写入仓库、日志或命令参数；一旦怀疑泄露，应在供应商后台撤销并轮换。
 
 Avatar Bridge 使用本机随机 token，可由程序直接安全初始化且不会回显：
 
@@ -124,9 +127,9 @@ python -m companion --config production.yaml --provision-avatar-token
 
 正式运行要求记忆库、日志和行动审计库位于本地 Windows 卷、目标可真实写入且所在卷至少
 保留 512 MiB 可用空间。不要把实时 SQLite/WAL 数据库直接放到 UNC、网络映射盘或同步盘；
-需要异地保存时使用在线备份文件。安装版配置应设置 `runtime.data_root: user_local`，使这些
-可写数据进入 `%LOCALAPPDATA%\VirtualCompanion`；AIRI 与模型路径仍从配置文件所在的只读
-安装目录解析。
+需要异地保存时使用在线备份文件。个人本地 `production.yaml` 应设置
+`runtime.data_root: user_local`，使这些可写数据进入 `%LOCALAPPDATA%\VirtualCompanion`；AIRI
+与模型路径仍从配置文件所在目录解析。
 
 ### 备份记忆
 
@@ -181,14 +184,14 @@ python -m companion --accept-voice-json 1>voice-acceptance.json
 python -m companion --config production.yaml --accept-avatar-json 1>avatar-acceptance.json
 ```
 
-语音上线验收要求一轮真实麦克风到流式播放完整成功，并证明首段音频在 LLM 流结束前播放、
+本地语音验收要求一轮真实麦克风到流式播放完整成功，并证明首段音频在 LLM 流结束前播放、
 所有 PCM 使用同一声卡流且没有 underflow、完成轮历史只含实际播放文本；随后在第二轮播放期间
 通过新的 VAD speech-start 边沿立即打断，并证明打断轮没有保存未播放文本。当前免费 Fish
 模型没有 SLA/TTFA 保证，默认门槛为首音频 30,000 ms、打断 300 ms。未来切换付费模式只需
 替换 Fish `model` 名称，并用期望的更低延迟阈值重新采集上线证据。完整流程和报告字段见
 [`docs/deployment_preflight.md`](docs/deployment_preflight.md)。
 
-形象舞台上线验收要求启用 `providers.avatar`、设置 `identity.avatar_model_id` 和头像鉴权
+本地形象舞台验收要求启用 `providers.avatar`、设置 `identity.avatar_model_id` 和头像鉴权
 环境变量。舞台扩展还需实现只读 `stage.inspect` 验收方法，报告渲染器实际应用的状态序号
 和已呈现帧序号；具体字段及人工视觉签字要求见
 [`docs/avatar_bridge_protocol.md`](docs/avatar_bridge_protocol.md) 和上线预检文档。
@@ -218,7 +221,7 @@ Windows 行动能力同样默认关闭。目前只提供三个不可变、无参
 | Phase | 目标 | 状态 |
 |---|---|---|
 | Phase 0 | 事件 Schema、Provider 接口、协议、威胁模型 | 🟢 本地与远程 CI 门禁通过 |
-| Phase 1 | 可打断 ASR→LLM→流式 TTS→播放 | 🟡 自动化门禁通过，增强后的真实设备验收待采集 |
+| Phase 1 | 可打断 ASR→LLM→流式 TTS→播放 | 🟢 自动化门禁与真实设备 8/8 验收通过 |
 | Phase 2 | 事件账本、五层记忆、时间化事实 | 🟢 自动化验证通过 |
 | Phase 3 | 连续情绪状态、表情/动作/TTS一致映射 | 🟢 AIRI 真实模型、表情、动作和呈现帧验收通过 |
 | Phase 4 | 主动预算、计划/反思、受控电脑工具 | 🟡 Windows 只读能力已验证，写操作保持禁用 |

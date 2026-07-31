@@ -66,12 +66,12 @@ The pinned Windows toolchain and verified upstream download digests are recorded
 `toolchain.json`. To produce a clean unsigned acceptance candidate from an untouched pinned
 checkout, run `scripts/build_airi_windows.ps1`. The script requires the pinned .NET SDK and Godot
 Mono editor with export templates, exports the Windows Godot sidecar, and then packages Electron.
-Use `scripts/verify_airi_windows.ps1` to re-check
-the executable, `app.asar`, local VRM, and Authenticode status. CI uploads the unpacked app only as
-an unsigned short-lived artifact; public release remains blocked until both AIRI-owned executables
-have valid Authenticode signatures and trusted timestamps. For a release candidate, use
-`-RequireAuthenticode -AppVersion <version> -EvidenceJson <windows-stage.json>` to create the
-privacy-safe evidence required by the release gate.
+Use `scripts/verify_airi_windows.ps1` to re-check the executable, `app.asar`, local VRM, and
+Authenticode status. CI may build the unpacked app inside its ephemeral runner for validation, but
+does not upload it or expose any downloadable program artifact. The current GitHub publication is
+source-only. If binary distribution is explicitly restored in the future, use
+`-RequireAuthenticode -AppVersion <version> -EvidenceJson <windows-stage.json>` and require valid
+signatures and trusted timestamps for both AIRI-owned executables before publishing anything.
 
 To verify the updater guard in a pinned upstream checkout after the filtered workspace install:
 
