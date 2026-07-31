@@ -151,7 +151,9 @@ relative to `main`, the credential used by `gh release create` must also be auth
 workflow content; GitHub otherwise rejects draft creation.
 
 Commit the evidence through the normal protected-branch workflow and wait for the resulting `main`
-CI run to pass. Then create and push the signed tag on that evidence commit:
+CI run to pass. Then create and push the signed annotated tag on that evidence commit. Either GPG
+or SSH signing is supported, but the matching public key must be registered in GitHub as a signing
+key so the Git Data API reports the tag signature as verified:
 
 ```powershell
 git tag -s $tag -m "Virtual Companion $tag"
@@ -162,6 +164,8 @@ git push origin $tag
 
 The tag workflow requires all of the following before publication:
 
+- the release ref is an annotated tag that directly targets the workflow commit and has a
+  GitHub-verified signature; lightweight and unverified tags fail closed;
 - the tag commit is on `main` and already has a successful `main` CI run;
 - all six evidence files pass their strict schema, version, freshness, license, signer, and check
   requirements;
