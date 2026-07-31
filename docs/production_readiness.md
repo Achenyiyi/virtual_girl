@@ -387,9 +387,10 @@ The action and perception features must remain disabled until their correspondin
 
 ## Remaining boundaries and future blockers
 
-- The current public surface is source-only. GitHub must continue to have no Release, uploaded
-  program artifact, package publication, or binary attestation; historical downloadable program
-  artifacts should be removed after the source-only workflow reaches `main`.
+- The current public surface is source-only. GitHub has no Release, tag, uploaded program artifact,
+  package publication, or binary attestation. The 42 historical downloadable program artifacts
+  were removed after the source-only workflow reached `main`; the three CodeQL SARIF artifacts were
+  deliberately retained.
 - The current DeepSeek and Fish Audio credentials are accepted for personal local use and remain in
   Windows Credential Manager. Their values must never enter source, reports, logs, or command
   arguments; revoke them immediately if compromise is suspected.
