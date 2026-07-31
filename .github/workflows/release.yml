@@ -31,11 +31,29 @@ jobs:
             requirements.lock
             requirements-runtime.lock
 
-      - name: Require tag commit on main with prior green CI
+      - name: Require verified signed tag on main with prior green CI
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          $tag = "${{ github.ref_name }}"
+          $refJson = gh api "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw "Unable to inspect the release tag ref" }
+          $ref = $refJson | ConvertFrom-Json
+          if ($ref.object.type -cne "tag") {
+            throw "Release ref must be an annotated signed tag"
+          }
+          $tagJson = gh api "repos/$env:GITHUB_REPOSITORY/git/tags/$($ref.object.sha)"
+          if ($LASTEXITCODE -ne 0) { throw "Unable to inspect the release tag object" }
+          $tagObject = $tagJson | ConvertFrom-Json
+          if (
+            $tagObject.tag -cne $tag -or
+            $tagObject.object.type -cne "commit" -or
+            $tagObject.object.sha -cne $env:GITHUB_SHA -or
+            $tagObject.verification.verified -ne $true
+          ) {
+            throw "Release tag must directly target this commit and have a GitHub-verified signature"
+          }
           git fetch origin main --no-tags
           git merge-base --is-ancestor "$env:GITHUB_SHA" origin/main
           if ($LASTEXITCODE -ne 0) { throw "Release tag is not on main" }

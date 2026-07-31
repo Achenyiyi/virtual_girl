@@ -154,6 +154,20 @@ def test_release_workflow_consumes_only_the_evidenced_staging_draft() -> None:
     assert "gh release delete" not in workflow
 
 
+def test_release_workflow_requires_a_github_verified_annotated_tag() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'git/ref/tags/$tag' in workflow
+    assert 'git/tags/$($ref.object.sha)' in workflow
+    assert '$ref.object.type -cne "tag"' in workflow
+    assert "$tagObject.tag -cne $tag" in workflow
+    assert '$tagObject.object.type -cne "commit"' in workflow
+    assert "$tagObject.object.sha -cne $env:GITHUB_SHA" in workflow
+    assert "$tagObject.verification.verified -ne $true" in workflow
+
+
 def test_toolchain_manifest_has_no_unreviewed_fields() -> None:
     manifest = json.loads(
         (ROOT / "packaging" / "windows" / "toolchain.json").read_text(
