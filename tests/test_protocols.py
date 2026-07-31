@@ -71,7 +71,12 @@ class TestTurnManager:
 
         assert mgr.transition(turn.turn_id, TurnState.LLM_THINKING)
         assert mgr.transition(turn.turn_id, TurnState.TTS_SYNTHESIZING)
+        assert turn.llm_completed_at_ms == 0
+        mgr.record_llm_completed(turn.turn_id)
+        assert turn.llm_completed_at_ms > 0
         assert mgr.transition(turn.turn_id, TurnState.PLAYING)
+        mgr.record_audio_played(turn.turn_id)
+        assert turn.first_audio_played_at_ms > 0
         assert mgr.transition(turn.turn_id, TurnState.COMPLETED)
 
         assert not mgr.get_turn(turn.turn_id).is_active
@@ -193,3 +198,65 @@ class TestAudioConfirmation:
         assert not proto.was_any_audio_played("turn_1")
         assert proto.get_played_text("turn_1") == ""
         assert proto.get_all_text("turn_1") == "Unheard text"
+
+    def test_timestamp_alignment_confirms_only_segments_reached_by_playback(self):
+        from companion.protocols.audio import AudioConfirmationProtocol
+        from companion.providers.tts import TTSTimingSegment
+
+        proto = AudioConfirmationProtocol()
+        proto.record_synthesis(
+            "turn_1",
+            0,
+            b"audio",
+            1000,
+            "你好呀",
+            alignment=(
+                TTSTimingSegment("你", 0, 200),
+                TTSTimingSegment("好", 200, 500),
+                TTSTimingSegment("呀", 500, 900),
+            ),
+        )
+
+        proto.confirm_played("turn_1", 0, 550, was_interrupted=True)
+
+        assert proto.get_played_text("turn_1") == "你好"
+
+    def test_latest_alignment_snapshot_replaces_older_snapshot(self):
+        from companion.protocols.audio import AudioConfirmationProtocol
+        from companion.providers.tts import TTSTimingSegment
+
+        proto = AudioConfirmationProtocol()
+        proto.record_synthesis(
+            "turn_1",
+            0,
+            b"first",
+            200,
+            "你好",
+            alignment=(TTSTimingSegment("你", 0, 200, chunk_seq=7),),
+        )
+        proto.record_synthesis(
+            "turn_1",
+            1,
+            b"second",
+            300,
+            "",
+            audio_start_ms=200,
+            alignment=(
+                TTSTimingSegment("你", 0, 200, chunk_seq=7),
+                TTSTimingSegment("好", 200, 500, chunk_seq=7),
+            ),
+        )
+        proto.confirm_played("turn_1", 0, 200)
+        proto.confirm_played("turn_1", 1, 300)
+
+        assert proto.get_played_text("turn_1") == "你好"
+
+    def test_played_audio_duration_sums_confirmed_segments(self):
+        from companion.protocols.audio import AudioConfirmationProtocol
+
+        proto = AudioConfirmationProtocol()
+        for index in range(2):
+            proto.record_synthesis("turn_1", index, b"audio", 100, "一句")
+            proto.confirm_played("turn_1", index, 75)
+
+        assert proto.played_audio_duration_ms("turn_1") == 150

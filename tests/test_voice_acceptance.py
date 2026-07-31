@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from argparse import Namespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -52,9 +53,21 @@ class AcceptancePipeline:
         self._turn = 0
         self._release = asyncio.Event()
         self._interrupt_delay = interrupt_delay
+        self._interrupted = False
 
     def get_current_state(self) -> str:
         return self._state
+
+    def get_voice_acceptance_snapshot(self):
+        terminal_state = "interrupted" if self._interrupted else "completed"
+        return SimpleNamespace(
+            terminal_state=terminal_state,
+            incremental_playback=True,
+            pcm_continuous=True,
+            played_segment_count=2,
+            output_underflow_count=0,
+            history_matches_played_text=True,
+        )
 
     async def process_audio_input(self, audio_bytes: bytes) -> str:
         assert audio_bytes
@@ -129,6 +142,7 @@ class AcceptancePipeline:
 
     async def interrupt(self) -> bool:
         await asyncio.sleep(self._interrupt_delay)
+        self._interrupted = True
         await self._bus.publish(
             ConversationTurnInterruptedEvent(
                 turn_id="acceptance-turn-2",
@@ -163,8 +177,12 @@ async def test_voice_acceptance_proves_complete_and_interrupted_paths() -> None:
     assert [check.code for check in report.checks] == [
         "voice.complete_turn",
         "voice.first_audio_latency",
+        "voice.incremental_playback",
+        "voice.pcm_continuity",
+        "voice.completed_history",
         "voice.interrupt_terminal",
         "voice.interrupt_latency",
+        "voice.interrupted_history",
     ]
     payload = json.loads(report.to_json())
     assert payload["passed"] is True
@@ -207,6 +225,16 @@ async def test_voice_acceptance_reports_sanitized_stage_failure() -> None:
 
         def get_current_state(self) -> str:
             return "idle"
+
+        def get_voice_acceptance_snapshot(self):
+            return SimpleNamespace(
+                terminal_state="error",
+                incremental_playback=False,
+                pcm_continuous=False,
+                played_segment_count=0,
+                output_underflow_count=0,
+                history_matches_played_text=False,
+            )
 
     report = await run_voice_acceptance(
         microphone=SequencedMicrophone([b"a" * 3200]),

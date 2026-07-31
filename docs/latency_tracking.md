@@ -18,8 +18,8 @@
 
 当前免费 Fish `s2.1-pro-free` 接入阶段，`providers.asr.capture.target_e2e_latency_ms`
 临时放宽为 30,000 ms，只用于验证真实麦克风、faster-whisper、DeepSeek、Fish TTS、播放和
-barge-in 链路已打通。上表仍是付费低延迟模型/生产体验目标；切换到有 SLA 的 Fish 模型后需把
-验收阈值重新收紧并重新采集目标机器证据。
+barge-in 链路已打通。当前上线版本继续使用免费模型；上表仍是期望的低延迟体验目标。未来切换
+付费模式时只需替换 Fish 模型名，并按新的延迟预算重新采集目标机器证据。
 
 ## 2. 追踪点位
 

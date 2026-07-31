@@ -54,8 +54,12 @@ def _acceptance(prefix: str, version: str) -> dict[str, object]:
         "voice": [
             "voice.complete_turn",
             "voice.first_audio_latency",
+            "voice.incremental_playback",
+            "voice.pcm_continuity",
+            "voice.completed_history",
             "voice.interrupt_terminal",
             "voice.interrupt_latency",
+            "voice.interrupted_history",
         ],
         "avatar": [
             "avatar.bridge_health",

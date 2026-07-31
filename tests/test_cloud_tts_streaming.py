@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 
 import httpx
 import pytest
 
+from companion.providers.base import ProviderHealth
 from companion.providers.implementations.cloud_tts import (
     CloudTTSConfig,
     CloudTTSError,
@@ -18,8 +20,52 @@ from companion.providers.tts import TTSRequest
 
 class ChunkedAudioStream(httpx.AsyncByteStream):
     async def __aiter__(self):
-        yield b"a" * 4800
-        yield b"b" * 2400
+        first = json.dumps(
+            {
+                "audio_base64": base64.b64encode(b"a" * 4800).decode(),
+                "content": "你好",
+                "alignment": {
+                    "audio_duration": 0.1,
+                    "segments": [{"text": "你", "start": 0.0, "end": 0.1}],
+                },
+                "chunk_seq": 0,
+                "chunk_audio_offset_sec": 0.0,
+            }
+        )
+        second = json.dumps(
+            {
+                "audio_base64": base64.b64encode(b"b" * 2400).decode(),
+                "content": "你好",
+                "alignment": {
+                    "audio_duration": 0.15,
+                    "segments": [
+                        {"text": "你", "start": 0.0, "end": 0.1},
+                        {"text": "好", "start": 0.1, "end": 0.15},
+                    ],
+                },
+                "chunk_seq": 0,
+                "chunk_audio_offset_sec": 0.0,
+            }
+        )
+        payload = f"data: {first}\n\ndata: {second}\n\n".encode()
+        yield payload[:37]
+        yield payload[37:]
+
+
+def timestamp_stream(audio: bytes, text: str = "text") -> bytes:
+    event = {
+        "audio_base64": base64.b64encode(audio).decode(),
+        "content": text,
+        "alignment": {
+            "audio_duration": len(audio) / 48_000,
+            "segments": [
+                {"text": text, "start": 0.0, "end": len(audio) / 48_000}
+            ],
+        },
+        "chunk_seq": 0,
+        "chunk_audio_offset_sec": 0.0,
+    }
+    return f"data: {json.dumps(event)}\n\n".encode()
 
 
 @pytest.mark.asyncio
@@ -50,8 +96,9 @@ async def test_streaming_tts_yields_before_final_chunk() -> None:
     assert not chunks[0].is_final
     assert chunks[-1].is_final
     assert b"".join(chunk.audio_bytes for chunk in chunks) == b"a" * 4800 + b"b" * 2400
-    assert chunks[0].text == "你好"
-    assert chunks[1].text == ""
+    assert chunks[0].text == ""
+    assert chunks[1].text == "你好"
+    assert [segment.text for segment in chunks[-1].alignment] == ["你", "好"]
 
 
 @pytest.mark.asyncio
@@ -69,6 +116,25 @@ async def test_cancel_closes_active_http_stream() -> None:
 
     assert await provider.cancel("turn_cancel")
     assert response.closed
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_active_response_does_not_cancel_owner_task() -> None:
+    class FakeResponse:
+        async def aclose(self) -> None:
+            return None
+
+    provider = CloudTTSProvider(CloudTTSConfig())
+    owner = asyncio.create_task(asyncio.Event().wait())
+    provider._active_tasks["turn_cancel"] = owner
+    provider._active_streams["turn_cancel"] = FakeResponse()  # type: ignore[assignment]
+    try:
+        assert await provider.cancel("turn_cancel")
+        assert not owner.cancelled()
+    finally:
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await owner
 
 
 @pytest.mark.asyncio
@@ -135,7 +201,8 @@ async def test_later_segment_with_empty_audio_fails_closed() -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        return httpx.Response(200, request=request, content=b"audio" if calls == 1 else b"")
+        content = timestamp_stream(b"audio") if calls == 1 else b""
+        return httpx.Response(200, request=request, content=content)
 
     provider = CloudTTSProvider(
         CloudTTSConfig(api_key="configured-test-credential", max_text_bytes=100)
@@ -198,7 +265,91 @@ async def test_fish_tts_request_uses_configured_model_and_pcm_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_long_free_tier_text_is_split_into_smaller_tts_calls() -> None:
+async def test_health_check_validates_configured_trained_voice() -> None:
+    seen_paths: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        payload = {"credit": 1} if request.url.path.endswith("api-credit") else {
+            "_id": "voice_123",
+            "state": "trained",
+        }
+        return httpx.Response(200, request=request, json=payload)
+
+    provider = CloudTTSProvider(
+        CloudTTSConfig(
+            api_key="configured-test-credential",
+            reference_id="voice_123",
+        )
+    )
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        assert await provider.health_check() == ProviderHealth.HEALTHY
+    finally:
+        await provider.shutdown()
+
+    assert seen_paths == ["/wallet/self/api-credit", "/model/voice_123"]
+
+
+@pytest.mark.asyncio
+async def test_health_check_rejects_untrained_configured_voice() -> None:
+    def respond(request: httpx.Request) -> httpx.Response:
+        payload = {"credit": 1} if request.url.path.endswith("api-credit") else {
+            "_id": "voice_123",
+            "state": "failed",
+        }
+        return httpx.Response(200, request=request, json=payload)
+
+    provider = CloudTTSProvider(
+        CloudTTSConfig(
+            api_key="configured-test-credential",
+            reference_id="voice_123",
+        )
+    )
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    try:
+        assert await provider.health_check() == ProviderHealth.UNHEALTHY
+    finally:
+        await provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_streaming_request_uses_official_timestamp_endpoint() -> None:
+    seen: dict[str, object] = {}
+
+    def capture(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["accept"] = request.headers.get("accept")
+        return httpx.Response(
+            200,
+            request=request,
+            content=timestamp_stream(b"a" * 4800, "你好"),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    provider = CloudTTSProvider(CloudTTSConfig(api_key="configured-test-credential"))
+    provider._client = httpx.AsyncClient(transport=httpx.MockTransport(capture))
+    try:
+        chunks = [
+            chunk
+            async for chunk in provider.synthesize_stream(
+                TTSRequest(text="你好", turn_id="timestamp-contract")
+            )
+        ]
+    finally:
+        await provider.shutdown()
+
+    assert chunks
+    assert seen["url"] == "https://api.fish.audio/v1/tts/stream/with-timestamp"
+
+
+def test_non_s21_model_is_rejected() -> None:
+    with pytest.raises(ValueError, match="S2.1"):
+        CloudTTSConfig(model="s2-pro")
+
+
+@pytest.mark.asyncio
+async def test_long_text_is_split_into_smaller_latency_scoped_tts_calls() -> None:
     requests: list[str] = []
 
     def capture(request: httpx.Request) -> httpx.Response:
@@ -218,6 +369,17 @@ async def test_long_free_tier_text_is_split_into_smaller_tts_calls() -> None:
     assert chunk.audio_bytes
     assert len(requests) > 1
     assert all(len(json.loads(payload)["text"].encode("utf-8")) <= 120 for payload in requests)
+    assert "".join(json.loads(payload)["text"] for payload in requests) == text
+
+
+def test_text_segmentation_preserves_punctuation_and_whitespace_exactly() -> None:
+    provider = CloudTTSProvider(CloudTTSConfig(max_text_bytes=100))
+    text = "！！ 开头。  中间！？\n\n结尾没有标点  " * 4
+
+    segments = provider._split_text_for_fish(text)
+
+    assert "".join(segments) == text
+    assert all(len(segment.encode("utf-8")) <= 100 for segment in segments)
 
 
 @pytest.mark.asyncio
@@ -286,7 +448,7 @@ async def test_duplicate_active_turn_is_rejected() -> None:
     class BlockingStream(httpx.AsyncByteStream):
         async def __aiter__(self):
             await release.wait()
-            yield b"audio"
+            yield timestamp_stream(b"audio")
 
     provider = CloudTTSProvider(CloudTTSConfig(api_key="configured-test-credential"))
     provider._client = httpx.AsyncClient(

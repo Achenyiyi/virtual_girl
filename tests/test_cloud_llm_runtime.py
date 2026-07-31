@@ -229,3 +229,24 @@ async def test_stream_yields_chunks_without_buffering_full_response() -> None:
     release_second.set()
     remaining = [chunk.text async for chunk in iterator]
     assert remaining == ["second", ""]
+
+
+@pytest.mark.asyncio
+async def test_stream_failure_raises_instead_of_yielding_error_as_assistant_text() -> None:
+    provider = CloudLLMProvider(
+        CloudLLMConfig(
+            provider="openai_compatible",
+            base_url="https://example.invalid/v1/chat/completions",
+            api_key="configured-test-credential",
+            timeout_seconds=1,
+        )
+    )
+
+    async def failed_stream(_request: LLMRequest, _api_key: str):
+        raise httpx.ReadError("private response details")
+        yield "unreachable"  # pragma: no cover
+
+    provider._make_streaming_call = failed_stream  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError, match="Streaming LLM request failed"):
+        _ = [chunk async for chunk in provider.generate_stream(_request("failed-stream"))]

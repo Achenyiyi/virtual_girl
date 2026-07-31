@@ -40,6 +40,16 @@ class TTSRequest:
     audio_format: str = "pcm"  # 'pcm', 'wav', 'mp3', 'opus'
 
 
+@dataclass(frozen=True)
+class TTSTimingSegment:
+    """One aligned text segment on the complete synthesized audio timeline."""
+
+    text: str
+    start_ms: int
+    end_ms: int
+    chunk_seq: int = 0
+
+
 @dataclass
 class TTSChunk:
     """A chunk of synthesized audio (streaming)."""
@@ -53,6 +63,8 @@ class TTSChunk:
     text: str = ""  # The text this audio corresponds to
     duration_ms: int = 0
     time_to_first_byte_ms: int = 0
+    audio_start_ms: int = 0
+    alignment: tuple[TTSTimingSegment, ...] = ()
 
 
 @dataclass

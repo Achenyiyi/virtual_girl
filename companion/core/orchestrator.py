@@ -13,7 +13,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from companion.conversation import ConversationHistory, TurnEntry
@@ -34,7 +35,7 @@ from companion.providers.action import ActionProvider
 from companion.providers.asr import ASRProvider
 from companion.providers.avatar import AvatarProvider, AvatarState, BodyPose, FacialExpression
 from companion.providers.memory import MemoryProvider
-from companion.providers.model import LLMProvider, LLMRequest, LLMResponse
+from companion.providers.model import LLMProvider, LLMRequest, LLMResponse, LLMStreamChunk
 from companion.providers.perception import PerceptionProvider
 from companion.providers.tts import TTSProvider
 from companion.security.assistant_output import sanitize_assistant_text
@@ -52,6 +53,16 @@ TurnFailureStage = Literal[
     "persistence",
     "cancellation",
 ]
+
+
+@dataclass(frozen=True)
+class PreparedResponseStream:
+    """Context-preserving LLM stream prepared by the orchestrator."""
+
+    chunks: AsyncIterator[LLMStreamChunk]
+    model_id: str
+    model_provider: str
+    request: LLMRequest
 
 
 class CompanionOrchestrator:
@@ -455,6 +466,25 @@ class CompanionOrchestrator:
 
     async def prepare_response(self, text: str, turn_id: str) -> LLMResponse:
         """Generate a contextual response without committing conversation history."""
+        request = await self._prepare_llm_request(text, turn_id)
+        assert self._llm is not None
+        response = await self._llm.generate(request)
+        response.text = sanitize_assistant_text(response.text)
+        return response
+
+    async def prepare_response_stream(self, text: str, turn_id: str) -> PreparedResponseStream:
+        """Prepare a streaming response without bypassing memory or prompt construction."""
+        request = await self._prepare_llm_request(text, turn_id)
+        assert self._llm is not None
+        info = self._llm.provider_info()
+        return PreparedResponseStream(
+            chunks=self._llm.generate_stream(request),
+            model_id=info.name,
+            model_provider="cloud",
+            request=request,
+        )
+
+    async def _prepare_llm_request(self, text: str, turn_id: str) -> LLMRequest:
         if not self._llm:
             raise RuntimeError("LLM provider not configured")
 
@@ -478,16 +508,13 @@ class CompanionOrchestrator:
             facts=facts,
             episodes=episodes,
         )
-        request = LLMRequest(
+        return LLMRequest(
             messages=self._history.build_messages(system_prompt, text),
             system_prompt=system_prompt,
             turn_id=turn_id,
             max_tokens=512,
             temperature=0.7,
         )
-        response = await self._llm.generate(request)
-        response.text = sanitize_assistant_text(response.text)
-        return response
 
     async def commit_response(
         self,
@@ -511,6 +538,28 @@ class CompanionOrchestrator:
         self.state.apply_time_decay(3.0)
         await self._sync_avatar_state(strict=False)
         await self._trigger_avatar_gesture()
+
+    def commit_interrupted_response(
+        self,
+        user_text: str,
+        *,
+        turn_id: str,
+        communicated_text: str,
+        model_id: str = "",
+        latency_ms: int = 0,
+    ) -> None:
+        """Keep only the text confirmed as heard before a barge-in."""
+        if not communicated_text:
+            return
+        self._history.add_turn(
+            TurnEntry(
+                turn_id=turn_id,
+                user_text=user_text,
+                companion_text=communicated_text,
+                model_id=model_id,
+                latency_ms=latency_ms,
+            )
+        )
 
     async def cancel_turn(self, turn_id: str) -> bool:
         """Cancel generation delegated through this orchestrator."""

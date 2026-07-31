@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -18,8 +19,8 @@ from companion.events.conversation import (
 )
 from companion.memory.memory_service import MemoryService, MemoryServiceConfig
 from companion.providers.asr import ASRBatchRequest, ASRBatchResult
-from companion.providers.model import LLMRequest, LLMResponse
-from companion.providers.tts import TTSRequest
+from companion.providers.model import LLMRequest, LLMResponse, LLMStreamChunk
+from companion.providers.tts import TTSChunk, TTSRequest, TTSTimingSegment
 from companion.services.voice_pipeline import VoicePipeline, VoicePipelineConfig
 from tests.test_providers import MockASRProvider, MockLLMProvider, MockTTSProvider
 
@@ -34,6 +35,8 @@ class FakeAudioOutput:
         self.interrupted = False
 
     async def play(self, pcm_data: bytes, sample_rate: int) -> PlaybackResult:
+        started_at_ms = int(time.time() * 1000)
+        started_at_ns = time.perf_counter_ns()
         self.play_calls += 1
         self.started.set()
         if self.blocking:
@@ -41,6 +44,9 @@ class FakeAudioOutput:
         return PlaybackResult(
             played_duration_ms=0 if self.interrupted else 100,
             was_interrupted=self.interrupted,
+            stream_generation=1,
+            started_at_ms=started_at_ms,
+            started_at_ns=started_at_ns,
         )
 
     async def stop(self) -> None:
@@ -168,6 +174,68 @@ class TestVoicePipelineIntegration:
         await pipeline._bus.replay(lambda event: event_types.append(event.event_type))
         assert "conversation.turn.interrupted" in event_types
         assert "conversation.turn.completed" not in event_types
+
+    @pytest.mark.asyncio
+    async def test_interrupt_commits_only_confirmed_played_text_to_runtime_history(self):
+        class AlignedTTS(MockTTSProvider):
+            async def synthesize_stream(self, request: TTSRequest):
+                yield TTSChunk(
+                    audio_bytes=b"a" * 48_000,
+                    turn_id=request.turn_id,
+                    segment_index=0,
+                    sample_rate=24000,
+                    is_first=True,
+                    is_final=True,
+                    text=request.text,
+                    duration_ms=1000,
+                    alignment=(
+                        TTSTimingSegment("第一句。", 0, 300),
+                        TTSTimingSegment("第二句。", 300, 900),
+                    ),
+                )
+
+        class PartialInterruptOutput(FakeAudioOutput):
+            async def play(self, pcm_data: bytes, sample_rate: int) -> PlaybackResult:
+                self.play_calls += 1
+                self.started.set()
+                await self.release.wait()
+                return PlaybackResult(played_duration_ms=350, was_interrupted=True)
+
+        bus = EventBus("interrupt-history")
+        state = StateManager()
+        policy = PolicyGate()
+        runtime = CompanionOrchestrator(
+            state,
+            bus,
+            policy,
+            llm_provider=MockLLMProvider(),
+        )
+        output = PartialInterruptOutput()
+        voice = VoicePipeline(
+            state=state,
+            bus=bus,
+            policy=policy,
+            tts=AlignedTTS(),
+            audio_output=output,
+            runtime=runtime,
+        )
+        task = asyncio.create_task(voice.process_text_input("hello", speak=True))
+        await output.started.wait()
+
+        assert await voice.interrupt()
+        await task
+        await asyncio.sleep(0)
+        history = runtime.get_conversation_history().get_recent_turns()
+        interrupted = next(
+            event
+            for event in await captured_events(bus)
+            if event.event_type == "conversation.turn.interrupted"
+        )
+
+        assert len(history) == 1
+        assert history[0].user_text == "hello"
+        assert history[0].companion_text == "第一句。"
+        assert interrupted.interrupted_at_audio_ms >= 0
 
     @pytest.mark.asyncio
     async def test_cancelled_interrupt_call_still_persists_interrupted_terminal(self):
@@ -348,11 +416,271 @@ class TestVoicePipelineIntegration:
         assert event_types == [
             "conversation.turn.started",
             "conversation.asr.finalized",
-            "conversation.llm.response",
             "conversation.tts.synthesized",
             "conversation.audio.played",
+            "conversation.llm.response",
             "conversation.turn.completed",
         ]
+
+    @pytest.mark.asyncio
+    async def test_spoken_turn_starts_tts_before_final_llm_chunk(self):
+        release_final = asyncio.Event()
+
+        class StreamingLLM(MockLLMProvider):
+            async def generate_stream(self, request: LLMRequest):
+                yield LLMStreamChunk(
+                    text="第一句。",
+                    turn_id=request.turn_id,
+                    is_first=True,
+                )
+                await release_final.wait()
+                yield LLMStreamChunk(
+                    text="第二句。",
+                    turn_id=request.turn_id,
+                    is_final=True,
+                    token_index=1,
+                )
+
+        class ReleasingTTS(MockTTSProvider):
+            async def synthesize_stream(self, request: TTSRequest):
+                yield TTSChunk(
+                    audio_bytes=b"a" * 4800,
+                    turn_id=request.turn_id,
+                    segment_index=request.segment_index,
+                    sample_rate=24000,
+                    is_first=True,
+                    is_final=True,
+                    text=request.text,
+                    duration_ms=100,
+                )
+
+        class ReleasingOutput(FakeAudioOutput):
+            async def play(self, pcm_data: bytes, sample_rate: int) -> PlaybackResult:
+                started_at_ms = int(time.time() * 1000)
+                started_at_ns = time.perf_counter_ns()
+                release_final.set()
+                await asyncio.sleep(0.002)
+                result = await super().play(pcm_data, sample_rate)
+                return PlaybackResult(
+                    played_duration_ms=result.played_duration_ms,
+                    was_interrupted=result.was_interrupted,
+                    stream_generation=result.stream_generation,
+                    output_underflow=result.output_underflow,
+                    started_at_ms=started_at_ms,
+                    started_at_ns=started_at_ns,
+                )
+
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=EventBus("stream-before-final"),
+            policy=PolicyGate(),
+            llm=StreamingLLM(),
+            tts=ReleasingTTS(),
+            audio_output=ReleasingOutput(),
+        )
+
+        response = await asyncio.wait_for(
+            voice.process_text_input("hello", speak=True), timeout=0.5
+        )
+
+        assert response == "第一句。第二句。"
+        assert release_final.is_set()
+        snapshot = voice.get_voice_acceptance_snapshot()
+        turn = voice._turn_mgr.get_current_turn()
+        assert turn is not None
+        assert snapshot.incremental_playback, (
+            turn.first_audio_played_at_ms,
+            turn.llm_completed_at_ms,
+            turn.first_audio_before_llm_completed,
+        )
+        assert snapshot.pcm_continuous
+
+    @pytest.mark.asyncio
+    async def test_streaming_prefix_rewrite_fails_without_completing_turn(self):
+        class RewritingLLM(MockLLMProvider):
+            async def generate_stream(self, request: LLMRequest):
+                yield LLMStreamChunk(
+                    text="先说一句。",
+                    turn_id=request.turn_id,
+                    is_first=True,
+                )
+                yield LLMStreamChunk(
+                    text="\nanalysis: 不应朗读。\nfinal: 完全不同。",
+                    turn_id=request.turn_id,
+                    is_final=True,
+                    token_index=1,
+                )
+
+        bus = EventBus("stream-prefix-rewrite")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=RewritingLLM(),
+            tts=MockTTSProvider(),
+            audio_output=FakeAudioOutput(),
+        )
+
+        response = await voice.process_text_input("hello", speak=True)
+        events = await captured_events(bus)
+        terminal = terminal_events(events)
+
+        assert response == "[LLM generation failed]"
+        assert [event.event_type for event in terminal] == ["conversation.turn.failed"]
+        assert isinstance(terminal[0], ConversationTurnFailedEvent)
+        assert terminal[0].stage == "generation"
+        assert terminal[0].error_type == "AssistantOutputSafetyError"
+        assert not any(isinstance(event, ConversationTurnCompletedEvent) for event in events)
+
+    @pytest.mark.asyncio
+    async def test_streaming_llm_failure_is_not_spoken_or_completed(self):
+        class FailingStreamingLLM(MockLLMProvider):
+            async def generate_stream(self, request: LLMRequest):
+                raise RuntimeError("private provider details")
+                yield LLMStreamChunk(  # pragma: no cover
+                    text="unreachable", turn_id=request.turn_id
+                )
+
+        output = FakeAudioOutput()
+        bus = EventBus("stream-generation-failure")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=FailingStreamingLLM(),
+            tts=MockTTSProvider(),
+            audio_output=output,
+        )
+
+        response = await voice.process_text_input("hello", speak=True)
+        events = await captured_events(bus)
+        terminal = terminal_events(events)
+
+        assert response == "[LLM generation failed]"
+        assert output.play_calls == 0
+        assert [event.event_type for event in terminal] == ["conversation.turn.failed"]
+        assert isinstance(terminal[0], ConversationTurnFailedEvent)
+        assert terminal[0].stage == "generation"
+        assert terminal[0].error_type == "RuntimeError"
+
+    @pytest.mark.asyncio
+    async def test_streaming_tts_failure_before_audio_is_reported_as_tts(self):
+        class FailingStreamingTTS(MockTTSProvider):
+            async def synthesize_stream(self, request: TTSRequest):
+                raise RuntimeError("private provider details")
+                yield TTSChunk(  # pragma: no cover
+                    audio_bytes=b"unreachable", turn_id=request.turn_id
+                )
+
+        bus = EventBus("stream-tts-failure")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+            tts=FailingStreamingTTS(),
+            audio_output=FakeAudioOutput(),
+        )
+
+        response = await voice.process_text_input("hello", speak=True)
+        terminal = terminal_events(await captured_events(bus))
+
+        assert response == "[Audio playback failed]"
+        assert [event.event_type for event in terminal] == ["conversation.turn.failed"]
+        assert isinstance(terminal[0], ConversationTurnFailedEvent)
+        assert terminal[0].stage == "tts"
+        assert terminal[0].error_type == "RuntimeError"
+
+    @pytest.mark.asyncio
+    async def test_timestamp_alignment_controls_completed_communicated_text(self):
+        class AlignedTTS(MockTTSProvider):
+            async def synthesize_stream(self, request: TTSRequest):
+                yield TTSChunk(
+                    audio_bytes=b"a" * 48_000,
+                    turn_id=request.turn_id,
+                    segment_index=request.segment_index,
+                    sample_rate=24000,
+                    is_first=True,
+                    is_final=True,
+                    text=request.text,
+                    duration_ms=1000,
+                    alignment=(
+                        TTSTimingSegment("mock ", 0, 300),
+                        TTSTimingSegment("response", 300, 900),
+                    ),
+                )
+
+        class PartialOutput(FakeAudioOutput):
+            async def play(self, pcm_data: bytes, sample_rate: int) -> PlaybackResult:
+                self.play_calls += 1
+                return PlaybackResult(played_duration_ms=350, was_interrupted=False)
+
+        bus = EventBus("aligned-completion")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+            tts=AlignedTTS(),
+            audio_output=PartialOutput(),
+        )
+
+        response = await voice.process_text_input("hello", speak=True)
+        completed = next(
+            event
+            for event in await captured_events(bus)
+            if isinstance(event, ConversationTurnCompletedEvent)
+        )
+
+        assert response == "mock response"
+        assert completed.companion_text == "mock "
+        assert completed.companion_full_text == "mock response"
+
+    @pytest.mark.asyncio
+    async def test_alignment_snapshots_remain_distinct_across_phrase_requests(self):
+        class TwoPhraseLLM(MockLLMProvider):
+            async def generate_stream(self, request: LLMRequest):
+                yield LLMStreamChunk(text="第一句。", turn_id=request.turn_id, is_first=True)
+                yield LLMStreamChunk(
+                    text="第二句。",
+                    turn_id=request.turn_id,
+                    is_final=True,
+                    token_index=1,
+                )
+
+        class PerPhraseAlignedTTS(MockTTSProvider):
+            async def synthesize_stream(self, request: TTSRequest):
+                yield TTSChunk(
+                    audio_bytes=b"a" * 4800,
+                    turn_id=request.turn_id,
+                    segment_index=0,
+                    sample_rate=24000,
+                    is_first=True,
+                    is_final=True,
+                    text=request.text,
+                    duration_ms=100,
+                    alignment=(TTSTimingSegment(request.text, 0, 100, chunk_seq=0),),
+                )
+
+        bus = EventBus("phrase-alignment")
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=bus,
+            policy=PolicyGate(),
+            llm=TwoPhraseLLM(),
+            tts=PerPhraseAlignedTTS(),
+            audio_output=FakeAudioOutput(),
+        )
+
+        response = await voice.process_text_input("hello", speak=True)
+        completed = next(
+            event
+            for event in await captured_events(bus)
+            if isinstance(event, ConversationTurnCompletedEvent)
+        )
+
+        assert response == "第一句。第二句。"
+        assert completed.companion_text == response
 
     @pytest.mark.asyncio
     async def test_playback_failure_does_not_commit_turn(self, pipeline):
@@ -740,7 +1068,7 @@ class TestVoicePipelineIntegration:
         assert await task == "mock response"
         terminal = terminal_events(persisted)
 
-        assert output.play_calls == 0
+        assert output.play_calls == 1
         assert [event.event_type for event in terminal] == ["conversation.turn.interrupted"]
 
     @pytest.mark.asyncio

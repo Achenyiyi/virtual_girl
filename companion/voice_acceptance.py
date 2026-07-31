@@ -28,12 +28,34 @@ class VoiceAcceptanceMicrophone(Protocol):
     ) -> int | None: ...
 
 
+class VoiceAcceptanceSnapshot(Protocol):
+    @property
+    def terminal_state(self) -> str: ...
+
+    @property
+    def incremental_playback(self) -> bool | None: ...
+
+    @property
+    def pcm_continuous(self) -> bool: ...
+
+    @property
+    def played_segment_count(self) -> int: ...
+
+    @property
+    def output_underflow_count(self) -> int: ...
+
+    @property
+    def history_matches_played_text(self) -> bool: ...
+
+
 class VoiceAcceptancePipeline(Protocol):
     async def process_audio_input(self, audio_bytes: bytes) -> str: ...
 
     async def interrupt(self) -> bool: ...
 
     def get_current_state(self) -> Any: ...
+
+    def get_voice_acceptance_snapshot(self) -> VoiceAcceptanceSnapshot: ...
 
 
 @dataclass(frozen=True)
@@ -140,7 +162,9 @@ async def run_voice_acceptance(
             )
         first_events = events[first_start:]
         checks = _complete_turn_checks(
-            first_events, target_e2e_latency_ms=target_e2e_latency_ms
+            first_events,
+            snapshot=pipeline.get_voice_acceptance_snapshot(),
+            target_e2e_latency_ms=target_e2e_latency_ms,
         )
         if not all(check.passed for check in checks):
             return VoiceAcceptanceReport(checks)
@@ -272,6 +296,21 @@ async def run_voice_acceptance(
                     target_ms=target_interrupt_latency_ms,
                 )
             )
+            interrupted_snapshot = pipeline.get_voice_acceptance_snapshot()
+            interrupted_history_ok = (
+                interrupt_ok
+                and interrupted_snapshot.terminal_state == "interrupted"
+                and interrupted_snapshot.history_matches_played_text
+            )
+            checks.append(
+                VoiceAcceptanceCheck(
+                    "voice.interrupted_history",
+                    interrupted_history_ok,
+                    "Interrupted history contains only text confirmed as played."
+                    if interrupted_history_ok
+                    else "Interrupted history did not match the confirmed played text.",
+                )
+            )
             return VoiceAcceptanceReport(checks)
         finally:
             _cancel_and_detach(response_task)
@@ -342,7 +381,10 @@ def _usable_utterance(audio: bytes | None, sample_rate: int) -> bool:
 
 
 def _complete_turn_checks(
-    events: list[BaseEvent], *, target_e2e_latency_ms: int
+    events: list[BaseEvent],
+    *,
+    snapshot: VoiceAcceptanceSnapshot,
+    target_e2e_latency_ms: int,
 ) -> list[VoiceAcceptanceCheck]:
     started = [event for event in events if event.event_type == "conversation.turn.started"]
     if len(started) != 1:
@@ -393,6 +435,49 @@ def _complete_turn_checks(
             else "Voice-turn-to-first-audio latency was missing or exceeded the configured target.",
             actual_ms=e2e_ms,
             target_ms=target_e2e_latency_ms,
+        )
+    )
+    incremental_ok = (
+        complete_ok
+        and snapshot.terminal_state == "completed"
+        and snapshot.incremental_playback is True
+    )
+    checks.append(
+        VoiceAcceptanceCheck(
+            "voice.incremental_playback",
+            incremental_ok,
+            "The first played audio began before the LLM stream completed."
+            if incremental_ok
+            else "The first played audio did not begin before the LLM stream completed.",
+        )
+    )
+    continuity_ok = (
+        complete_ok
+        and snapshot.pcm_continuous
+        and snapshot.played_segment_count > 0
+        and snapshot.output_underflow_count == 0
+    )
+    checks.append(
+        VoiceAcceptanceCheck(
+            "voice.pcm_continuity",
+            continuity_ok,
+            "All PCM chunks used one output stream without underflow."
+            if continuity_ok
+            else "PCM playback changed streams, underflowed, or produced no measured chunks.",
+        )
+    )
+    completed_history_ok = (
+        complete_ok
+        and snapshot.terminal_state == "completed"
+        and snapshot.history_matches_played_text
+    )
+    checks.append(
+        VoiceAcceptanceCheck(
+            "voice.completed_history",
+            completed_history_ok,
+            "Completed history exactly matches text confirmed as played."
+            if completed_history_ok
+            else "Completed history did not match the confirmed played text.",
         )
     )
     return checks

@@ -210,7 +210,9 @@ active turn IDs are rejected, response streams are always released, and provider
 both response and client closure even when third-party close operations ignore cancellation. Fish
 Audio requests now use the official conversation-friendly parameter surface: `latency: balanced`,
 24 kHz PCM, explicit sampling/prosody controls, cross-chunk consistency, and 480-byte text
-segmentation for the current free-tier call limit.
+segmentation for earlier playback, responsive cancellation, and smaller request failure domains.
+The complete response is synthesized across all segments; the chunk size is not a free-tier
+character-limit workaround.
 
 Dialogue output safety status: assistant replies are sanitized before they reach UI, memory, voice
 synthesis, or avatar follow-on behavior. Tool-call-shaped JSON, internal tool directives, and
@@ -222,10 +224,12 @@ backed gate that separately proves one complete microphone-to-playback turn and 
 barge-in. Runtime barge-in now fires on the VAD speech-start edge rather than waiting for the
 interrupting utterance to finish. The gate consumes the same configured providers and durable
 event ledger as production, checks
-the configured first-audio and 300 ms interruption targets, returns deterministic exit codes, and
-can emit privacy-safe JSON evidence without transcripts, responses, audio, credentials, or raw
-exception messages. The latest target-machine run passed with first audio at 5,592 ms against the
-temporary 30,000 ms free-model target and interruption at 27 ms against the 300 ms target.
+the configured first-audio and 300 ms interruption targets, measured incremental playback, one-stream
+PCM continuity without underflow, and exact completed/interrupted history accounting. It returns
+deterministic exit codes and can emit privacy-safe JSON evidence without transcripts, responses,
+audio, credentials, or raw exception messages. The earlier target-machine run passed latency and
+interruption checks, but fresh evidence is required because the current gate contains these stronger
+streaming, continuity, and history checks.
 
 Long-running resource status: file logs rotate at 10 MiB with five backups by default; replay,
 action, audit, proactive, latency, and audio queues are bounded. The durable SQLite event ledger is

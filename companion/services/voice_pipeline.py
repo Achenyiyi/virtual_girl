@@ -23,7 +23,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal, Protocol, TypeVar
@@ -47,9 +47,13 @@ from companion.events.conversation import (
 from companion.protocols.audio import AudioConfirmationProtocol
 from companion.protocols.turn import TurnManager, TurnRecord, TurnState
 from companion.providers.asr import ASRBatchRequest, ASRProvider
-from companion.providers.model import LLMProvider, LLMRequest
+from companion.providers.model import LLMProvider, LLMRequest, LLMResponse, LLMStreamChunk
 from companion.providers.tts import TTSChunk, TTSProvider, TTSRequest
-from companion.security.assistant_output import sanitize_assistant_text
+from companion.security.assistant_output import (
+    AssistantOutputSafetyError,
+    IncrementalAssistantSpeech,
+    sanitize_assistant_text,
+)
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -151,6 +155,26 @@ class PipelineMetrics:
     interruption_response_ms: int = 0
 
 
+@dataclass(frozen=True)
+class VoiceAcceptanceSnapshot:
+    """Privacy-safe facts used by the target-machine voice release gate."""
+
+    terminal_state: str
+    incremental_playback: bool | None
+    pcm_continuous: bool
+    played_segment_count: int
+    output_underflow_count: int
+    history_matches_played_text: bool
+
+
+@dataclass
+class _PlaybackObservation:
+    stream_generations: set[int]
+    played_segment_count: int = 0
+    output_underflow_count: int = 0
+    missing_stream_generation: bool = False
+
+
 class VoicePipeline:
     """Real-time voice conversation pipeline.
 
@@ -201,6 +225,7 @@ class VoicePipeline:
 
         # Metrics collection
         self._metrics: list[PipelineMetrics] = []
+        self._playback_observations: dict[str, _PlaybackObservation] = {}
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -399,6 +424,8 @@ class VoicePipeline:
         self._turn_mgr.transition(turn.turn_id, TurnState.LLM_THINKING)
 
         t0 = time.time()
+        if speak and self._tts and self._audio_output:
+            return await self._respond_streaming(turn, text, deadline=deadline, started_at=t0)
         try:
             llm_request = LLMRequest(
                 messages=[{"role": "user", "content": text}],
@@ -420,6 +447,7 @@ class VoicePipeline:
                 timeout_error="turn_timeout",
             )
             response.text = sanitize_assistant_text(response.text)
+            self._turn_mgr.record_llm_completed(turn.turn_id)
         except asyncio.CancelledError:
             raise
         except VoiceStageError as exc:
@@ -477,7 +505,7 @@ class VoicePipeline:
         communicated_text = response.text
         if speak:
             try:
-                communicated_text = await self._speak_response(
+                communicated_text = await self._speak_complete_response(
                     turn, response.text, deadline=deadline
                 )
             except VoiceStageError as exc:
@@ -548,12 +576,347 @@ class VoicePipeline:
 
         return response.text
 
-    async def _speak_response(self, turn: TurnRecord, text: str, *, deadline: float) -> str:
+    async def _respond_streaming(
+        self,
+        turn: TurnRecord,
+        text: str,
+        *,
+        deadline: float,
+        started_at: float,
+    ) -> str:
+        """Stream one contextual LLM response through phrase-scoped S2.1 synthesis."""
+        response: LLMResponse | None = None
+        try:
+            chunks, response = await self._prepare_llm_stream(text, turn.turn_id)
+            if not self._turn_mgr.transition(turn.turn_id, TurnState.TTS_SYNTHESIZING):
+                return ""
+            response.text = await self._stream_speech(turn, chunks, deadline=deadline)
+            response.total_latency_ms = int((time.time() - started_at) * 1000)
+            if response.time_to_first_token_ms == 0:
+                response.time_to_first_token_ms = response.total_latency_ms
+        except asyncio.CancelledError:
+            raise
+        except VoiceStageError as exc:
+            await self._fail_turn(
+                turn,
+                stage=exc.stage,
+                error_type=exc.error_type,
+                retryable=exc.retryable,
+            )
+            if exc.error_type == "turn_timeout":
+                return "[Voice turn timed out]"
+            if exc.stage == "generation":
+                return "[LLM generation failed]"
+            return "[Audio playback failed]"
+        except AssistantOutputSafetyError as exc:
+            logger.error("Streaming assistant output failed safety validation")
+            await self._fail_turn(
+                turn,
+                stage="generation",
+                error_type=type(exc).__name__,
+                retryable=True,
+            )
+            return "[LLM generation failed]"
+        except Exception as exc:
+            logger.exception("Streaming voice response failed")
+            await self._fail_turn(
+                turn,
+                stage="tts",
+                error_type=type(exc).__name__,
+                retryable=True,
+            )
+            return "[LLM generation failed]"
+
+        current_turn = self._turn_mgr.get_turn(turn.turn_id)
+        if current_turn is None or not current_turn.is_active:
+            return response.text
+
+        self._turn_mgr.record_companion_text(turn.turn_id, response.text, is_full=True)
+        llm_event = LlmResponseGeneratedEvent(
+            turn_id=turn.turn_id,
+            response_text=response.text,
+            model_id=response.model_id,
+            model_provider=response.model_provider,
+            time_to_first_token_ms=response.time_to_first_token_ms,
+            total_latency_ms=response.total_latency_ms,
+            token_count=response.token_count,
+        )
+        try:
+            await self._bus.publish(llm_event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("LLM response event persistence failed")
+            await self._fail_turn(
+                turn,
+                stage="persistence",
+                error_type=type(exc).__name__,
+                retryable=True,
+            )
+            return "[Conversation persistence failed]"
+
+        communicated_text = self._audio_proto.get_played_text(turn.turn_id)
+        if not communicated_text:
+            await self._fail_turn(
+                turn,
+                stage="configuration",
+                error_type="spoken_output_not_configured",
+                retryable=False,
+            )
+            return "[Audio playback failed]"
+
+        completed_event = ConversationTurnCompletedEvent(
+            turn_id=turn.turn_id,
+            session_id=self._current_session_id,
+            turn_sequence=turn.turn_sequence,
+            user_text=text,
+            companion_text=communicated_text,
+            companion_full_text=response.text,
+            total_latency_ms=turn.total_latency_ms,
+            model_id=response.model_id,
+        )
+        if not self._turn_mgr.transition(turn.turn_id, TurnState.COMPLETED):
+            return response.text
+        self._pipeline_state = PipelineState.IDLE
+        try:
+            await self._bus.publish(completed_event)
+        except asyncio.CancelledError:
+            await self._commit_completed_turn(
+                turn, text, response, completed_event, communicated_text
+            )
+            raise
+        except Exception as exc:
+            logger.exception("Conversation completion persistence failed")
+            await self._fail_turn(
+                turn,
+                stage="persistence",
+                error_type=type(exc).__name__,
+                retryable=True,
+                allow_completed=True,
+            )
+            return "[Conversation persistence failed]"
+        await self._commit_completed_turn(turn, text, response, completed_event, communicated_text)
+        self._metrics.append(
+            PipelineMetrics(
+                turn_id=turn.turn_id,
+                llm_total_ms=response.total_latency_ms,
+                e2e_latency_ms=turn.total_latency_ms,
+            )
+        )
+        return response.text
+
+    async def _prepare_llm_stream(
+        self, text: str, turn_id: str
+    ) -> tuple[AsyncIterator[LLMStreamChunk], LLMResponse]:
+        if self._runtime:
+            prepared = await self._runtime.prepare_response_stream(text, turn_id)
+            response = LLMResponse(
+                text="",
+                turn_id=turn_id,
+                model_id=prepared.model_id,
+                model_provider=prepared.model_provider,
+            )
+            return prepared.chunks, response
+        llm = self._llm
+        if llm is None:
+            raise RuntimeError("LLM provider not configured")
+        request = LLMRequest(
+            messages=[{"role": "user", "content": text}],
+            system_prompt=self._state_mgr.get_system_prompt_fragment(),
+            turn_id=turn_id,
+            max_tokens=512,
+        )
+        info = llm.provider_info()
+        return llm.generate_stream(request), LLMResponse(
+            text="",
+            turn_id=turn_id,
+            model_id=info.name,
+            model_provider="cloud",
+        )
+
+    async def _stream_speech(
+        self,
+        turn: TurnRecord,
+        chunks: AsyncIterator[LLMStreamChunk],
+        *,
+        deadline: float,
+    ) -> str:
+        speech = IncrementalAssistantSpeech()
+        queue: asyncio.Queue[LLMStreamChunk | None] = asyncio.Queue()
+        first_token_at: float | None = None
+
+        async def produce() -> None:
+            nonlocal first_token_at
+            iterator = chunks.__aiter__()
+            try:
+                while True:
+                    chunk = await self._next_stream_item(
+                        iterator,
+                        deadline=deadline,
+                        stage="generation",
+                        timeout_error="turn_timeout",
+                    )
+                    if chunk is None:
+                        break
+                    if chunk.text and first_token_at is None:
+                        first_token_at = time.time()
+                    await queue.put(chunk)
+                    if chunk.is_final:
+                        break
+                self._turn_mgr.record_llm_completed(turn.turn_id)
+            finally:
+                queue.put_nowait(None)
+                if hasattr(iterator, "aclose"):
+                    close_task = asyncio.ensure_future(iterator.aclose())
+                    done, _ = await asyncio.wait(
+                        [close_task], timeout=self._config.cleanup_timeout_seconds
+                    )
+                    if not done:
+                        close_task.cancel()
+                        close_task.add_done_callback(self._consume_future_result)
+
+        producer = asyncio.create_task(produce())
+        segment_index = 0
+        audio_base_ms = 0
+        try:
+            while True:
+                chunk = await self._next_queued_chunk(
+                    queue,
+                    deadline=deadline,
+                )
+                if chunk is None:
+                    break
+                phrase = speech.push(chunk.text)
+                if phrase:
+                    segment_index, audio_base_ms = await self._speak_phrase(
+                        turn,
+                        phrase,
+                        deadline=deadline,
+                        segment_index=segment_index,
+                        audio_base_ms=audio_base_ms,
+                    )
+                if chunk.is_final:
+                    break
+            try:
+                await producer
+            except asyncio.CancelledError:
+                if turn.is_active:
+                    raise
+            except VoiceStageError:
+                raise
+            except Exception as exc:
+                raise VoiceStageError(
+                    "generation", type(exc).__name__, retryable=True
+                ) from exc
+            tail, full_text = speech.finish()
+            if tail and turn.is_active:
+                segment_index, audio_base_ms = await self._speak_phrase(
+                    turn,
+                    tail,
+                    deadline=deadline,
+                    segment_index=segment_index,
+                    audio_base_ms=audio_base_ms,
+                )
+            if turn.is_active:
+                await self._finish_audio_output()
+            if first_token_at is not None:
+                turn.first_llm_token_at_ms = int(first_token_at * 1000)
+            return full_text
+        finally:
+            if not producer.done():
+                producer.cancel()
+            done, _ = await asyncio.wait(
+                [producer], timeout=self._config.cleanup_timeout_seconds
+            )
+            if done:
+                self._consume_future_result(producer)
+            else:
+                producer.add_done_callback(self._consume_future_result)
+
+    async def _next_queued_chunk(
+        self,
+        queue: asyncio.Queue[LLMStreamChunk | None],
+        *,
+        deadline: float,
+    ) -> LLMStreamChunk | None:
+        task: asyncio.Future[LLMStreamChunk | None] = asyncio.ensure_future(queue.get())
+        try:
+            done, _ = await asyncio.wait([task], timeout=self._remaining_turn_seconds(deadline))
+            if not done:
+                task.cancel()
+                task.add_done_callback(self._consume_future_result)
+                raise VoiceStageError("generation", "turn_timeout", retryable=True)
+            return await task
+        except asyncio.CancelledError:
+            task.cancel()
+            task.add_done_callback(self._consume_future_result)
+            raise
+
+    async def _next_stream_item(
+        self,
+        iterator: AsyncIterator[LLMStreamChunk],
+        *,
+        deadline: float,
+        stage: VoiceFailureStage,
+        timeout_error: str,
+    ) -> LLMStreamChunk | None:
+        try:
+            async with asyncio.timeout(self._remaining_turn_seconds(deadline)):
+                return await anext(iterator)
+        except StopAsyncIteration:
+            return None
+        except TimeoutError:
+            raise VoiceStageError(stage, timeout_error, retryable=True) from None
+
+    async def _speak_complete_response(
+        self, turn: TurnRecord, text: str, *, deadline: float
+    ) -> str:
+        result = await self._speak_response(
+            turn,
+            text,
+            deadline=deadline,
+            finish_output=True,
+        )
+        if not isinstance(result, str):
+            raise VoiceStageError("tts", "invalid_stream_result", retryable=True)
+        return result
+
+    async def _speak_phrase(
+        self,
+        turn: TurnRecord,
+        text: str,
+        *,
+        deadline: float,
+        segment_index: int,
+        audio_base_ms: int,
+    ) -> tuple[int, int]:
+        result = await self._speak_response(
+            turn,
+            text,
+            deadline=deadline,
+            segment_index=segment_index,
+            audio_base_ms=audio_base_ms,
+            finish_output=False,
+        )
+        if not isinstance(result, tuple):
+            raise VoiceStageError("tts", "invalid_stream_result", retryable=True)
+        return result
+
+    async def _speak_response(
+        self,
+        turn: TurnRecord,
+        text: str,
+        *,
+        deadline: float,
+        segment_index: int = 0,
+        audio_base_ms: int = 0,
+        finish_output: bool = True,
+    ) -> str | tuple[int, int]:
         if not self._tts or not self._audio_output:
             logger.error("Spoken turn requires both TTS and audio output")
             return ""
 
-        request = TTSRequest(text=text, turn_id=turn.turn_id)
+        request = TTSRequest(text=text, turn_id=turn.turn_id, segment_index=segment_index)
         try:
             provider_name = self._tts.provider_info().name
         except Exception as exc:
@@ -594,21 +957,34 @@ class VoicePipeline:
                     if not chunk.audio_bytes:
                         continue
                     chunk_text = chunk.text or (text if first_chunk else "")
+                    effective_segment_index = segment_index + chunk.segment_index
+                    effective_audio_start_ms = audio_base_ms + chunk.audio_start_ms
+                    effective_alignment = tuple(
+                        type(aligned)(
+                            text=aligned.text,
+                            start_ms=aligned.start_ms + audio_base_ms,
+                            end_ms=aligned.end_ms + audio_base_ms,
+                            chunk_seq=segment_index * 1_000_000_000 + aligned.chunk_seq,
+                        )
+                        for aligned in chunk.alignment
+                    )
                     duration_ms = chunk.duration_ms or max(
                         1, int(len(chunk.audio_bytes) / (chunk.sample_rate * 2) * 1000)
                     )
                     record = self._audio_proto.record_synthesis(
                         turn.turn_id,
-                        chunk.segment_index,
+                        effective_segment_index,
                         chunk.audio_bytes,
                         duration_ms,
                         chunk_text,
+                        audio_start_ms=effective_audio_start_ms,
+                        alignment=effective_alignment,
                     )
                     try:
                         await self._bus.publish(
                             TtsSynthesizedEvent(
                                 turn_id=turn.turn_id,
-                                segment_index=chunk.segment_index,
+                                segment_index=effective_segment_index,
                                 text=chunk_text,
                                 audio_duration_ms=duration_ms,
                                 time_to_first_byte_ms=chunk.time_to_first_byte_ms,
@@ -625,7 +1001,10 @@ class VoicePipeline:
                     if current_turn is None or not current_turn.is_active:
                         break
                     if first_chunk:
-                        if not self._turn_mgr.transition(turn.turn_id, TurnState.PLAYING):
+                        if turn.state == TurnState.TTS_SYNTHESIZING:
+                            if not self._turn_mgr.transition(turn.turn_id, TurnState.PLAYING):
+                                break
+                        elif turn.state != TurnState.PLAYING:
                             break
                         self._pipeline_state = PipelineState.SPEAKING
                         first_chunk = False
@@ -657,17 +1036,23 @@ class VoicePipeline:
                         raise VoiceStageError(
                             "playback", type(exc).__name__, retryable=True
                         ) from exc
+                    self._turn_mgr.record_audio_played(
+                        turn.turn_id,
+                        playback.started_at_ms,
+                        playback.started_at_ns,
+                    )
                     confirmed = self._audio_proto.confirm_played(
                         turn.turn_id,
-                        chunk.segment_index,
+                        effective_segment_index,
                         playback.played_duration_ms,
                         playback.was_interrupted,
                     )
+                    self._record_playback_observation(turn, playback)
                     try:
                         await self._bus.publish(
                             AudioPlayedEvent(
                                 turn_id=turn.turn_id,
-                                segment_index=chunk.segment_index,
+                                segment_index=effective_segment_index,
                                 audio_hash=record.audio_hash,
                                 played_duration_ms=playback.played_duration_ms,
                                 was_interrupted=playback.was_interrupted,
@@ -702,27 +1087,36 @@ class VoicePipeline:
                     raise
                 except Exception:
                     logger.debug("TTS stream close failed during voice cleanup", exc_info=True)
-            finish_task: asyncio.Future[None] = asyncio.ensure_future(self._audio_output.finish())
-            try:
-                done_finish, _ = await asyncio.wait(
-                    [finish_task], timeout=self._config.cleanup_timeout_seconds
-                )
-                if not done_finish:
-                    finish_task.cancel()
-                    finish_task.add_done_callback(self._consume_future_result)
-                    raise VoiceStageError(
-                        "playback", "playback_cleanup_timeout", retryable=True
-                    )
-                await finish_task
-            except asyncio.CancelledError:
+            if finish_output:
+                await self._finish_audio_output()
+        if finish_output:
+            return self._audio_proto.get_played_text(turn.turn_id)
+        return (
+            self._audio_proto.next_segment_index(turn.turn_id),
+            self._audio_proto.generated_audio_duration_ms(turn.turn_id),
+        )
+
+    async def _finish_audio_output(self) -> None:
+        if self._audio_output is None:
+            return
+        finish_task: asyncio.Future[None] = asyncio.ensure_future(self._audio_output.finish())
+        try:
+            done_finish, _ = await asyncio.wait(
+                [finish_task], timeout=self._config.cleanup_timeout_seconds
+            )
+            if not done_finish:
                 finish_task.cancel()
                 finish_task.add_done_callback(self._consume_future_result)
+                raise VoiceStageError("playback", "playback_cleanup_timeout", retryable=True)
+            await finish_task
+        except asyncio.CancelledError:
+            finish_task.cancel()
+            finish_task.add_done_callback(self._consume_future_result)
+            raise
+        except Exception as exc:
+            if isinstance(exc, VoiceStageError):
                 raise
-            except Exception as exc:
-                if isinstance(exc, VoiceStageError):
-                    raise
-                raise VoiceStageError("playback", type(exc).__name__, retryable=True) from exc
-        return self._audio_proto.get_played_text(turn.turn_id)
+            raise VoiceStageError("playback", type(exc).__name__, retryable=True) from exc
 
     async def _commit_completed_turn(
         self,
@@ -852,15 +1246,17 @@ class VoicePipeline:
 
         interruption_ms = int((time.time() - t0) * 1000)
 
-        # Publish interrupt event
-        interrupt_event = ConversationTurnInterruptedEvent(
-            turn_id=current.turn_id,
-            interrupted_at_audio_ms=0,
-            new_turn_id="pending",
-            reason="user_speech",
-        )
         try:
-            await self._bus.publish(interrupt_event)
+            await self._bus.publish(
+                ConversationTurnInterruptedEvent(
+                    turn_id=current.turn_id,
+                    interrupted_at_audio_ms=self._audio_proto.played_audio_duration_ms(
+                        current.turn_id
+                    ),
+                    new_turn_id="pending",
+                    reason="user_speech",
+                )
+            )
         except Exception as exc:
             logger.exception("Conversation interruption persistence failed")
             await self._fail_turn(
@@ -870,6 +1266,21 @@ class VoicePipeline:
                 retryable=True,
                 allow_interrupted=True,
             )
+        else:
+            communicated_text = self._audio_proto.get_played_text(current.turn_id)
+            if communicated_text and self._runtime:
+                try:
+                    self._runtime.commit_interrupted_response(
+                        current.user_text,
+                        turn_id=current.turn_id,
+                        communicated_text=communicated_text,
+                        latency_ms=current.total_latency_ms,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Interrupted conversation history commit failed for turn %s",
+                        current.turn_id,
+                    )
 
         self._metrics.append(
             PipelineMetrics(
@@ -904,6 +1315,70 @@ class VoicePipeline:
 
     def get_current_state(self) -> PipelineState:
         return self._pipeline_state
+
+    def get_voice_acceptance_snapshot(self) -> VoiceAcceptanceSnapshot:
+        """Return release-gate facts without exposing conversation or audio content."""
+        turn = self._turn_mgr.get_current_turn()
+        if turn is None:
+            return VoiceAcceptanceSnapshot(
+                terminal_state="missing",
+                incremental_playback=False,
+                pcm_continuous=False,
+                played_segment_count=0,
+                output_underflow_count=0,
+                history_matches_played_text=False,
+            )
+        observation = self._playback_observations.get(turn.turn_id)
+        played_segment_count = observation.played_segment_count if observation else 0
+        output_underflow_count = observation.output_underflow_count if observation else 0
+        pcm_continuous = bool(
+            observation
+            and played_segment_count > 0
+            and not observation.missing_stream_generation
+            and len(observation.stream_generations) == 1
+            and output_underflow_count == 0
+        )
+        return VoiceAcceptanceSnapshot(
+            terminal_state=str(turn.state),
+            incremental_playback=(
+                turn.first_audio_before_llm_completed
+                if turn.first_audio_played_at_ms > 0 and turn.llm_completed_at_ms > 0
+                else None
+            ),
+            pcm_continuous=pcm_continuous,
+            played_segment_count=played_segment_count,
+            output_underflow_count=output_underflow_count,
+            history_matches_played_text=self._history_matches_played_text(turn),
+        )
+
+    def _record_playback_observation(
+        self, turn: TurnRecord, playback: PlaybackResult
+    ) -> None:
+        observation = self._playback_observations.setdefault(
+            turn.turn_id, _PlaybackObservation(stream_generations=set())
+        )
+        if playback.played_duration_ms > 0:
+            observation.played_segment_count += 1
+            turn.audio_segments_played += 1
+        if playback.stream_generation > 0:
+            observation.stream_generations.add(playback.stream_generation)
+        else:
+            observation.missing_stream_generation = True
+        if playback.output_underflow:
+            observation.output_underflow_count += 1
+
+    def _history_matches_played_text(self, turn: TurnRecord) -> bool:
+        if self._runtime is None:
+            return False
+        played_text = self._audio_proto.get_played_text(turn.turn_id)
+        matching = [
+            entry
+            for entry in self._runtime.get_conversation_history().get_recent_turns()
+            if entry.turn_id == turn.turn_id
+        ]
+        if not played_text:
+            return not matching
+        return len(matching) == 1 and matching[0].companion_text == played_text
 
     def _ensure_accepting_turns(self) -> None:
         if self._closed:

@@ -146,17 +146,20 @@ interrupted terminal event within `target_interrupt_latency_ms` of the microphon
 signal. The full barge-in utterance continues collecting for inspection without delaying the stop
 signal. Before prompting for barge-in, the gate observes a short no-speech window; a premature VAD
 edge fails as suspected speaker echo or crosstalk instead of being counted as a user interruption.
-The completed turn must reach its
-first played audio within `target_e2e_latency_ms`. Both targets are configured under
-`providers.asr.capture`. The current defaults are 30,000 ms for first played audio and 300 ms for
-interruption because the free Fish `s2.1-pro-free` model has no SLA/TTFA guarantee. When moving to a
-paid Fish model, regenerate target-machine evidence with the lower latency budget before release.
+The completed turn must reach its first played audio within `target_e2e_latency_ms`, begin device
+playback before the LLM stream completes, reuse one output stream without underflow, and commit
+history that exactly matches the text confirmed as played. The interrupted turn must likewise
+commit no unheard continuation. Both latency targets are configured under `providers.asr.capture`.
+The current defaults are 30,000 ms for first played audio and 300 ms for interruption because the
+free Fish `s2.1-pro-free` model has no SLA/TTFA guarantee. This release intentionally remains on
+the free model. A later paid-mode migration only changes the Fish `model` value; regenerate
+target-machine evidence with the desired lower latency budget after that change.
 
 The Fish TTS runtime uses the official streaming HTTP surface with 24 kHz PCM, `latency: balanced`,
 explicit temperature/top-p/prosody controls, cross-chunk consistency, and per-request text
-segmentation below the free-tier call limit. This keeps long companion replies from failing the
-remote validation limit and gives playback smaller, earlier chunks without changing the local
-faster-whisper ASR path.
+segmentation (480 UTF-8 bytes by default). This chunk size gives playback smaller, earlier units,
+improves cancellation response, and limits the scope of one failed request. It does not truncate
+long companion replies and does not change the local faster-whisper ASR path.
 
 The JSON variant writes interactive prompts to stderr and exactly one machine-readable report to
 stdout. Redirect stdout to retain release evidence. The report contains only check identifiers,

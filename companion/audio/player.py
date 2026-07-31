@@ -28,6 +28,10 @@ class PlaybackResult:
 
     played_duration_ms: int
     was_interrupted: bool = False
+    stream_generation: int = 0
+    output_underflow: bool = False
+    started_at_ms: int = 0
+    started_at_ns: int = 0
 
 
 class SystemAudioOutput:
@@ -36,6 +40,7 @@ class SystemAudioOutput:
     def __init__(self) -> None:
         self._process: asyncio.subprocess.Process | None = None
         self._interrupted = False
+        self._stream_generation = 0
 
     async def play(self, pcm_data: bytes, sample_rate: int = 24_000) -> PlaybackResult:
         if not pcm_data:
@@ -52,6 +57,10 @@ class SystemAudioOutput:
             temp_path = temp_file.name
         try:
             started_at = time.monotonic()
+            playback_started_at_ms = int(time.time() * 1000)
+            playback_started_at_ns = time.perf_counter_ns()
+            self._stream_generation += 1
+            stream_generation = self._stream_generation
             self._process = await self._start_process(temp_path)
             await self._process.wait()
             elapsed_ms = int((time.monotonic() - started_at) * 1000)
@@ -61,6 +70,9 @@ class SystemAudioOutput:
             return PlaybackResult(
                 played_duration_ms=played_ms,
                 was_interrupted=self._interrupted,
+                stream_generation=stream_generation,
+                started_at_ms=playback_started_at_ms,
+                started_at_ns=playback_started_at_ns,
             )
         finally:
             self._process = None
@@ -113,6 +125,8 @@ class SoundDeviceAudioOutput:
         self._stream: Any | None = None
         self._sample_rate = 0
         self._interrupted = False
+        self._stream_generation = 0
+        self._active_stream_generation = 0
 
     async def play(self, pcm_data: bytes, sample_rate: int = 24_000) -> PlaybackResult:
         if not pcm_data:
@@ -123,15 +137,35 @@ class SoundDeviceAudioOutput:
         stream = self._stream
         if stream is None:
             raise RuntimeError("Audio stream was not initialized")
+        stream_generation = self._active_stream_generation
+        playback_started_at_ms = 0
+        playback_started_at_ns = 0
+
+        def write_pcm() -> Any:
+            nonlocal playback_started_at_ms, playback_started_at_ns
+            playback_started_at_ms = int(time.time() * 1000)
+            playback_started_at_ns = time.perf_counter_ns()
+            return stream.write(pcm_data)
+
         try:
-            await asyncio.to_thread(stream.write, pcm_data)
+            output_underflow = bool(await asyncio.to_thread(write_pcm))
         except Exception:
             if not self._interrupted:
                 raise
-            return PlaybackResult(played_duration_ms=0, was_interrupted=True)
+            return PlaybackResult(
+                played_duration_ms=0,
+                was_interrupted=True,
+                stream_generation=stream_generation,
+                started_at_ms=playback_started_at_ms,
+                started_at_ns=playback_started_at_ns,
+            )
         return PlaybackResult(
             played_duration_ms=duration_ms,
             was_interrupted=self._interrupted,
+            stream_generation=stream_generation,
+            output_underflow=output_underflow,
+            started_at_ms=playback_started_at_ms,
+            started_at_ns=playback_started_at_ns,
         )
 
     async def _ensure_stream(self, sample_rate: int) -> None:
@@ -149,6 +183,8 @@ class SoundDeviceAudioOutput:
         )
         await asyncio.to_thread(self._stream.start)
         self._sample_rate = sample_rate
+        self._stream_generation += 1
+        self._active_stream_generation = self._stream_generation
 
     async def finish(self) -> None:
         stream = self._stream
@@ -156,6 +192,7 @@ class SoundDeviceAudioOutput:
             return
         self._stream = None
         self._sample_rate = 0
+        self._active_stream_generation = 0
         with contextlib.suppress(Exception):
             await asyncio.to_thread(stream.stop)
         with contextlib.suppress(Exception):
@@ -168,6 +205,7 @@ class SoundDeviceAudioOutput:
         self._interrupted = True
         self._stream = None
         self._sample_rate = 0
+        self._active_stream_generation = 0
         with contextlib.suppress(Exception):
             await asyncio.to_thread(stream.abort)
         with contextlib.suppress(Exception):
