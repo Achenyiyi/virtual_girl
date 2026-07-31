@@ -118,6 +118,7 @@ async def test_sounddevice_output_reuses_stream_for_gapless_chunks(monkeypatch) 
 
         def write(self, data: bytes) -> None:
             self.writes.append(data)
+            return False
 
         def stop(self) -> None:
             self.stopped = True
@@ -138,9 +139,38 @@ async def test_sounddevice_output_reuses_stream_for_gapless_chunks(monkeypatch) 
     await output.finish()
 
     assert first.played_duration_ms == second.played_duration_ms == 1000
+    assert first.stream_generation == second.stream_generation == 1
+    assert not first.output_underflow and not second.output_underflow
     assert stream.started
     assert len(stream.writes) == 2
     assert stream.stopped and stream.closed
+
+
+@pytest.mark.asyncio
+async def test_sounddevice_output_reports_underflow(monkeypatch) -> None:
+    class UnderflowStream:
+        def start(self) -> None:
+            return None
+
+        def write(self, _data: bytes) -> bool:
+            return True
+
+        def stop(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    stream = UnderflowStream()
+    module = type("FakeSoundDevice", (), {"RawOutputStream": lambda **_kwargs: stream})
+    monkeypatch.setattr("companion.audio.player.importlib.import_module", lambda _name: module)
+    output = SoundDeviceAudioOutput()
+
+    result = await output.play(b"\x00\x00" * 100, 100)
+    await output.finish()
+
+    assert result.stream_generation == 1
+    assert result.output_underflow
 
 
 @pytest.mark.asyncio

@@ -273,12 +273,7 @@ class CloudLLMProvider(LLMProvider):
             raise
         except Exception as e:
             logger.error("Streaming LLM error: %s", redact_text(e))
-            yield LLMStreamChunk(
-                text=f"\n[Error: {redact_text(e)}]",
-                turn_id=request.turn_id,
-                is_final=True,
-                token_index=token_index,
-            )
+            raise RuntimeError("Streaming LLM request failed") from None
         else:
             yield LLMStreamChunk(
                 text="", turn_id=request.turn_id, is_final=True, token_index=token_index

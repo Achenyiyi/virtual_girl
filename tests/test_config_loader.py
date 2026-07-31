@@ -29,6 +29,7 @@ def test_packaged_default_config_is_cwd_independent(tmp_path, monkeypatch) -> No
     assert config.tts_config is not None
     assert config.tts_config.provider == "fish_audio"
     assert config.tts_config.model == "s2.1-pro-free"
+    assert config.tts_config.reference_id == "7f92f8afb8ec43bf81429cc1c9199cb1"
     assert config.tts_config.api_key_env == "FISH_API_KEY"
     assert config.tts_config.credential_target == "VirtualCompanion/FishAudio"
     assert config.tts_config.latency == "balanced"

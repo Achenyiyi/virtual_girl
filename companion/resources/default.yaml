@@ -51,7 +51,7 @@ providers:
         enabled: true
         provider: "fish_audio"
         model: "s2.1-pro-free"
-        reference_id: ""
+        reference_id: "7f92f8afb8ec43bf81429cc1c9199cb1"  # AD学姐
         api_key_env: "FISH_API_KEY"  # pragma: allowlist secret
         credential_target: "VirtualCompanion/FishAudio"
         base_url: "https://api.fish.audio"

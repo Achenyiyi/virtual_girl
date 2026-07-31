@@ -50,7 +50,7 @@ class MockLLMProvider(LLMProvider):
             "Chunk",
             (),
             {
-                "text": "mock",
+                "text": "mock response",
                 "turn_id": request.turn_id,
                 "is_first": True,
                 "is_final": True,

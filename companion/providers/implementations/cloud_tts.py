@@ -6,7 +6,9 @@ The runtime keeps ASR local and sends only assistant reply text to Fish Audio TT
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
+import json
 import logging
 import re
 from collections.abc import AsyncIterator
@@ -21,6 +23,7 @@ from companion.providers.tts import (
     TTSChunk,
     TTSProvider,
     TTSRequest,
+    TTSTimingSegment,
     TTSVoice,
 )
 from companion.security.windows_credentials import configured_secret_sources, resolve_secret
@@ -63,6 +66,8 @@ class CloudTTSConfig:
         )
         if self.provider != "fish_audio":
             raise ValueError("only Fish Audio cloud TTS is currently implemented")
+        if self.model not in {"s2.1-pro", "s2.1-pro-free"}:
+            raise ValueError("Fish Audio streaming TTS requires an S2.1 model")
         if not re.fullmatch(r"[A-Za-z0-9_.-]+", self.model):
             raise ValueError("Fish Audio model contains unsupported characters")
         if self.reference_id and not re.fullmatch(r"[A-Za-z0-9_-]+", self.reference_id):
@@ -156,19 +161,23 @@ class CloudTTSProvider(TTSProvider):
         )
 
     async def synthesize_stream(self, request: TTSRequest) -> AsyncIterator[TTSChunk]:
-        """Yield PCM bytes as Fish Audio's chunked HTTP response arrives."""
+        """Yield timestamped PCM chunks from Fish Audio's official SSE endpoint."""
         import time
 
         t0 = time.time()
         owner_task = self._claim_turn(request.turn_id)
-        chunk_size_bytes = int(self._config.sample_rate * 2 * 0.1)
         segment_idx = 0
+        audio_offset_ms = 0
+        alignment_by_chunk: dict[int, tuple[TTSTimingSegment, ...]] = {}
         try:
             segment_requests = self._segment_request(request)
             for segment_number, segment_request in enumerate(segment_requests):
                 is_last_segment = segment_number == len(segment_requests) - 1
-                pending: bytes | None = None
-                url, headers, payload = self._fish_request(segment_request)
+                saw_audio = False
+                pending: tuple[bytes, int] | None = None
+                request_audio_base_ms = audio_offset_ms
+                chunk_seq_base = segment_number * 1_000_000
+                url, headers, payload = self._fish_request(segment_request, timestamped=True)
                 client = await self._get_client()
                 async with client.stream(
                     "POST",
@@ -178,21 +187,58 @@ class CloudTTSProvider(TTSProvider):
                 ) as response:
                     response.raise_for_status()
                     self._active_streams[request.turn_id] = response
-                    async for chunk_data in response.aiter_bytes(chunk_size_bytes):
+                    async for event in self._iter_sse_events(response):
                         if request.turn_id in self._cancelled_syntheses:
                             break
+                        audio_bytes, snapshot = self._parse_timestamp_event(
+                            event,
+                            request_audio_base_ms=request_audio_base_ms,
+                            chunk_seq_base=chunk_seq_base,
+                        )
+                        if snapshot is not None:
+                            chunk_seq, segments = snapshot
+                            alignment_by_chunk[chunk_seq] = segments
+                        if not audio_bytes:
+                            continue
+                        saw_audio = True
+                        timeline = tuple(
+                            segment
+                            for chunk_seq in sorted(alignment_by_chunk)
+                            for segment in alignment_by_chunk[chunk_seq]
+                        )
                         if pending is not None:
+                            pending_audio, pending_start_ms = pending
                             yield self._make_stream_chunk(
-                                segment_request, pending, segment_idx, t0, is_final=False
+                                segment_request,
+                                pending_audio,
+                                segment_idx,
+                                t0,
+                                is_final=False,
+                                audio_start_ms=pending_start_ms,
+                                alignment=timeline,
                             )
                             segment_idx += 1
-                        pending = chunk_data
+                        pending = (audio_bytes, audio_offset_ms)
+                        audio_offset_ms += self._pcm_duration_ms(audio_bytes)
                     if pending is not None and request.turn_id not in self._cancelled_syntheses:
+                        pending_audio, pending_start_ms = pending
+                        timeline = tuple(
+                            segment
+                            for chunk_seq in sorted(alignment_by_chunk)
+                            for segment in alignment_by_chunk[chunk_seq]
+                        )
                         yield self._make_stream_chunk(
-                            segment_request, pending, segment_idx, t0, is_final=is_last_segment
+                            segment_request,
+                            pending_audio,
+                            segment_idx,
+                            t0,
+                            is_final=is_last_segment,
+                            audio_start_ms=pending_start_ms,
+                            alignment=timeline,
+                            include_text=True,
                         )
                         segment_idx += 1
-                    elif request.turn_id not in self._cancelled_syntheses:
+                    elif not saw_audio and request.turn_id not in self._cancelled_syntheses:
                         raise CloudTTSError("Fish Audio streaming TTS returned empty audio")
                 self._active_streams.pop(request.turn_id, None)
                 if request.turn_id in self._cancelled_syntheses:
@@ -213,6 +259,9 @@ class CloudTTSProvider(TTSProvider):
         except httpx.HTTPError:
             logger.error("Fish Audio streaming TTS transport failed")
             raise CloudTTSError("Fish Audio streaming TTS transport failed") from None
+        except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+            logger.error("Fish Audio timestamp stream returned invalid data")
+            raise CloudTTSError("Fish Audio timestamp stream returned invalid data") from None
         finally:
             self._active_streams.pop(request.turn_id, None)
             self._release_turn(request.turn_id, owner_task)
@@ -225,6 +274,9 @@ class CloudTTSProvider(TTSProvider):
         started_at: float,
         *,
         is_final: bool,
+        audio_start_ms: int = 0,
+        alignment: tuple[TTSTimingSegment, ...] = (),
+        include_text: bool = False,
     ) -> TTSChunk:
         import time
 
@@ -236,9 +288,11 @@ class CloudTTSProvider(TTSProvider):
             sample_rate=self._config.sample_rate,
             is_first=is_first,
             is_final=is_final,
-            text=request.text if is_first else "",
+            text=request.text if include_text else "",
             duration_ms=int(len(audio_bytes) / (self._config.sample_rate * 2 / 1000)),
             time_to_first_byte_ms=(int((time.time() - started_at) * 1000) if is_first else 0),
+            audio_start_ms=audio_start_ms,
+            alignment=alignment,
         )
 
     async def cancel(self, turn_id: str) -> bool:
@@ -248,9 +302,6 @@ class CloudTTSProvider(TTSProvider):
         if not active:
             return False
         self._cancelled_syntheses.add(turn_id)
-        if task is not None and task is not asyncio.current_task() and not task.done():
-            task.cancel()
-            task.add_done_callback(self._consume_task_result)
         if response is not None:
             close_task = asyncio.create_task(response.aclose())
             done, _ = await asyncio.wait(
@@ -259,6 +310,9 @@ class CloudTTSProvider(TTSProvider):
             if not done:
                 close_task.cancel()
                 close_task.add_done_callback(self._consume_task_result)
+        elif task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+            task.add_done_callback(self._consume_task_result)
         return True
 
     async def list_voices(self) -> list[TTSVoice]:
@@ -266,7 +320,11 @@ class CloudTTSProvider(TTSProvider):
         return [
             TTSVoice(
                 voice_id=self._config.reference_id or "fish-audio-default",
-                name="Fish Audio S2.1 Pro Free",
+                name=(
+                    "Fish Audio S2.1 Pro Free"
+                    if self._config.model == "s2.1-pro-free"
+                    else "Fish Audio S2.1 Pro"
+                ),
                 language="zh",
                 gender="female",
                 style_tags=["natural", "expressive", "free-tier"],
@@ -291,7 +349,9 @@ class CloudTTSProvider(TTSProvider):
             logger.error("Fish Audio TTS transport failed")
             raise CloudTTSError("Fish Audio TTS transport failed") from None
 
-    def _fish_request(self, request: TTSRequest) -> tuple[str, dict[str, str], dict[str, Any]]:
+    def _fish_request(
+        self, request: TTSRequest, *, timestamped: bool = False
+    ) -> tuple[str, dict[str, str], dict[str, Any]]:
         api_key = self._config.get_api_key()
         if not api_key:
             raise CloudTTSError("Fish Audio TTS credential is not configured")
@@ -323,14 +383,113 @@ class CloudTTSProvider(TTSProvider):
         }
         if reference_id:
             payload["reference_id"] = reference_id
-        url = f"{self._config.base_url.rstrip('/')}/v1/tts"
+        endpoint = "/v1/tts/stream/with-timestamp" if timestamped else "/v1/tts"
+        url = f"{self._config.base_url.rstrip('/')}{endpoint}"
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "model": self._config.model,
             "User-Agent": "virtual-companion/0.1.0",
         }
+        if timestamped:
+            headers["Accept"] = "text/event-stream"
         return url, headers, payload
+
+    async def _iter_sse_events(self, response: httpx.Response) -> AsyncIterator[str]:
+        data_lines: list[str] = []
+        async for line in response.aiter_lines():
+            if line == "":
+                if data_lines:
+                    yield "\n".join(data_lines)
+                    data_lines.clear()
+                continue
+            if line.startswith(":"):
+                continue
+            if line.startswith("data:"):
+                data_lines.append(line[5:].lstrip())
+        if data_lines:
+            yield "\n".join(data_lines)
+
+    def _parse_timestamp_event(
+        self,
+        payload: str,
+        *,
+        request_audio_base_ms: int = 0,
+        chunk_seq_base: int = 0,
+    ) -> tuple[bytes, tuple[int, tuple[TTSTimingSegment, ...]] | None]:
+        event = json.loads(payload)
+        if not isinstance(event, dict):
+            raise ValueError("timestamp event must be an object")
+        encoded_audio = event.get("audio_base64", "")
+        if not isinstance(encoded_audio, str):
+            raise ValueError("audio_base64 must be a string")
+        audio_bytes = base64.b64decode(encoded_audio, validate=True) if encoded_audio else b""
+        alignment = event.get("alignment")
+        if alignment is None:
+            return audio_bytes, None
+        if not isinstance(alignment, dict):
+            raise ValueError("alignment must be an object")
+        chunk_seq = chunk_seq_base + int(event["chunk_seq"])
+        offset_ms = request_audio_base_ms + self._seconds_to_ms(
+            event.get("chunk_audio_offset_sec", 0)
+        )
+        raw_segments = alignment.get("segments")
+        if not isinstance(raw_segments, list):
+            raise ValueError("alignment segments must be a list")
+        raw_timing: list[tuple[str, int, int]] = []
+        for raw_segment in raw_segments:
+            if not isinstance(raw_segment, dict):
+                raise ValueError("alignment segment must be an object")
+            text = raw_segment.get("text")
+            if not isinstance(text, str):
+                raise ValueError("alignment text must be a string")
+            start_ms = offset_ms + self._seconds_to_ms(raw_segment.get("start", 0))
+            end_ms = offset_ms + self._seconds_to_ms(raw_segment.get("end", 0))
+            if start_ms < 0 or end_ms < start_ms:
+                raise ValueError("alignment times are invalid")
+            raw_timing.append((text, start_ms, end_ms))
+        content = event.get("content", "")
+        if not isinstance(content, str):
+            raise ValueError("content must be a string")
+        aligned_text = self._restore_alignment_text(content, [item[0] for item in raw_timing])
+        segments = tuple(
+            TTSTimingSegment(
+                text=segment_text,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                chunk_seq=chunk_seq,
+            )
+            for segment_text, (_, start_ms, end_ms) in zip(
+                aligned_text, raw_timing, strict=True
+            )
+        )
+        return audio_bytes, (chunk_seq, segments)
+
+    @staticmethod
+    def _restore_alignment_text(content: str, segment_texts: list[str]) -> list[str]:
+        if not segment_texts or not content:
+            return segment_texts
+        restored: list[str] = []
+        cursor = 0
+        for segment_text in segment_texts:
+            index = content.find(segment_text, cursor)
+            if index < 0:
+                return segment_texts
+            end = index + len(segment_text)
+            restored.append(content[cursor:end])
+            cursor = end
+        if cursor < len(content):
+            restored[-1] += content[cursor:]
+        return restored
+
+    def _pcm_duration_ms(self, audio_bytes: bytes) -> int:
+        return int(len(audio_bytes) / (self._config.sample_rate * 2) * 1000)
+
+    @staticmethod
+    def _seconds_to_ms(value: Any) -> int:
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError("timestamp must be numeric")
+        return round(float(value) * 1000)
 
     def _segment_request(self, request: TTSRequest) -> list[TTSRequest]:
         return [
@@ -339,14 +498,17 @@ class CloudTTSProvider(TTSProvider):
         ]
 
     def _split_text_for_fish(self, text: str) -> list[str]:
-        limit = max(1, self._config.max_text_bytes - 48)
+        limit = max(1, self._config.max_text_bytes)
         if len(text.encode("utf-8")) <= limit:
             return [text]
-        pieces = [
-            piece
-            for piece in re.findall(r"[^。！？!?；;\n]+[。！？!?；;]?\s*|\n+", text)
-            if piece.strip()
-        ] or [text]
+        pieces: list[str] = []
+        cursor = 0
+        for boundary in re.finditer(r"[。！？!?；;]+[^\S\n]*|\n+", text):
+            pieces.append(text[cursor : boundary.end()])
+            cursor = boundary.end()
+        if cursor < len(text):
+            pieces.append(text[cursor:])
+        pieces = [piece for piece in pieces if piece] or [text]
         segments: list[str] = []
         current = ""
         for piece in pieces:
@@ -354,13 +516,13 @@ class CloudTTSProvider(TTSProvider):
             if len(candidate.encode("utf-8")) <= limit:
                 current = candidate
                 continue
-            if current.strip():
-                segments.append(current.strip())
+            if current:
+                segments.append(current)
             current = ""
             segments.extend(self._split_oversized_piece(piece, limit))
-        if current.strip():
-            segments.append(current.strip())
-        return segments or [text[:limit]]
+        if current:
+            segments.append(current)
+        return segments or [text]
 
     @staticmethod
     def _split_oversized_piece(piece: str, limit: int) -> list[str]:
@@ -371,11 +533,11 @@ class CloudTTSProvider(TTSProvider):
             if len(candidate.encode("utf-8")) <= limit:
                 current = candidate
                 continue
-            if current.strip():
-                segments.append(current.strip())
+            if current:
+                segments.append(current)
             current = char
-        if current.strip():
-            segments.append(current.strip())
+        if current:
+            segments.append(current)
         return segments
 
     @staticmethod
@@ -453,28 +615,49 @@ class CloudTTSProvider(TTSProvider):
         )
 
     async def health_check(self) -> ProviderHealth:
-        """Validate the Fish Audio credential without synthesizing speech."""
+        """Validate the credential and configured voice without synthesizing speech."""
         api_key = self._config.get_api_key()
         if not api_key:
             return ProviderHealth.UNHEALTHY
         try:
             client = await self._get_client()
+            headers = {"Authorization": f"Bearer {api_key}"}
             response = await client.get(
                 f"{self._config.base_url.rstrip('/')}/wallet/self/api-credit",
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers=headers,
                 timeout=5.0,
             )
-            if 200 <= response.status_code < 300:
+            wallet_health = self._health_from_status(response.status_code)
+            if wallet_health != ProviderHealth.HEALTHY:
+                return wallet_health
+            if not self._config.reference_id:
                 return ProviderHealth.HEALTHY
-            if response.status_code == 429 or 500 <= response.status_code < 600:
-                return ProviderHealth.DEGRADED
-            return ProviderHealth.UNHEALTHY
+            voice_response = await client.get(
+                f"{self._config.base_url.rstrip('/')}/model/{self._config.reference_id}",
+                headers=headers,
+                timeout=5.0,
+            )
+            voice_health = self._health_from_status(voice_response.status_code)
+            if voice_health != ProviderHealth.HEALTHY:
+                return voice_health
+            voice = voice_response.json()
+            if not isinstance(voice, dict) or voice.get("state") != "trained":
+                return ProviderHealth.UNHEALTHY
+            return ProviderHealth.HEALTHY
         except httpx.ConnectError:
             return ProviderHealth.UNHEALTHY
         except httpx.TimeoutException:
             return ProviderHealth.DEGRADED
         except Exception:
             return ProviderHealth.UNHEALTHY
+
+    @staticmethod
+    def _health_from_status(status_code: int) -> ProviderHealth:
+        if 200 <= status_code < 300:
+            return ProviderHealth.HEALTHY
+        if status_code == 429 or 500 <= status_code < 600:
+            return ProviderHealth.DEGRADED
+        return ProviderHealth.UNHEALTHY
 
     async def shutdown(self) -> None:
         active_tasks = tuple(self._active_tasks.values())

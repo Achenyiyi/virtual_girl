@@ -56,8 +56,13 @@ class TurnRecord:
     llm_completed_at_ms: int = 0
     first_tts_byte_at_ms: int = 0
     first_audio_played_at_ms: int = 0
+    first_audio_before_llm_completed: bool = False
     audio_completed_at_ms: int = 0
     interrupted_at_ms: int = 0
+
+    # High-resolution monotonic ordering for sub-millisecond streaming races.
+    llm_completed_at_ns: int = 0
+    first_audio_played_at_ns: int = 0
 
     # Content
     user_text: str = ""
@@ -201,16 +206,33 @@ class TurnManager:
                 turn.first_asr_token_at_ms = now_ms
             case TurnState.LLM_THINKING:
                 turn.asr_finalized_at_ms = now_ms
-            case TurnState.TTS_SYNTHESIZING:
-                turn.llm_completed_at_ms = now_ms
-            case TurnState.PLAYING:
-                turn.first_audio_played_at_ms = now_ms
             case TurnState.COMPLETED:
                 turn.audio_completed_at_ms = now_ms
             case TurnState.INTERRUPTED:
                 turn.interrupted_at_ms = now_ms
 
         return True
+
+    def record_llm_completed(self, turn_id: str) -> None:
+        """Record when the LLM stream actually reaches its terminal item."""
+        turn = self._turns.get(turn_id)
+        if turn and turn.llm_completed_at_ms == 0:
+            turn.llm_completed_at_ms = int(time.time() * 1000)
+            turn.llm_completed_at_ns = time.perf_counter_ns()
+
+    def record_audio_played(
+        self, turn_id: str, started_at_ms: int = 0, started_at_ns: int = 0
+    ) -> None:
+        """Record the measured start of the first device playback write."""
+        turn = self._turns.get(turn_id)
+        if turn is None or turn.first_audio_played_at_ms:
+            return
+        turn.first_audio_played_at_ms = started_at_ms or int(time.time() * 1000)
+        turn.first_audio_played_at_ns = started_at_ns or time.perf_counter_ns()
+        turn.first_audio_before_llm_completed = (
+            turn.llm_completed_at_ns == 0
+            or turn.first_audio_played_at_ns < turn.llm_completed_at_ns
+        )
 
     def interrupt_turn(self, turn_id: str, reason: str = "user_speech") -> TurnRecord | None:
         """Mark a turn as interrupted."""
