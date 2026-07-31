@@ -21,7 +21,11 @@ from companion.events.conversation import (
     LlmResponseGeneratedEvent,
     TtsSynthesizedEvent,
 )
-from companion.voice_acceptance import run_voice_acceptance
+from companion.voice_acceptance import (
+    _COMPLETE_TURN_REQUEST,
+    _INTERRUPTION_REQUEST,
+    run_voice_acceptance,
+)
 
 
 class SequencedMicrophone:
@@ -155,11 +159,46 @@ class AcceptancePipeline:
         return True
 
 
+class RetryableNoSpeechPipeline(AcceptancePipeline):
+    def __init__(self, bus: EventBus, *, no_speech_attempts: set[int]) -> None:
+        super().__init__(bus)
+        self._no_speech_attempts = no_speech_attempts
+        self.attempts = 0
+
+    async def process_audio_input(self, audio_bytes: bytes) -> str:
+        self.attempts += 1
+        if self.attempts not in self._no_speech_attempts:
+            return await super().process_audio_input(audio_bytes)
+
+        turn_id = f"no-speech-turn-{self.attempts}"
+        await self._bus.publish(
+            ConversationTurnStartedEvent(
+                session_id="acceptance-session",
+                turn_id=turn_id,
+                turn_sequence=self.attempts,
+                input_modality="voice",
+            )
+        )
+        await self._bus.publish(
+            ConversationTurnFailedEvent(
+                turn_id=turn_id,
+                session_id="acceptance-session",
+                turn_sequence=self.attempts,
+                stage="asr",
+                error_type="no_speech_recognized",
+                retryable=True,
+                elapsed_ms=10,
+            )
+        )
+        return "[No speech recognized]"
+
+
 @pytest.mark.asyncio
 async def test_voice_acceptance_proves_complete_and_interrupted_paths() -> None:
     bus = EventBus("voice-acceptance")
     pipeline = AcceptancePipeline(bus)
     microphone = SequencedMicrophone([b"a" * 3200, b"b" * 3200, b"c" * 3200])
+    announcements: list[str] = []
 
     report = await run_voice_acceptance(
         microphone=microphone,
@@ -171,6 +210,7 @@ async def test_voice_acceptance_proves_complete_and_interrupted_paths() -> None:
         target_e2e_latency_ms=900,
         target_interrupt_latency_ms=300,
         barge_in_guard_seconds=0.0,
+        announce=announcements.append,
     )
 
     assert report.exit_code == 0
@@ -190,6 +230,58 @@ async def test_voice_acceptance_proves_complete_and_interrupted_paths() -> None:
     assert payload["app_version"]
     assert payload["generated_at"]
     assert bus.subscriber_count == 0
+    assert any(_COMPLETE_TURN_REQUEST in message for message in announcements)
+    assert any(_INTERRUPTION_REQUEST in message for message in announcements)
+
+
+@pytest.mark.asyncio
+async def test_voice_acceptance_retries_no_speech_before_each_turn() -> None:
+    bus = EventBus("voice-acceptance-retry")
+    pipeline = RetryableNoSpeechPipeline(bus, no_speech_attempts={1, 3})
+    microphone = SequencedMicrophone(
+        [b"a" * 3200, b"b" * 3200, b"c" * 3200, b"d" * 3200, b"e" * 3200]
+    )
+    announcements: list[str] = []
+
+    report = await run_voice_acceptance(
+        microphone=microphone,
+        pipeline=pipeline,
+        event_bus=bus,
+        sample_rate=16_000,
+        utterance_timeout_seconds=1.0,
+        turn_timeout_seconds=1.0,
+        target_e2e_latency_ms=900,
+        target_interrupt_latency_ms=300,
+        barge_in_guard_seconds=0.0,
+        announce=announcements.append,
+    )
+
+    assert report.exit_code == 0
+    assert pipeline.attempts == 4
+    assert sum(message.startswith("没有识别到语音") for message in announcements) == 2
+
+
+@pytest.mark.asyncio
+async def test_voice_acceptance_stops_after_three_no_speech_attempts() -> None:
+    bus = EventBus("voice-acceptance-retry-limit")
+    pipeline = RetryableNoSpeechPipeline(bus, no_speech_attempts={1, 2, 3})
+
+    report = await run_voice_acceptance(
+        microphone=SequencedMicrophone([b"a" * 3200, b"b" * 3200, b"c" * 3200]),
+        pipeline=pipeline,
+        event_bus=bus,
+        sample_rate=16_000,
+        utterance_timeout_seconds=1.0,
+        turn_timeout_seconds=1.0,
+        target_e2e_latency_ms=900,
+        target_interrupt_latency_ms=300,
+        barge_in_guard_seconds=0.0,
+    )
+
+    assert report.exit_code == 1
+    assert pipeline.attempts == 3
+    assert report.checks[0].code == "voice.complete_turn"
+    assert report.checks[0].message == "Voice stage failed: asr/no_speech_recognized."
 
 
 @pytest.mark.asyncio
@@ -197,8 +289,12 @@ async def test_voice_acceptance_reports_sanitized_stage_failure() -> None:
     bus = EventBus("voice-acceptance-failure")
 
     class FailingPipeline:
+        def __init__(self) -> None:
+            self.attempts = 0
+
         async def process_audio_input(self, audio_bytes: bytes) -> str:
             assert audio_bytes
+            self.attempts += 1
             await bus.publish(
                 ConversationTurnStartedEvent(
                     session_id="failure-session",
@@ -236,9 +332,10 @@ async def test_voice_acceptance_reports_sanitized_stage_failure() -> None:
                 history_matches_played_text=False,
             )
 
+    pipeline = FailingPipeline()
     report = await run_voice_acceptance(
         microphone=SequencedMicrophone([b"a" * 3200]),
-        pipeline=FailingPipeline(),
+        pipeline=pipeline,
         event_bus=bus,
         sample_rate=16_000,
         utterance_timeout_seconds=1.0,
@@ -249,6 +346,7 @@ async def test_voice_acceptance_reports_sanitized_stage_failure() -> None:
     )
 
     assert report.exit_code == 1
+    assert pipeline.attempts == 1
     assert report.checks[0].message == "Voice stage failed: tts/CloudTTSError."
 
 

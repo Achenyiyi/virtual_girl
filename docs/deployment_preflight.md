@@ -39,6 +39,7 @@ python -m companion --doctor-online --voice-input
 python -m companion --doctor-json --voice-input
 python -m companion --accept-voice
 python -m companion --accept-voice-json 1>voice-acceptance.json
+.\scripts\run_voice_acceptance.ps1
 python -m companion --config production.yaml --accept-avatar
 python -m companion --config production.yaml --accept-avatar-json 1>avatar-acceptance.json
 ```
@@ -146,6 +147,16 @@ interrupted terminal event within `target_interrupt_latency_ms` of the microphon
 signal. The full barge-in utterance continues collecting for inspection without delaying the stop
 signal. Before prompting for barge-in, the gate observes a short no-speech window; a premature VAD
 edge fails as suspected speaker echo or crosstalk instead of being counted as a user interruption.
+If a captured complete-turn or interruption-setup utterance terminates specifically as
+`asr/no_speech_recognized`, the gate asks the operator to repeat it, up to three total attempts
+within the original capture-plus-turn time budget. All other pipeline failures remain fail-fast.
+The CLI supplies exact Chinese requests for both turns. Each request elicits one short opening
+sentence followed by one comma-separated story (at least 300 Chinese characters for completion and
+600 for interruption). This keeps the real LLM stream active
+long enough to compare it with free-model first audio without creating dozens of separate Fish
+requests. The second story is longer so playback remains active long enough for a reliable human
+barge-in. Use the supplied requests rather than an arbitrary short greeting; the gate does not
+manufacture delays or alter the recognized transcript to force a passing result.
 The completed turn must reach its first played audio within `target_e2e_latency_ms`, begin device
 playback before the LLM stream completes, reuse one output stream without underflow, and commit
 history that exactly matches the text confirmed as played. The interrupted turn must likewise
@@ -165,6 +176,24 @@ The JSON variant writes interactive prompts to stderr and exactly one machine-re
 stdout. Redirect stdout to retain release evidence. The report contains only check identifiers,
 pass/fail state, latency values, targets, event-stage failure categories, and exit code. It never
 contains microphone audio, transcripts, generated replies, credentials, or raw exception text.
+
+On Windows, `scripts/run_voice_acceptance.ps1` is the preferred operator-facing wrapper. It calls
+the same production `--accept-voice-json` entry point, keeps the Chinese microphone and barge-in
+prompts live in the current terminal, validates the exact privacy-safe report fields and eight
+required checks, and returns zero only for an 8/8 pass. By default it tests the current worktree and
+saves the report under the ignored `.tmp/voice-acceptance/` directory; this is a pre-build gate, not
+tag evidence. After installing the exact signed release candidate, invoke the same wrapper against
+the installed isolated runtime so repository source cannot shadow the installed wheel:
+
+```powershell
+$installRoot = Join-Path $env:LOCALAPPDATA "Programs\Virtual Companion"
+.\scripts\run_voice_acceptance.ps1 `
+  -PythonPath (Join-Path $installRoot "runtime\python.exe") `
+  -Config (Join-Path $installRoot "config\production.yaml") `
+  -RuntimeWorkingDirectory $installRoot `
+  -IsolatedRuntime `
+  -OutputPath "release-evidence\<tag>\voice-acceptance.json"
+```
 
 `--accept-avatar` is independent of LLM and voice readiness. It requires an explicitly enabled
 avatar bridge, a non-empty `identity.avatar_model_id`, the configured token credential source,

@@ -438,19 +438,30 @@ class CompanionApp:
 
     async def start_voice_mode(self) -> bool:
         """Validate and preload the required local voice components."""
+        logger = logging.getLogger(__name__)
         if not self._asr or not self._tts:
+            logger.error("Voice mode startup failed: ASR or TTS is not configured")
             print(f"{Colors.RED}✗ 语音模式缺少 ASR 或 TTS 配置。{Colors.RESET}")
             return False
         try:
             await self._asr.preload()
         except Exception as exc:
-            logging.getLogger(__name__).error("ASR preload failed: %s", exc)
+            logger.error("ASR preload failed: %s", exc)
             print(f"{Colors.RED}✗ ASR 无法启动；请安装 virtual-companion[voice]。{Colors.RESET}")
             return False
-        if await self._asr.health_check() != ProviderHealth.HEALTHY:
+        asr_health = await self._asr.health_check()
+        logger.info("Voice mode ASR readiness: %s", asr_health)
+        if asr_health != ProviderHealth.HEALTHY:
             print(f"{Colors.RED}✗ ASR 未就绪。{Colors.RESET}")
             return False
-        if await self._tts.health_check() != ProviderHealth.HEALTHY:
+        tts_health = await self._tts.health_check()
+        logger.info("Voice mode TTS readiness: %s", tts_health)
+        if tts_health == ProviderHealth.DEGRADED:
+            logger.warning("Voice mode TTS readiness is transiently degraded; retrying once")
+            await asyncio.sleep(0.25)
+            tts_health = await self._tts.health_check()
+            logger.info("Voice mode TTS readiness after retry: %s", tts_health)
+        if tts_health != ProviderHealth.HEALTHY:
             print(f"{Colors.RED}✗ TTS 未就绪，请检查 Fish Audio 配置。{Colors.RESET}")
             return False
         await self._voice_pipeline.start_session()
@@ -917,7 +928,7 @@ async def async_main(args: argparse.Namespace) -> int:
                         config.voice_pipeline_config.target_interrupt_latency_ms
                     ),
                     announce=(
-                        (lambda message: print(message, file=sys.stderr))
+                        (lambda message: print(message, file=sys.stderr, flush=True))
                         if quiet_output
                         else print
                     ),

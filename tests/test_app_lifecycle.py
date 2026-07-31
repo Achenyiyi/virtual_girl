@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from argparse import Namespace
 from typing import Any
 
@@ -8,7 +9,10 @@ import pytest
 
 from companion.__main__ import CompanionApp, _configure_cli_streams, async_main
 from companion.config_loader import RuntimeConfig
+from companion.providers.base import ProviderHealth
 from companion.providers.implementations.cloud_llm import CloudLLMConfig
+from companion.providers.implementations.cloud_tts import CloudTTSConfig
+from companion.providers.implementations.faster_whisper_asr import FasterWhisperConfig
 
 _REAL_APP_STOP = CompanionApp.stop
 
@@ -50,6 +54,64 @@ def test_cli_streams_use_utf8_for_multilingual_output(monkeypatch) -> None:
         {"encoding": "utf-8", "errors": "backslashreplace"},
         {"encoding": "utf-8", "errors": "backslashreplace"},
     ]
+
+
+@pytest.mark.asyncio
+async def test_start_voice_mode_logs_individual_provider_readiness(
+    monkeypatch, caplog
+) -> None:
+    caplog.set_level(logging.INFO, logger="companion.__main__")
+    config = RuntimeConfig(
+        tts_config=CloudTTSConfig(api_key="x" * 32),
+        asr_config=FasterWhisperConfig(),
+    )
+    app = CompanionApp(config)
+
+    async def preload() -> None:
+        return None
+
+    async def healthy_asr() -> ProviderHealth:
+        return ProviderHealth.HEALTHY
+
+    async def degraded_tts() -> ProviderHealth:
+        return ProviderHealth.DEGRADED
+
+    monkeypatch.setattr(app._asr, "preload", preload)
+    monkeypatch.setattr(app._asr, "health_check", healthy_asr)
+    monkeypatch.setattr(app._tts, "health_check", degraded_tts)
+
+    assert not await app.start_voice_mode()
+    assert "Voice mode ASR readiness: healthy" in caplog.text
+    assert "Voice mode TTS readiness: degraded" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_start_voice_mode_retries_transient_tts_degradation(monkeypatch) -> None:
+    config = RuntimeConfig(
+        tts_config=CloudTTSConfig(api_key="x" * 32),
+        asr_config=FasterWhisperConfig(),
+    )
+    app = CompanionApp(config)
+    tts_health = iter([ProviderHealth.DEGRADED, ProviderHealth.HEALTHY])
+
+    async def preload() -> None:
+        return None
+
+    async def healthy_asr() -> ProviderHealth:
+        return ProviderHealth.HEALTHY
+
+    async def recovering_tts() -> ProviderHealth:
+        return next(tts_health)
+
+    async def no_delay(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(app._asr, "preload", preload)
+    monkeypatch.setattr(app._asr, "health_check", healthy_asr)
+    monkeypatch.setattr(app._tts, "health_check", recovering_tts)
+    monkeypatch.setattr("companion.__main__.asyncio.sleep", no_delay)
+
+    assert await app.start_voice_mode()
 
 
 @pytest.mark.asyncio
