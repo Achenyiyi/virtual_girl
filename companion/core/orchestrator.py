@@ -115,7 +115,6 @@ class CompanionOrchestrator:
         self._gesture_last_success_at: dict[str, float] = {}
         self._gesture_retry_after: dict[str, float] = {}
         self._avatar_speech: tuple[bool, float, float] = (False, 0.0, 0.0)
-        self._last_sent_proactive_level: int | None = None
 
     # ── Provider setters (for late binding / testing) ─────────────────
 
@@ -736,9 +735,10 @@ class CompanionOrchestrator:
         )
         try:
             await self._avatar.update_state(avatar_state)
-            if snapshot.proactive_level_hint != self._last_sent_proactive_level:
-                await self._avatar.set_proactive_level(snapshot.proactive_level_hint)
-                self._last_sent_proactive_level = snapshot.proactive_level_hint
+            # Sent unconditionally: the bridge reverts to its default proactive
+            # level on reconnect, so deduplicating here would leave a fresh
+            # connection stuck at the default until the hint happens to change.
+            await self._avatar.set_proactive_level(snapshot.proactive_level_hint)
             return True
         except Exception:
             if strict:

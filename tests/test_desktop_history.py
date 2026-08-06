@@ -13,7 +13,21 @@ class LedgerMemory:
         self.events = events
 
     async def query_events(self, query):
-        rows = self.events if query.sort_ascending else list(reversed(self.events))
+        rows = [event for event in self.events]
+        if query.start_time:
+            rows = [
+                event
+                for event in rows
+                if event["occurred_at"] >= query.start_time.isoformat()
+            ]
+        if query.end_time:
+            rows = [
+                event
+                for event in rows
+                if event["occurred_at"] <= query.end_time.isoformat()
+            ]
+        if not query.sort_ascending:
+            rows = list(reversed(rows))
         return rows[query.offset : query.offset + query.limit]
 
 
@@ -83,6 +97,48 @@ async def test_history_is_stable_and_never_exposes_full_text() -> None:
     assert "companion_full_text" not in serialized
     assert "hidden-1" not in serialized
     assert stable["turns"][0]["companion_text"] == "回答一"
+
+
+@pytest.mark.asyncio
+async def test_history_pages_never_duplicate_or_drop_turns() -> None:
+    projector = ConversationHistoryProjector(
+        LedgerMemory(
+            [_event(i, "session-a", f"问题{i}", f"回答{i}") for i in range(1, 6)]
+        )
+    )
+
+    first = await projector.history("session-a", limit=2)
+    assert [turn["turn_id"] for turn in first["turns"]] == ["turn-1", "turn-2"]
+    assert first["next_cursor"]
+
+    second = await projector.history("session-a", cursor=first["next_cursor"], limit=2)
+    assert [turn["turn_id"] for turn in second["turns"]] == ["turn-3", "turn-4"]
+    assert second["next_cursor"]
+
+    third = await projector.history("session-a", cursor=second["next_cursor"], limit=2)
+    assert [turn["turn_id"] for turn in third["turns"]] == ["turn-5"]
+    assert third["next_cursor"] == ""
+
+
+@pytest.mark.asyncio
+async def test_history_pushdown_sends_lower_bound() -> None:
+    seen_start_times: list[object] = []
+
+    class RecordingMemory(LedgerMemory):
+        async def query_events(self, query):
+            seen_start_times.append(query.start_time)
+            return await super().query_events(query)
+
+    projector = ConversationHistoryProjector(
+        RecordingMemory([_event(i, "session-a", "问题", "回答") for i in range(1, 6)])
+    )
+
+    first = await projector.history("session-a", limit=2)
+    assert first["next_cursor"]
+    await projector.history("session-a", cursor=first["next_cursor"], limit=2)
+
+    assert seen_start_times[0] is None  # first page reads the whole ledger
+    assert seen_start_times[1] is not None  # later pages prune already-read rows
 
 
 @pytest.mark.asyncio

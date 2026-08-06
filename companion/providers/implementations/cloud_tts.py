@@ -585,9 +585,14 @@ class CloudTTSProvider(TTSProvider):
         self, operation: Awaitable[T], *, operation_name: str
     ) -> T:
         task: asyncio.Future[T] = asyncio.ensure_future(operation)
-        if not await wait_with_timeout(task, self._config.timeout_seconds):
-            raise CloudTTSError(f"Fish Audio TTS {operation_name} timed out")
-        return await task
+        try:
+            if not await wait_with_timeout(task, self._config.timeout_seconds):
+                raise CloudTTSError(f"Fish Audio TTS {operation_name} timed out")
+            return await task
+        except asyncio.CancelledError:
+            task.cancel()
+            task.add_done_callback(consume_task_result)
+            raise
 
     def provider_info(self) -> ProviderInfo:
         return ProviderInfo(

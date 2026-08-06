@@ -1570,9 +1570,14 @@ class VoicePipeline:
         timeout_error: str,
     ) -> T:
         future: asyncio.Future[T] = asyncio.ensure_future(operation)
-        if not await wait_with_timeout(future, timeout_seconds):
-            raise VoiceStageError(stage, timeout_error, retryable=True)
-        return await future
+        try:
+            if not await wait_with_timeout(future, timeout_seconds):
+                raise VoiceStageError(stage, timeout_error, retryable=True)
+            return await future
+        except asyncio.CancelledError:
+            future.cancel()
+            future.add_done_callback(consume_task_result)
+            raise
 
     async def _stop_active_turn(self) -> None:
         task = self._active_turn_task

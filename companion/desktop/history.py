@@ -31,7 +31,7 @@ class ConversationHistoryProjector:
         bounded_limit = _bounded_limit(limit, default=20, maximum=50)
         cursor_data = _decode_cursor(cursor, expected_kind="sessions")
         snapshot = str(cursor_data.get("snapshot", ""))
-        events = await self._completed_events(snapshot)
+        events = await self._completed_events()
         if not snapshot:
             snapshot = _latest_occurred_at(events)
         visible = [event for event in events if str(event.get("occurred_at", "")) <= snapshot]
@@ -83,12 +83,20 @@ class ConversationHistoryProjector:
         bounded_limit = _bounded_limit(limit, default=50, maximum=100)
         cursor_data = _decode_cursor(cursor, expected_kind=f"history:{session_id}")
         snapshot = str(cursor_data.get("snapshot", ""))
-        events = await self._completed_events(snapshot)
+        last_seen = _cursor_last_seen(cursor_data)
+        events = await self._completed_events(last_seen)
         if not snapshot:
             snapshot = _latest_occurred_at(events)
         turns: list[dict[str, Any]] = []
         for event in reversed(events):
-            if str(event.get("occurred_at", "")) > snapshot:
+            occurred_at = str(event.get("occurred_at", ""))
+            if occurred_at > snapshot:
+                continue
+            if last_seen and occurred_at <= last_seen:
+                # Pages advance toward newer turns, so the previous page's rows
+                # (and any same-timestamp ties) are excluded; the last_seen
+                # lower bound applies at the query layer, leaving only the
+                # strictly-newer ties to filter here.
                 continue
             payload = _payload(event)
             if payload.get("session_id") != session_id:
@@ -112,37 +120,42 @@ class ConversationHistoryProjector:
         offset = _cursor_offset(cursor_data)
         page = turns[offset : offset + bounded_limit]
         next_offset = offset + len(page)
+        next_seen = str(page[-1]["occurred_at"]) if page else ""
         return {
             "session_id": session_id,
             "turns": page,
             "next_cursor": (
-                _encode_cursor(f"history:{session_id}", snapshot, next_offset)
+                # The last_seen bound makes the next page's query start where
+                # this page ended, so offset stays 0; cursors without the bound
+                # (older format) keep the offset-slice semantics instead.
+                _encode_cursor(
+                    f"history:{session_id}", snapshot, 0, last_seen=next_seen
+                )
                 if next_offset < len(turns)
                 else ""
             ),
         }
 
-    async def _completed_events(self, snapshot: str = "") -> list[dict[str, Any]]:
-        """Fetch completed-turn events, bounded by a cursor snapshot when given.
+    async def _completed_events(self, last_seen: str = "") -> list[dict[str, Any]]:
+        """Fetch completed-turn events, bounded by a cursor's last_seen when given.
 
-        The snapshot pushdown keeps paged history from re-reading the whole
-        ledger; the round-trip guard skips it for formats the DB cannot compare.
+        The last_seen bound excludes the previous page's rows at the query
+        layer so paged history stops re-reading the whole ledger; it is skipped
+        when the DB cannot compare its format.
         """
-        end_time: datetime | None = None
-        if snapshot:
+        start_time: datetime | None = None
+        if last_seen:
             try:
-                parsed = datetime.fromisoformat(snapshot)
-                if str(parsed) == snapshot:
-                    end_time = parsed
+                start_time = datetime.fromisoformat(last_seen)
             except ValueError:
-                pass
+                start_time = None
         events: list[dict[str, Any]] = []
         offset = 0
         while offset < _MAX_PROJECTED_EVENTS:
             batch = await self._memory.query_events(
                 EventQuery(
                     event_types=[_COMPLETED_EVENT],
-                    end_time=end_time,
+                    start_time=start_time,
                     limit=min(_BATCH_SIZE, _MAX_PROJECTED_EVENTS - offset),
                     offset=offset,
                     sort_ascending=False,
@@ -182,11 +195,13 @@ def _latest_occurred_at(events: list[dict[str, Any]]) -> str:
     return datetime.now(UTC).isoformat()
 
 
-def _encode_cursor(kind: str, snapshot: str, offset: int) -> str:
-    raw = json.dumps(
-        {"kind": kind, "snapshot": snapshot, "offset": offset},
-        separators=(",", ":"),
-    ).encode("utf-8")
+def _encode_cursor(
+    kind: str, snapshot: str, offset: int, *, last_seen: str = ""
+) -> str:
+    payload: dict[str, Any] = {"kind": kind, "snapshot": snapshot, "offset": offset}
+    if last_seen:
+        payload["last_seen"] = last_seen
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
@@ -207,9 +222,29 @@ def _decode_cursor(cursor: str, *, expected_kind: str) -> dict[str, Any]:
         or isinstance(value.get("offset"), bool)
         or not isinstance(value.get("offset"), int)
         or value["offset"] < 0
+        or (
+            value.get("last_seen") is not None
+            and not isinstance(value.get("last_seen"), str)
+        )
     ):
         raise HistoryCursorError("cursor is invalid")
     return value
+
+
+def _cursor_last_seen(cursor: dict[str, Any]) -> str:
+    """Return the cursor's last-seen timestamp, or "" when absent/unparseable.
+
+    The unparseable case must return "" (rather than raise) so paged queries
+    fall back to offset slicing instead of wrongly pruning already-read rows.
+    """
+    raw = cursor.get("last_seen", "")
+    if not isinstance(raw, str) or not raw:
+        return ""
+    try:
+        datetime.fromisoformat(raw)
+    except ValueError:
+        return ""
+    return raw
 
 
 def _cursor_offset(cursor: dict[str, Any]) -> int:

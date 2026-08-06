@@ -772,19 +772,19 @@ class ActionService:
         self._audit_log.append(summary)
         if self._audit_store is None:
             return not self._config.require_durable_audit
-        try:
-            audit_task = asyncio.ensure_future(
-                self._audit_store.append(
-                    ActionAuditEntry(
-                        action_id=record.request.action_id,
-                        stage=stage,
-                        action_type=record.request.action_type,
-                        risk_level=str(record.request.risk_level),
-                        success=success,
-                        details=safe_details,
-                    )
+        audit_task = asyncio.ensure_future(
+            self._audit_store.append(
+                ActionAuditEntry(
+                    action_id=record.request.action_id,
+                    stage=stage,
+                    action_type=record.request.action_type,
+                    risk_level=str(record.request.risk_level),
+                    success=success,
+                    details=safe_details,
                 )
             )
+        )
+        try:
             if not await wait_with_timeout(
                 audit_task, self._config.action_timeout_seconds
             ):
@@ -801,7 +801,15 @@ class ActionService:
                 return False
             await audit_task
         except asyncio.CancelledError:
-            self._audit_store_quarantined = True
+            # Quarantine only when the write is still in flight and its outcome
+            # is unknown. A cancellation racing a completed audit write has
+            # already persisted the record, so the store must stay usable.
+            if not audit_task.done():
+                self._audit_store_quarantined = True
+                logger.critical(
+                    "Action audit store interrupted before stage %s committed; quarantined",
+                    stage,
+                )
             raise
         except Exception:
             logger.exception("Failed to persist action audit record for stage %s", stage)

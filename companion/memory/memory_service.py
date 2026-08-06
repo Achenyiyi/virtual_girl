@@ -427,10 +427,10 @@ class MemoryService(MemoryProvider):
             params.extend(query.event_types)
         if query.start_time:
             conditions.append("occurred_at >= ?")
-            params.append(str(query.start_time))
+            params.append(query.start_time.isoformat())
         if query.end_time:
             conditions.append("occurred_at <= ?")
-            params.append(str(query.end_time))
+            params.append(query.end_time.isoformat())
         if query.privacy_levels:
             placeholders = ",".join("?" for _ in query.privacy_levels)
             conditions.append(f"privacy IN ({placeholders})")

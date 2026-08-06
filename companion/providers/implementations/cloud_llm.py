@@ -163,6 +163,12 @@ class CloudLLMProvider(LLMProvider):
                 logger.error("LLM generation exceeded the configured total timeout")
                 return self._error_response(request)
             return await generation_task
+        except asyncio.CancelledError:
+            # Stop the generation and drain its result so a failure racing the
+            # cancellation is not reported as an unretrieved task exception.
+            generation_task.cancel()
+            generation_task.add_done_callback(consume_task_result)
+            raise
         finally:
             if request.turn_id and self._active_tasks.get(request.turn_id) is generation_task:
                 self._active_tasks.pop(request.turn_id, None)
