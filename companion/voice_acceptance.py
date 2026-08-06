@@ -14,7 +14,10 @@ from typing import Any, Protocol
 from companion import __version__
 from companion.core.event_bus import EventBus
 from companion.events.base import BaseEvent
-from companion.events.conversation import ConversationTurnFailedEvent
+from companion.events.conversation import (
+    ConversationTurnCompletedEvent,
+    ConversationTurnFailedEvent,
+)
 
 
 class VoiceAcceptanceMicrophone(Protocol):
@@ -340,17 +343,18 @@ async def run_voice_acceptance(
                 interrupted
                 and len(interrupted_events) == 1
                 and len(terminal_events) == 1
-                and terminal_events[0].event_type == "conversation.turn.interrupted"
+                and isinstance(terminal_events[0], ConversationTurnCompletedEvent)
+                and terminal_events[0].was_interrupted
             )
             checks.append(
                 VoiceAcceptanceCheck(
                     "voice.interrupt_terminal",
                     interrupt_ok,
-                    "Barge-in produced one durable interrupted terminal event."
+                    "Barge-in produced one interruption notice and one completed terminal."
                     if interrupt_ok
                     else _failure_message(
                         second_events,
-                        "Barge-in did not produce one durable interrupted terminal event.",
+                        "Barge-in did not produce one interruption notice and one terminal.",
                     ),
                 )
             )
@@ -369,7 +373,7 @@ async def run_voice_acceptance(
             interrupted_snapshot = pipeline.get_voice_acceptance_snapshot()
             interrupted_history_ok = (
                 interrupt_ok
-                and interrupted_snapshot.terminal_state == "interrupted"
+                and interrupted_snapshot.terminal_state == "completed"
                 and interrupted_snapshot.history_matches_played_text
             )
             checks.append(
@@ -589,7 +593,6 @@ def _terminal_events(events: list[BaseEvent]) -> list[BaseEvent]:
         if event.event_type
         in {
             "conversation.turn.completed",
-            "conversation.turn.interrupted",
             "conversation.turn.failed",
         }
     ]

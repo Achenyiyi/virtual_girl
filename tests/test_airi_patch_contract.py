@@ -10,6 +10,7 @@ PATCH_PATH = (
     / "airi-v0.11.3"
     / "airi-v0.11.3-avatar-bridge.patch"
 )
+DESKTOP_PATCH_PATH = PATCH_PATH.with_name("airi-v0.11.3-desktop-client.patch")
 
 
 def test_airi_patch_contains_managed_updater_fail_closed_path() -> None:
@@ -75,3 +76,39 @@ def test_airi_patch_pins_and_selects_the_managed_vrm() -> None:
         "b/packages/stage-ui-three/src/components/Model/VRMModel.vue"
     ) in patch
     assert "modelRef.value?.vrm" not in patch
+
+
+def test_desktop_patch_keeps_control_boundary_and_window_lifecycle() -> None:
+    patch = DESKTOP_PATCH_PATH.read_text(encoding="utf-8")
+
+    required_paths = (
+        "apps/stage-tamagotchi/src/main/services/airi/companion-control/client.ts",
+        "apps/stage-tamagotchi/src/main/windows/main/companion-window.ts",
+        "apps/stage-tamagotchi/src/renderer/components/companion-desktop/CompanionDesktopClient.vue",
+        "apps/stage-tamagotchi/src/shared/companion-control.ts",
+    )
+    for path in required_paths:
+        assert f"diff --git a/{path} b/{path}" in patch
+
+    required_fragments = (
+        "createCompanionControlClientFromEnvironment(process.env)",
+        "delete environment.COMPANION_CONTROL_URL",
+        "delete environment.COMPANION_CONTROL_TOKEN",
+        "const ALLOWED_METHODS = new Set",
+        "COMPANION_CONTROL_IPC_WINDOW_MODE",
+        "transparent: true",
+        "shouldPersistCompanionBounds",
+        "voice.stop",
+        "application.quit",
+        "compact-overlay",
+        "prefers-reduced-motion:reduce",
+    )
+    for fragment in required_fragments:
+        assert fragment in patch
+
+    renderer_component = patch.split(
+        "diff --git a/apps/stage-tamagotchi/src/renderer/components/companion-desktop/",
+        maxsplit=1,
+    )[-1].split("diff --git ", maxsplit=1)[0]
+    assert "new WebSocket" not in renderer_component
+    assert "COMPANION_CONTROL_TOKEN" not in renderer_component

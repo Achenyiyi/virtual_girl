@@ -143,7 +143,9 @@ class TurnProtocol:
             TurnState.ERROR,
         },
         TurnState.COMPLETED: set(),  # Terminal
-        TurnState.INTERRUPTED: set(),  # Terminal
+        # Interruption stops provider work immediately, but the public protocol still
+        # requires one completed/failed terminal after the interruption notification.
+        TurnState.INTERRUPTED: {TurnState.COMPLETED},
         TurnState.ERROR: set(),  # Terminal
         TurnState.CANCELLED: set(),  # Terminal
     }
@@ -168,7 +170,9 @@ class TurnManager:
         self._turns: dict[str, TurnRecord] = {}
         self._current_turn_id: str | None = None
 
-    def create_turn(self, session_id: str, turn_sequence: int) -> TurnRecord:
+    def create_turn(
+        self, session_id: str, turn_sequence: int, *, turn_id: str = ""
+    ) -> TurnRecord:
         """Create a new turn and set it as current.
 
         If a previous turn is still active, it gets interrupted.
@@ -180,7 +184,7 @@ class TurnManager:
                 self.interrupt_turn(self._current_turn_id, "new_turn_started")
 
         turn = TurnRecord(
-            turn_id=f"turn_{generate_ulid()}",
+            turn_id=turn_id or f"turn_{generate_ulid()}",
             session_id=session_id,
             turn_sequence=turn_sequence,
             state=TurnState.STARTED,

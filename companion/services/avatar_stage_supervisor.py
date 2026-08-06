@@ -24,6 +24,8 @@ _AVATAR_MODEL_PATH_ENV = "COMPANION_AVATAR_MODEL_PATH"
 _AVATAR_MODEL_SHA256_ENV = "COMPANION_AVATAR_MODEL_SHA256"
 _AVATAR_MODEL_ID_ENV = "COMPANION_AVATAR_MODEL_ID"
 _AVATAR_MODEL_NAME_ENV = "COMPANION_AVATAR_MODEL_NAME"
+_CONTROL_URL_ENV = "COMPANION_CONTROL_URL"
+_CONTROL_TOKEN_ENV = "COMPANION_CONTROL_TOKEN"
 _SHA256_PATTERN = re.compile(r"[0-9a-fA-F]{64}")
 _MODEL_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _MAX_MANAGED_VRM_BYTES = 512 * 1024 * 1024
@@ -273,7 +275,12 @@ class AvatarStageSupervisor:
         return executable, model
 
     async def start(
-        self, token: str, *, parent_environment: Mapping[str, str] | None = None
+        self,
+        token: str,
+        *,
+        parent_environment: Mapping[str, str] | None = None,
+        control_url: str = "",
+        control_token: str = "",
     ) -> None:
         """Start the pinned process and attach it to a kill-on-close Windows job."""
         if self.is_running:
@@ -298,6 +305,8 @@ class AvatarStageSupervisor:
             model_sha256=self._config.expected_model_sha256,
             model_id=self._config.model_id,
             model_name=self._config.model_name,
+            control_url=control_url,
+            control_token=control_token,
         )
         creation_flags = (
             int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
@@ -497,7 +506,17 @@ def _build_child_environment(
     model_sha256: str = "",
     model_id: str = "",
     model_name: str = "",
+    control_url: str = "",
+    control_token: str = "",
 ) -> dict[str, str]:
+    if bool(control_url) != bool(control_token):
+        raise AvatarStageLaunchError(
+            "managed desktop control URL and token must be provided together"
+        )
+    if control_url and not control_url.startswith("ws://127.0.0.1:"):
+        raise AvatarStageLaunchError("managed desktop control URL must use loopback")
+    if control_token and control_token != control_token.strip():
+        raise AvatarStageLaunchError("managed desktop control token is malformed")
     by_upper = {name.upper(): (name, value) for name, value in parent.items()}
     environment: dict[str, str] = {}
     for allowed in _CHILD_ENV_ALLOWLIST:
@@ -510,6 +529,9 @@ def _build_child_environment(
         environment[_AVATAR_MODEL_SHA256_ENV] = model_sha256.strip().lower()
         environment[_AVATAR_MODEL_ID_ENV] = model_id.strip()
         environment[_AVATAR_MODEL_NAME_ENV] = model_name.strip()
+    if control_url:
+        environment[_CONTROL_URL_ENV] = control_url
+        environment[_CONTROL_TOKEN_ENV] = control_token
     return environment
 
 

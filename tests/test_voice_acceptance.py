@@ -63,9 +63,8 @@ class AcceptancePipeline:
         return self._state
 
     def get_voice_acceptance_snapshot(self):
-        terminal_state = "interrupted" if self._interrupted else "completed"
         return SimpleNamespace(
-            terminal_state=terminal_state,
+            terminal_state="completed",
             incremental_playback=True,
             pcm_continuous=True,
             played_segment_count=2,
@@ -153,6 +152,19 @@ class AcceptancePipeline:
                 interrupted_at_audio_ms=0,
                 new_turn_id="pending",
                 reason="user_speech",
+            )
+        )
+        await self._bus.publish(
+            ConversationTurnCompletedEvent(
+                turn_id="acceptance-turn-2",
+                session_id="acceptance-session",
+                turn_sequence=2,
+                user_text="accepted speech",
+                companion_text="accepted response",
+                companion_full_text="accepted response continued",
+                was_interrupted=True,
+                total_latency_ms=400,
+                model_id="test-model",
             )
         )
         self._release.set()

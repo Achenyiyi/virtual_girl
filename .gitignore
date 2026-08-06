@@ -20,6 +20,7 @@ wheels/
 .installed.cfg
 *.egg
 node_modules/
+.airi-desktop-client-work/
 
 # Virtual environments
 venv/

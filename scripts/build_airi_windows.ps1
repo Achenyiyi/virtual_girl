@@ -21,7 +21,8 @@ $PnpmVersion = "10.33.0"
 $GodotVersionPrefix = "4.6.2.stable.mono."
 $checkout = (Resolve-Path -LiteralPath $CheckoutPath).Path
 $repository = (Resolve-Path -LiteralPath $RepositoryRoot).Path
-$patch = Join-Path $repository "integrations\airi-v0.11.3\airi-v0.11.3-avatar-bridge.patch"
+$avatarPatch = Join-Path $repository "integrations\airi-v0.11.3\airi-v0.11.3-avatar-bridge.patch"
+$desktopPatch = Join-Path $repository "integrations\airi-v0.11.3\airi-v0.11.3-desktop-client.patch"
 
 if (-not (Test-Path -LiteralPath (Join-Path $checkout ".git"))) {
     throw "AIRI checkout is not a Git worktree: $checkout"
@@ -61,36 +62,73 @@ if (-not $godotAppData -or -not $godotLocalAppData) {
     throw "APPDATA and LOCALAPPDATA are required for the Godot Windows export"
 }
 
-git -C $checkout apply --check $patch
-git -C $checkout apply $patch
+function Invoke-AiriPatchRollback {
+    param([string[]]$AppliedPatches)
 
-$globalJsonPath = Join-Path $checkout "global.json"
-if (Test-Path -LiteralPath $globalJsonPath) {
-    throw "Refusing to overwrite AIRI global.json: $globalJsonPath"
-}
-$globalJson = [ordered]@{
-    sdk = [ordered]@{
-        version = $DotnetSdkVersion
-        rollForward = "disable"
+    for ($index = $AppliedPatches.Count - 1; $index -ge 0; $index--) {
+        $appliedPatch = $AppliedPatches[$index]
+        git -C $checkout apply --reverse --ignore-space-change --ignore-whitespace --whitespace=nowarn $appliedPatch
+        if ($LASTEXITCODE -ne 0) {
+            throw "AIRI patch rollback failed: $appliedPatch"
+        }
     }
-} | ConvertTo-Json -Depth 3
-$globalJsonBytes = [Text.UTF8Encoding]::new($false).GetBytes(
-    $globalJson + [Environment]::NewLine
-)
-$globalJsonStream = [IO.File]::Open(
-    $globalJsonPath,
-    [IO.FileMode]::CreateNew,
-    [IO.FileAccess]::Write,
-    [IO.FileShare]::None
-)
-try {
-    $globalJsonStream.Write($globalJsonBytes, 0, $globalJsonBytes.Length)
-}
-finally {
-    $globalJsonStream.Dispose()
 }
 
-Push-Location $checkout
+$appliedPatches = [Collections.Generic.List[string]]::new()
+$globalJsonPath = Join-Path $checkout "global.json"
+$globalJsonCreated = $false
+try {
+    foreach ($patch in @($avatarPatch, $desktopPatch)) {
+        if (-not (Test-Path -LiteralPath $patch -PathType Leaf)) {
+            throw "AIRI patch is unavailable: $patch"
+        }
+        git -C $checkout apply --check --ignore-space-change --ignore-whitespace --whitespace=nowarn $patch
+        if ($LASTEXITCODE -ne 0) {
+            throw "AIRI patch validation failed: $patch"
+        }
+        git -C $checkout apply --ignore-space-change --ignore-whitespace --whitespace=nowarn $patch
+        if ($LASTEXITCODE -ne 0) {
+            throw "AIRI patch application failed: $patch"
+        }
+        $appliedPatches.Add($patch)
+    }
+}
+catch {
+    if ($appliedPatches.Count -gt 0) {
+        Invoke-AiriPatchRollback -AppliedPatches $appliedPatches.ToArray()
+    }
+    throw
+}
+
+try {
+    if (Test-Path -LiteralPath $globalJsonPath) {
+        throw "Refusing to overwrite AIRI global.json: $globalJsonPath"
+    }
+    $globalJson = [ordered]@{
+        sdk = [ordered]@{
+            version = $DotnetSdkVersion
+            rollForward = "disable"
+        }
+    } | ConvertTo-Json -Depth 3
+    $globalJsonBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+        $globalJson + [Environment]::NewLine
+    )
+    $globalJsonStream = [IO.File]::Open(
+        $globalJsonPath,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None
+    )
+    # CreateNew proves this invocation owns the file. Record ownership before
+    # writing so any write or disposal failure removes a partial global.json.
+    $globalJsonCreated = $true
+    try {
+        $globalJsonStream.Write($globalJsonBytes, 0, $globalJsonBytes.Length)
+    }
+    finally {
+        $globalJsonStream.Dispose()
+    }
+    Push-Location $checkout
 try {
     $actualDotnetSdkVersion = (dotnet --version).Trim()
 }
@@ -195,4 +233,14 @@ foreach ($requiredOutput in $requiredOutputs) {
     }
 }
 
-Write-Output $output
+    Write-Output $output
+}
+catch {
+    if ($globalJsonCreated -and (Test-Path -LiteralPath $globalJsonPath -PathType Leaf)) {
+        Remove-Item -LiteralPath $globalJsonPath -Force
+    }
+    if ($appliedPatches.Count -gt 0) {
+        Invoke-AiriPatchRollback -AppliedPatches $appliedPatches.ToArray()
+    }
+    throw
+}
