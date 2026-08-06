@@ -245,6 +245,7 @@ LLM 或 TTS 凭据缺失不关闭 AIRI。LLM 缺失时阶段为 `setup_required`
   - 下载并解压 `Godot_v4.6.2-stable_mono_win64.zip`，console 版本输出 `4.6.2.stable.mono.official.71f334935`；导出模板安装到 `%APPDATA%\Godot\export_templates\4.6.2.stable.mono\`。
   - `godot --headless --path engines/stage-tamagotchi-godot --export-release "Windows Desktop"` 成功导出 `build/win/godot-stage.exe`（105,020,264 字节，预设 `codesign/enable=false`）。
   - sidecar 已组装进 `dist\win-unpacked\resources\godot-stage\godot-stage.exe`。
+  - 最终持久化 bundle 位于 `E:\桌面\feishu\desktop-client-dist\`（`airi.exe`、`resources\app.asar`、`resources\app.asar.unpacked`、`resources\godot-stage\godot-stage.exe`）。
 - `verify_airi_windows.ps1`（不使用代码签名证书，按用户指示跳过 `-RequireAuthenticode`）通过：`airi.exe`、`app.asar`、`godot-stage.exe`、受管模型 `8496491754682859078.vrm` 的 SHA-256 全部匹配，`managed-avatar.json` schema/大小/许可证/内嵌 VRM 元数据/许可 URL 校验通过；签名状态如实记录为 `NotSigned`。
 - 真实音频设备验收（2026-08-07，`python -m companion --doctor-voice-hardware`）通过：默认麦克风 `麦克风阵列 (2- Realtek(R) Audio)` 可打开并采集 16 帧内存数据（不落盘、不识别），默认播放流可打开，faster-whisper 模型加载与内存静音推理通过；LLM（DeepSeek）与 TTS（FishAudio）凭据均存在。汇总 `pass=14, warn=0, fail=0, skip=2, exit_code=0`。
 - 残余风险：无。完整语句级验收 `--accept-voice` 需要用户对着麦克风说话，可在用户就绪时按需运行；签名 evidence 模式因不使用代码签名证书而跳过（按用户指示）。
@@ -278,7 +279,7 @@ LLM 或 TTS 凭据缺失不关闭 AIRI。LLM 缺失时阶段为 `setup_required`
 ## 启动方式（2026-08-07 已验证）
 
 1. 确认 bundle 与模型存在：
-   - `E:\桌面\feishu\desktop-client-bundle\win-unpacked\win-unpacked\airi.exe`
+   - `E:\桌面\feishu\desktop-client-dist\airi.exe`
    - `E:\桌面\feishu\model\8496491754682859078.vrm`
 2. 使用持久化的本地配置启动：
    ```
