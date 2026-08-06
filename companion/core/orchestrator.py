@@ -114,6 +114,7 @@ class CompanionOrchestrator:
         self._last_gesture_attempt_at = float("-inf")
         self._gesture_last_success_at: dict[str, float] = {}
         self._gesture_retry_after: dict[str, float] = {}
+        self._avatar_speech: tuple[bool, float, float] = (False, 0.0, 0.0)
 
     # ── Provider setters (for late binding / testing) ─────────────────
 
@@ -138,6 +139,22 @@ class CompanionOrchestrator:
 
     def set_perception(self, provider: PerceptionProvider) -> None:
         self._perception = provider
+
+    async def set_avatar_speech(
+        self, *, speaking: bool, mouth_open: float = 0.0, audio_level: float = 0.0
+    ) -> None:
+        """Drive lip-sync state and immediately push an avatar snapshot.
+
+        Called by the voice pipeline while TTS audio is being played. The
+        desktop renderer reads ``mouth_open`` and ``audio_level`` from the
+        bridge state, so both must be normalized before leaving Python.
+        """
+        self._avatar_speech = (
+            bool(speaking),
+            max(0.0, min(1.0, mouth_open)),
+            max(0.0, min(1.0, audio_level)),
+        )
+        await self._sync_avatar_state(strict=False)
 
     # ── Lifecycle ─────────────────────────────────────────────────────
 
@@ -699,11 +716,12 @@ class CompanionOrchestrator:
             return True
         affect = self.state.affect
         snapshot = self._expression_mapper.map(affect)
+        speaking, mouth_open, audio_level = self._avatar_speech
         avatar_state = AvatarState(
             expression=FacialExpression(
                 expression_id=snapshot.facial.expression_id,
                 intensity=snapshot.facial.expression_intensity,
-                mouth_open=snapshot.facial.mouth_open,
+                mouth_open=mouth_open,
                 eye_open=snapshot.facial.eye_open,
                 brow_raise=snapshot.facial.brow_raise,
                 cheek_raise=snapshot.facial.cheek_raise,
@@ -718,6 +736,8 @@ class CompanionOrchestrator:
             valence=affect.valence,
             arousal=affect.arousal,
             energy=affect.energy,
+            is_speaking=speaking,
+            audio_level=audio_level,
         )
         try:
             await self._avatar.update_state(avatar_state)

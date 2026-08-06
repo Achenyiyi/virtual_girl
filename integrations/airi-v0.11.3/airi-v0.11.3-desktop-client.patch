@@ -3198,10 +3198,10 @@ index 00000000..143d9a5c
 +</style>
 diff --git a/apps/stage-tamagotchi/src/renderer/components/companion-desktop/CompanionDesktopStage.vue b/apps/stage-tamagotchi/src/renderer/components/companion-desktop/CompanionDesktopStage.vue
 new file mode 100644
-index 00000000..0d73782a
+index 00000000..b22c7a1e
 --- /dev/null
 +++ b/apps/stage-tamagotchi/src/renderer/components/companion-desktop/CompanionDesktopStage.vue
-@@ -0,0 +1,102 @@
+@@ -0,0 +1,108 @@
 +<script setup lang="ts">
 +import type { AvatarRendererRuntime, AvatarStateSnapshot } from '../../../shared/avatar-bridge/renderer-runtime'
 +import type { CompanionControlApi, CompanionWindowMode } from '../../../shared/companion-control'
@@ -3237,6 +3237,12 @@ index 00000000..0d73782a
 +  scene.value.setExpression(expressionId, intensity)
 +}
 +
++async function applyAvatarEmotion(expressionId: string, intensity: number) {
++  if (!scene.value)
++    throw new Error('avatar stage is unavailable')
++  scene.value.setEmotion(expressionId, intensity)
++}
++
 +async function applyAvatarGesture(gestureId: string, intensity: number) {
 +  if (!scene.value)
 +    throw new Error('avatar stage is unavailable')
@@ -3244,10 +3250,10 @@ index 00000000..0d73782a
 +}
 +
 +async function applyAvatarState(state: AvatarStateSnapshot) {
-+  await applyAvatarExpression(state.expression.expression_id, state.expression.intensity, 0)
++  await applyAvatarEmotion(state.expression.expression_id, state.expression.intensity)
 +  if (!scene.value)
 +    throw new Error('avatar stage is unavailable')
-+  scene.value.setExpression('aa', state.expression.mouth_open)
++  scene.value.setLipSync(state.expression.mouth_open)
 +  if (state.pose.gesture_id)
 +    await applyAvatarGesture(state.pose.gesture_id, state.pose.gesture_intensity)
 +}
@@ -3708,10 +3714,10 @@ index 00000000..312f4d68
 +})
 diff --git a/apps/stage-tamagotchi/src/renderer/components/companion-desktop/companionDesktopStage.test.ts b/apps/stage-tamagotchi/src/renderer/components/companion-desktop/companionDesktopStage.test.ts
 new file mode 100644
-index 00000000..5622eb4b
+index 00000000..e27e1cad
 --- /dev/null
 +++ b/apps/stage-tamagotchi/src/renderer/components/companion-desktop/companionDesktopStage.test.ts
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,36 @@
 +import { describe, expect, it } from 'vitest'
 +
 +import threeSceneSource from '../../../../../../packages/stage-ui-three/src/components/ThreeScene.vue?raw'
@@ -3738,6 +3744,14 @@ index 00000000..5622eb4b
 +    expect(threeSceneSource).toContain('const resolvedEnvSelect = computed(() => props.environmentMode ?? envSelect.value)')
 +    expect(threeSceneSource).toContain(`v-if="resolvedEnvSelect === 'skyBox'"`)
 +    expect(threeSceneSource).toContain(':env-select="resolvedEnvSelect"')
++  })
++
++  it('keeps persistent emotions and drives lip-sync directly', () => {
++    expect(stageSource).toContain('scene.value.setEmotion(state.expression.expression_id, state.expression.intensity)')
++    expect(stageSource).toContain('scene.value.setLipSync(state.expression.mouth_open)')
++    expect(stageSource).not.toContain("scene.value.setExpression('aa'")
++    expect(threeSceneSource).toContain('setEmotion: (expression: string, intensity = 1) => {')
++    expect(threeSceneSource).toContain('setLipSync: (amount: number) => {')
 +  })
 +})
 diff --git a/apps/stage-tamagotchi/src/renderer/pages/index.companion-boundary.test.ts b/apps/stage-tamagotchi/src/renderer/pages/index.companion-boundary.test.ts
@@ -3947,8 +3961,29 @@ index 00000000..f7f9854a
 +    throw new Error('Companion Control environment is invalid')
 +  return { url, token }
 +}
+diff --git a/packages/stage-ui-three/src/components/Model/VRMModel.vue b/packages/stage-ui-three/src/components/Model/VRMModel.vue
+index c604758d..24d30f75 100644
+--- a/packages/stage-ui-three/src/components/Model/VRMModel.vue
++++ b/packages/stage-ui-three/src/components/Model/VRMModel.vue
+@@ -1120,6 +1120,16 @@ defineExpose({
+   setExpression(expression: string, intensity = 1) {
+     vrmEmote.value?.setEmotionWithResetAfter(expression, 3000, intensity)
+   },
++  setEmotion(expression: string, intensity = 1) {
++    vrmEmote.value?.setEmotion(expression, intensity)
++  },
++  setLipSync(amount: number) {
++    const value = Math.min(1, Math.max(0, amount))
++    const expressionManager = vrm.value?.expressionManager
++    if (!expressionManager?.expressionMap.aa)
++      return
++    expressionManager.setValue('aa', value)
++  },
+   // NOTICE: This runtime frame hook is intentionally separate from internal VRM model hooks.
+   // External callers use it for live pose/tracking input; internal hooks remain reserved for
+   // stage-ui-three's own model/material lifecycle extensions.
 diff --git a/packages/stage-ui-three/src/components/ThreeScene.vue b/packages/stage-ui-three/src/components/ThreeScene.vue
-index 94f1432a..e456d209 100644
+index 94f1432a..bc40868f 100644
 --- a/packages/stage-ui-three/src/components/ThreeScene.vue
 +++ b/packages/stage-ui-three/src/components/ThreeScene.vue
 @@ -52,6 +52,7 @@ const props = withDefaults(defineProps<{
@@ -3976,7 +4011,20 @@ index 94f1432a..e456d209 100644
      skyBoxEnvRef.value?.reload(skyBoxSrc.value)
    }
  })
-@@ -756,7 +758,7 @@ defineExpose({
+@@ -700,6 +702,12 @@ defineExpose({
+   setExpression: (expression: string, intensity = 1) => {
+     modelRef.value?.setExpression(expression, intensity)
+   },
++  setEmotion: (expression: string, intensity = 1) => {
++    modelRef.value?.setEmotion(expression, intensity)
++  },
++  setLipSync: (amount: number) => {
++    modelRef.value?.setLipSync(amount)
++  },
+   // NOTICE: External runtime hooks are intentionally separate from internal VRM model hooks.
+   // This public frame hook is reserved for live pose/tracking input and is forwarded to VRMModel
+   // without exposing the internal model/material lifecycle hook pipeline.
+@@ -756,7 +764,7 @@ defineExpose({
          @orbit-controls-ready="onOrbitControlsReady"
        />
        <SkyBox
@@ -3985,7 +4033,7 @@ index 94f1432a..e456d209 100644
          ref="skyBoxEnvRef"
          :sky-box-src="skyBoxSrc"
          :as-background="true"
-@@ -795,7 +797,7 @@ defineExpose({
+@@ -795,7 +803,7 @@ defineExpose({
          :model-src="props.modelSrc"
          :idle-animation="props.idleAnimation"
          :paused="props.paused"

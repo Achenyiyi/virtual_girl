@@ -15,7 +15,7 @@ class TestExpressionMapper:
         affect = AffectState(valence=0.8, arousal=0.7, energy=0.9)
         snapshot = mapper.map(affect)
 
-        assert snapshot.facial.expression_id in ("happy", "gentle_smile")
+        assert snapshot.facial.expression_id == "happy"
         assert snapshot.facial.mouth_smile > 0.5  # Happy = smile
         assert snapshot.voice.rate > 1.0  # Higher arousal = faster speech
 
@@ -24,7 +24,7 @@ class TestExpressionMapper:
         affect = AffectState(valence=-0.7, arousal=0.2, energy=0.3)
         snapshot = mapper.map(affect)
 
-        assert snapshot.facial.expression_id in ("sad", "upset")
+        assert snapshot.facial.expression_id == "sad"
         assert snapshot.facial.mouth_frown > 0.3
         assert snapshot.voice.style in ("sad", "empathetic", "general")
 
@@ -33,7 +33,7 @@ class TestExpressionMapper:
         affect = AffectState(valence=0.0, arousal=0.5, energy=0.7)
         snapshot = mapper.map(affect)
 
-        assert snapshot.facial.expression_id in ("neutral", "attentive")
+        assert snapshot.facial.expression_id in ("neutral", "think")
         assert snapshot.voice.style == "general"
 
     def test_tts_params_from_affect(self):
@@ -116,12 +116,12 @@ class TestEmotionConsistency:
             voice_style = snapshot.voice.style
 
             # Check consistency: happy face → cheerful/gentle voice
-            if "happy" in face_id or "smile" in face_id or "content" in face_id:
+            if face_id == "happy":
                 assert voice_style in ("cheerful", "gentle", "excited", "general"), (
                     f"Face={face_id} but voice={voice_style} (v={valence}, a={arousal})"
                 )
 
-            if "sad" in face_id or "upset" in face_id:
+            if face_id == "sad" or face_id == "angry":
                 assert voice_style in ("sad", "empathetic", "general"), (
                     f"Face={face_id} but voice={voice_style} (v={valence}, a={arousal})"
                 )

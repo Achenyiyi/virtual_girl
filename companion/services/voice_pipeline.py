@@ -22,7 +22,9 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import math
 import time
+from array import array
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -67,6 +69,24 @@ VoiceFailureStage = Literal[
     "persistence",
     "cancellation",
 ]
+
+
+def _pcm_int16_rms(audio_bytes: bytes) -> float:
+    """Return normalized RMS (0..1) for little-endian int16 PCM audio."""
+    if not audio_bytes:
+        return 0.0
+    usable = audio_bytes[: len(audio_bytes) - len(audio_bytes) % 2]
+    try:
+        samples = array("h")
+        samples.frombytes(usable)
+    except (ValueError, OverflowError):
+        return 0.0
+    if not samples:
+        return 0.0
+    sum_squares = 0.0
+    for value in samples:
+        sum_squares += value * value
+    return min(1.0, math.sqrt(sum_squares / len(samples)) / 32768.0)
 
 
 class VoiceStageError(Exception):
@@ -1111,6 +1131,9 @@ class VoicePipeline:
                             break
                         self._pipeline_state = PipelineState.SPEAKING
                         first_chunk = False
+                    rms = _pcm_int16_rms(chunk.audio_bytes)
+                    mouth_open = 0.0 if rms <= 0.0 else min(0.85, 0.22 + rms * 2.6)
+                    await self._update_avatar_speech(True, mouth_open, rms)
                     playback_task: asyncio.Future[PlaybackResult] = asyncio.ensure_future(
                         self._audio_output.play(chunk.audio_bytes, chunk.sample_rate)
                     )
@@ -1192,12 +1215,29 @@ class VoicePipeline:
                     logger.debug("TTS stream close failed during voice cleanup", exc_info=True)
             if finish_output:
                 await self._finish_audio_output()
+            await self._update_avatar_speech(False, 0.0, 0.0)
         if finish_output:
             return self._audio_proto.get_played_text(turn.turn_id)
         return (
             self._audio_proto.next_segment_index(turn.turn_id),
             self._audio_proto.generated_audio_duration_ms(turn.turn_id),
         )
+
+    async def _update_avatar_speech(
+        self, speaking: bool, mouth_open: float, audio_level: float
+    ) -> None:
+        """Push lip-sync state to the avatar bridge without blocking speech."""
+        runtime = self._runtime
+        if runtime is None:
+            return
+        try:
+            await runtime.set_avatar_speech(
+                speaking=speaking, mouth_open=mouth_open, audio_level=audio_level
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("Avatar speech state update failed; playback continues")
 
     async def _finish_audio_output(self) -> None:
         if self._audio_output is None:

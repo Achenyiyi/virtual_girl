@@ -22,6 +22,11 @@ wheels/
 node_modules/
 .airi-desktop-client-work/
 
+# Local desktop client build artifacts (large binaries exceed GitHub limits)
+desktop-client-dist/
+desktop-client-bundle/
+desktop-client-qa/
+
 # Virtual environments
 venv/
 .venv/

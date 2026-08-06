@@ -1340,6 +1340,63 @@ class TestVoicePipelineIntegration:
             await memory.shutdown()
 
     @pytest.mark.asyncio
+    async def test_spoken_turn_pushes_lip_sync_state(self):
+        class SpeechTTS(MockTTSProvider):
+            async def synthesize_stream(self, request: TTSRequest):
+                yield TTSChunk(
+                    audio_bytes=b"\xff\x7f\x00\x80" * 2400,
+                    turn_id=request.turn_id,
+                    segment_index=0,
+                    sample_rate=24000,
+                    is_first=True,
+                    is_final=True,
+                    text=request.text,
+                    duration_ms=200,
+                )
+
+        class SpeechRecorder:
+            def __init__(self):
+                self.states = []
+
+            async def update_state(self, state):
+                self.states.append(state)
+
+            async def set_proactive_level(self, level):
+                return None
+
+        bus = EventBus("voice-lip-sync")
+        state = StateManager()
+        policy = PolicyGate()
+        avatar = SpeechRecorder()
+        runtime = CompanionOrchestrator(
+            state,
+            bus,
+            policy,
+            llm_provider=MockLLMProvider(),
+            avatar_provider=avatar,
+        )
+        voice = VoicePipeline(
+            state=state,
+            bus=bus,
+            policy=policy,
+            tts=SpeechTTS(),
+            audio_output=FakeAudioOutput(),
+            runtime=runtime,
+        )
+
+        await voice.process_text_input("hello", speak=True)
+
+        speaking_states = [
+            snapshot
+            for snapshot in avatar.states
+            if snapshot.is_speaking
+        ]
+        assert speaking_states
+        assert all(snapshot.expression.mouth_open > 0.5 for snapshot in speaking_states)
+        assert avatar.states[-1].is_speaking is False
+        assert avatar.states[-1].expression.mouth_open == 0.0
+
+    @pytest.mark.asyncio
     async def test_latency_stats_collected(self, pipeline):
         """Pipeline should track latency metrics."""
         await pipeline.start_session()

@@ -296,3 +296,12 @@ LLM 或 TTS 凭据缺失不关闭 AIRI。LLM 缺失时阶段为 `setup_required`
 - 修复：`ASRProvider` 协议增加默认空实现的 `preload()`；`CompanionOrchestrator.startup()` 在就绪阶段对 ASR 先 `preload()`（faster-whisper 首次约 17 秒，与 LLM/TTS 网络检查并发执行）再 `health_check()`。
 - 端到端验证：`python -m companion --desktop --config config\desktop.yaml` 后日志为 `Provider health: 5/5 healthy (LLM/TTS/ASR/Memory/Avatar)`，快照 `voice_input` 为 True，麦克风按钮启用。
 - 测试：完整 `pytest -q` 为 `604 passed`（新增 ASR preload 与编排器预载回归测试），ruff 与 mypy 通过。
+
+### VRM 表情与口型修复（2026-08-07）
+
+- 根因一（表情不变化）：Python 表情映射输出 `gentle_smile/content/attentive/worried/upset` 等 ID，而 AIRI `useVRMEmote` 只支持 `happy/sad/angry/surprised/neutral/think`，未知 ID 被静默忽略（`console.warn` 后 return）。渲染层证据：`stage.inspect` 的 `expression_id` 为 `attentive`，但直接触发 `happy` 后 `expression_sequence` 从 0 变为 1，证明链路本身可用。
+- 根因二（不张口）：Python 侧 `mouth_open` 恒为 0（映射器注释“Set by lip-sync, not emotion”），TTS 播放期间从不推送 `is_speaking/audio_level`；即使有值，`CompanionDesktopStage` 用 `setExpression('aa', ...)` 也会因为 `'aa'` 不在 emotion 表而清掉表情重置定时器并返回。
+- Python 修复：`ExpressionMapper.EXPRESSION_MAP` 收敛到 AIRI 支持集合（强度表达原语义）；`CompanionOrchestrator` 新增 `set_avatar_speech()`，`VoicePipeline` 在 TTS 播放期间按 PCM RMS 推送 `is_speaking/mouth_open/audio_level`。
+- AIRI 补丁修复：`CompanionDesktopStage` 的 `applyAvatarState` 改用 `setEmotion`（持续表情，不 3 秒重置）+ `setLipSync`（直接写 `expressionManager.setValue('aa', value)`）；`ThreeScene`/`VRMModel` 暴露对应转发方法。`integrations/airi-v0.11.3/airi-v0.11.3-desktop-client.patch` 已同步更新并通过干净检出顺序验证。
+- 部署说明：本机在此次全量重建时 `pnpm install` 被安全软件/网络问题反复挂起，无法走完 `build_airi_windows.ps1`；因此对已验证的 `desktop-client-dist\resources\app.asar` 执行最小化渲染层修补（解包 → 替换 `companion-D6AVuzsx.js` 与 `src-DwvUWffZ.js` → 按原 312 个 unpacked 条目重新打包），`app.asar` SHA-256 更新为 `f8b56abd8e28d2f591ed4510861be361c6a4c16b0ffc09fa333f2ccf54015fcd`（`config\desktop.yaml` 已同步）。源码补丁是规范修复；环境恢复后可整树重建，产物行为应与本次修补等价。
+- 验证：bridge `state.update`/`expression.trigger` 被渲染层接受（`expression_sequence`/`state_sequence` 递增），`expression_id` 与发送值一致；口型值经 `setLipSync` 直写 VRM `aa` 权重。

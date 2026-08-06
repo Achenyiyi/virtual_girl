@@ -79,16 +79,19 @@ class ExpressionMapper:
     """
 
     # Expression mapping table: (valence_min, valence_max, arousal_min, arousal_max) → expression_id
+    # AIRI's VRM emote table supports exactly: happy, sad, angry, surprised, neutral, think.
+    # These bands intentionally converge the richer semantic labels onto that
+    # supported set; intensity carries the strength that the old names conveyed.
     EXPRESSION_MAP: list[tuple[float, float, float, float, str]] = [
         # (v_min, v_max, a_min, a_max, expression)
         (0.3, 1.0, 0.6, 1.0, "happy"),  # High valence + high arousal = happy
-        (0.3, 1.0, 0.3, 0.6, "gentle_smile"),  # High valence + mid arousal = gentle
-        (0.3, 1.0, 0.0, 0.3, "content"),  # High valence + low arousal = content
-        (-0.2, 0.3, 0.5, 1.0, "attentive"),  # Neutral valence + high arousal = attentive
+        (0.3, 1.0, 0.3, 0.6, "happy"),  # Gentle smile → happy at lower intensity
+        (0.3, 1.0, 0.0, 0.3, "happy"),  # Content → happy at low intensity
+        (-0.2, 0.3, 0.5, 1.0, "think"),  # Attentive/engaged → think
         (-0.2, 0.3, 0.0, 0.5, "neutral"),  # Neutral valence + low arousal = neutral
-        (-0.6, -0.2, 0.5, 1.0, "worried"),  # Low valence + high arousal = worried
+        (-0.6, -0.2, 0.5, 1.0, "sad"),  # Worried → sad
         (-1.0, -0.2, 0.0, 0.5, "sad"),  # Low valence + low arousal = sad
-        (-1.0, -0.6, 0.5, 1.0, "upset"),  # Very low valence + high arousal = upset
+        (-1.0, -0.6, 0.5, 1.0, "angry"),  # Upset → angry
     ]
 
     def map(self, affect: AffectState) -> ExpressionSnapshot:
