@@ -9,12 +9,12 @@ import wave
 import pytest
 
 from companion.audio.microphone import MicrophoneCapture, VoiceChatMode
-from companion.audio.player import AudioPlayer, SoundDeviceAudioOutput, SystemAudioOutput
+from companion.audio.player import SoundDeviceAudioOutput, SystemAudioOutput, pcm_to_wav
 
 
 def test_pcm_to_wav_produces_standard_header() -> None:
     pcm = b"\x00\x00" * 800
-    wav_data = AudioPlayer.pcm_to_wav(pcm, sample_rate=16_000)
+    wav_data = pcm_to_wav(pcm, sample_rate=16_000)
 
     assert len(wav_data) == 44 + len(pcm)
     with wave.open(io.BytesIO(wav_data), "rb") as wav_file:

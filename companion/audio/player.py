@@ -13,7 +13,6 @@ import contextlib
 import importlib
 import logging
 import os
-import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
@@ -48,7 +47,7 @@ class SystemAudioOutput:
 
         await self.stop()
         self._interrupted = False
-        wav_data = AudioPlayer.pcm_to_wav(pcm_data, sample_rate)
+        wav_data = pcm_to_wav(pcm_data, sample_rate)
         expected_duration_ms = int(len(pcm_data) / (sample_rate * 2) * 1000)
         with tempfile.NamedTemporaryFile(
             prefix="companion_tts_", suffix=".wav", delete=False
@@ -212,168 +211,53 @@ class SoundDeviceAudioOutput:
             await asyncio.to_thread(stream.close)
 
 
-class AudioPlayer:
-    """Play audio through the system's default audio output.
+# PCM WAV header template; size fields are patched per call in pcm_to_wav.
+_PCM_HEADER_TEMPLATE: bytes = (
+    b"RIFF"  # ChunkID
+    b"\x00\x00\x00\x00"  # ChunkSize (placeholder)
+    b"WAVE"  # Format
+    b"fmt "  # Subchunk1ID
+    b"\x10\x00\x00\x00"  # Subchunk1Size (16 for PCM)
+    b"\x01\x00"  # AudioFormat (1 = PCM)
+    b"\x01\x00"  # NumChannels (1 = mono)
+    b"\x00\x00\x00\x00"  # SampleRate (placeholder)
+    b"\x00\x00\x00\x00"  # ByteRate (placeholder)
+    b"\x02\x00"  # BlockAlign (placeholder)
+    b"\x10\x00"  # BitsPerSample (16)
+    b"data"  # Subchunk2ID
+    b"\x00\x00\x00\x00"  # Subchunk2Size (placeholder)
+)
 
-    On Windows, uses PowerShell's System.Media.SoundPlayer or
-    falls back to writing a WAV file and using the default player.
+
+def pcm_to_wav(
+    pcm_data: bytes,
+    sample_rate: int = 24000,
+    num_channels: int = 1,
+    bits_per_sample: int = 16,
+) -> bytes:
+    """Wrap raw PCM audio bytes in a WAV container.
+
+    This is needed because the cloud TTS provider returns raw PCM, but most
+    system audio players expect a WAV container.
     """
+    data_size = len(pcm_data)
+    byte_rate = sample_rate * num_channels * bits_per_sample // 8
+    block_align = num_channels * bits_per_sample // 8
 
-    # PCM format constants
-    PCM_HEADER_TEMPLATE: bytes = (
-        b"RIFF"  # ChunkID
-        b"\x00\x00\x00\x00"  # ChunkSize (placeholder)
-        b"WAVE"  # Format
-        b"fmt "  # Subchunk1ID
-        b"\x10\x00\x00\x00"  # Subchunk1Size (16 for PCM)
-        b"\x01\x00"  # AudioFormat (1 = PCM)
-        b"\x01\x00"  # NumChannels (1 = mono)
-        b"\x00\x00\x00\x00"  # SampleRate (placeholder)
-        b"\x00\x00\x00\x00"  # ByteRate (placeholder)
-        b"\x02\x00"  # BlockAlign (placeholder)
-        b"\x10\x00"  # BitsPerSample (16)
-        b"data"  # Subchunk2ID
-        b"\x00\x00\x00\x00"  # Subchunk2Size (placeholder)
-    )
+    header = bytearray(_PCM_HEADER_TEMPLATE)
 
-    @classmethod
-    def pcm_to_wav(
-        cls,
-        pcm_data: bytes,
-        sample_rate: int = 24000,
-        num_channels: int = 1,
-        bits_per_sample: int = 16,
-    ) -> bytes:
-        """Wrap raw PCM audio bytes in a WAV container.
+    # ChunkSize (file size - 8)
+    file_size = 36 + data_size
+    header[4:8] = file_size.to_bytes(4, "little")
+    # SampleRate
+    header[24:28] = sample_rate.to_bytes(4, "little")
+    # ByteRate
+    header[28:32] = byte_rate.to_bytes(4, "little")
+    # BlockAlign
+    header[32:34] = block_align.to_bytes(2, "little")
+    # BitsPerSample
+    header[34:36] = bits_per_sample.to_bytes(2, "little")
+    # Subchunk2Size
+    header[40:44] = data_size.to_bytes(4, "little")
 
-        This is needed because the cloud TTS provider returns raw PCM, but most
-        system audio players expect a WAV container.
-        """
-        data_size = len(pcm_data)
-        byte_rate = sample_rate * num_channels * bits_per_sample // 8
-        block_align = num_channels * bits_per_sample // 8
-
-        header = bytearray(cls.PCM_HEADER_TEMPLATE)
-
-        # ChunkSize (file size - 8)
-        file_size = 36 + data_size
-        header[4:8] = file_size.to_bytes(4, "little")
-        # SampleRate
-        header[24:28] = sample_rate.to_bytes(4, "little")
-        # ByteRate
-        header[28:32] = byte_rate.to_bytes(4, "little")
-        # BlockAlign
-        header[32:34] = block_align.to_bytes(2, "little")
-        # BitsPerSample
-        header[34:36] = bits_per_sample.to_bytes(2, "little")
-        # Subchunk2Size
-        header[40:44] = data_size.to_bytes(4, "little")
-
-        return bytes(header) + pcm_data
-
-    @classmethod
-    async def play_pcm(
-        cls,
-        pcm_data: bytes,
-        sample_rate: int = 24000,
-        blocking: bool = False,
-    ) -> bool:
-        """Play raw PCM audio bytes.
-
-        Args:
-            pcm_data: Raw 16-bit mono PCM audio
-            sample_rate: Audio sample rate (default 24000 for cloud TTS)
-            blocking: If True, wait for playback to finish
-
-        Returns:
-            True if playback started successfully
-        """
-        if not pcm_data:
-            logger.warning("No audio data to play")
-            return False
-
-        # Wrap PCM in WAV container
-        wav_data = cls.pcm_to_wav(pcm_data, sample_rate)
-
-        # Write to temp file (cleanup handled by OS on next boot if we crash)
-        tmp_dir = tempfile.gettempdir()
-        tmp_path = os.path.join(tmp_dir, f"companion_tts_{hash(pcm_data) & 0xFFFF}.wav")
-        with open(tmp_path, "wb") as f:
-            f.write(wav_data)
-
-        try:
-            if blocking:
-                await cls._play_blocking(tmp_path)
-            else:
-                await cls._play_async(tmp_path)
-            return True
-        except Exception:
-            logger.exception("Audio playback failed")
-            return False
-
-    @classmethod
-    async def _play_async(cls, wav_path: str) -> None:
-        """Play audio asynchronously (non-blocking)."""
-        if os.name == "nt":
-            # Windows: use PowerShell to play
-            await asyncio.create_subprocess_exec(
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                f'(New-Object Media.SoundPlayer "{wav_path}").PlaySync()',
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            # Don't await — fire and forget
-        else:
-            # macOS / Linux fallback
-            subprocess.Popen(
-                ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", wav_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-    @classmethod
-    async def _play_blocking(cls, wav_path: str) -> None:
-        """Play audio synchronously (block until done)."""
-        if os.name == "nt":
-            proc = await asyncio.create_subprocess_exec(
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                f'(New-Object Media.SoundPlayer "{wav_path}").PlaySync()',
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            await proc.wait()
-        else:
-            subprocess.run(
-                ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", wav_path],
-                capture_output=True,
-            )
-
-    @classmethod
-    async def say(
-        cls,
-        text: str,
-        tts_provider: Any = None,  # Optional TTSProvider for synthesis
-        sample_rate: int = 24000,
-    ) -> bool:
-        """Convenience: synthesize and play text as speech.
-
-        If tts_provider is None, logs the text without playing.
-        """
-        if tts_provider is None:
-            logger.info("TTS not available, text: %s", text[:50])
-            return False
-
-        from companion.providers.tts import TTSRequest
-
-        request = TTSRequest(text=text, turn_id="direct_tts", sample_rate=sample_rate)
-        try:
-            chunk = await tts_provider.synthesize(request)
-            if chunk.audio_bytes:
-                return await cls.play_pcm(chunk.audio_bytes, sample_rate)
-        except Exception:
-            logger.exception("TTS synthesis failed")
-        return False
+    return bytes(header) + pcm_data

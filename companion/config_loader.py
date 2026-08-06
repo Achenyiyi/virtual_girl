@@ -155,7 +155,6 @@ _CONFIG_SCHEMA: ConfigSchema = {
             "confirmation_ttl_seconds",
             "max_text_characters",
         ),
-        "perception": {"enabled": None},
     },
     "policy": {
         "quiet_hours": _fields("enabled", "start", "end"),
@@ -211,13 +210,10 @@ class RuntimeConfig:
         config = self.memory_config or MemoryServiceConfig(
             db_path="./data/companion_memory.db"
         )
-        override = os.environ.get("COMPANION_DB_PATH", "").strip()
-        if not override:
+        override = _env_path_override("COMPANION_DB_PATH")
+        if override is None:
             return config
-        candidate = Path(override).expanduser()
-        if not candidate.is_absolute():
-            raise ValueError("COMPANION_DB_PATH must be an absolute path")
-        return replace(config, db_path=str(candidate.resolve()))
+        return replace(config, db_path=str(override))
 
     @classmethod
     def from_yaml(cls, path: Path | str | None = None) -> RuntimeConfig:
@@ -518,9 +514,6 @@ class RuntimeConfig:
             level_4_cooldown_seconds=float(cooldown.get("level_4", 1800)),
         )
 
-        perception_raw = _section(providers_raw, "perception")
-        if _boolean(perception_raw.get("enabled", False), "providers.perception.enabled"):
-            raise ValueError("perception is not implemented and must remain disabled")
         telemetry_raw = _section(raw, "telemetry")
         if _boolean(telemetry_raw.get("enabled", False), "telemetry.enabled"):
             raise ValueError("telemetry export is not implemented and must remain disabled")
@@ -580,6 +573,17 @@ def _boolean(value: object, field_name: str) -> bool:
     return value
 
 
+def _env_path_override(env_name: str) -> Path | None:
+    """Resolve an absolute-path environment override, or None when unset."""
+    override = os.environ.get(env_name, "").strip()
+    if not override:
+        return None
+    candidate = Path(override).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError(f"{env_name} must be an absolute path")
+    return candidate.resolve()
+
+
 def _runtime_root(config_path: Path, *, explicit: bool, mode: str) -> Path:
     """Choose a deterministic writable root for relative runtime data paths."""
     normalized_mode = mode.strip().lower()
@@ -587,12 +591,9 @@ def _runtime_root(config_path: Path, *, explicit: bool, mode: str) -> Path:
         raise ValueError(
             "runtime.data_root must be 'auto', 'config_directory', or 'user_local'"
         )
-    override = os.environ.get("COMPANION_RUNTIME_DIR", "").strip()
-    if override:
-        candidate = Path(override).expanduser()
-        if not candidate.is_absolute():
-            raise ValueError("COMPANION_RUNTIME_DIR must be an absolute path")
-        return candidate.resolve()
+    override = _env_path_override("COMPANION_RUNTIME_DIR")
+    if override is not None:
+        return override
     if normalized_mode == "config_directory":
         if not explicit:
             raise ValueError(

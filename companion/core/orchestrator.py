@@ -115,6 +115,7 @@ class CompanionOrchestrator:
         self._gesture_last_success_at: dict[str, float] = {}
         self._gesture_retry_after: dict[str, float] = {}
         self._avatar_speech: tuple[bool, float, float] = (False, 0.0, 0.0)
+        self._last_sent_proactive_level: int | None = None
 
     # ── Provider setters (for late binding / testing) ─────────────────
 
@@ -177,15 +178,7 @@ class CompanionOrchestrator:
         # providers (e.g. faster-whisper ASR) report DEGRADED until their model
         # is loaded, so preload them before the health check; the preloads run
         # concurrently with the network-backed provider checks.
-        providers = [
-            ("LLM", self._llm),
-            ("TTS", self._tts),
-            ("ASR", self._asr),
-            ("Memory", self._memory),
-            ("Avatar", self._avatar),
-            ("Action", self._action),
-            ("Perception", self._perception),
-        ]
+        providers = self._providers()
 
         async def check_provider(name: str, provider: Any) -> tuple[str, str] | None:
             if provider is None:
@@ -260,15 +253,7 @@ class CompanionOrchestrator:
         self._shutdown_clean = False
         providers_clean = True
 
-        for name, provider in [
-            ("LLM", self._llm),
-            ("TTS", self._tts),
-            ("ASR", self._asr),
-            ("Memory", self._memory),
-            ("Avatar", self._avatar),
-            ("Action", self._action),
-            ("Perception", self._perception),
-        ]:
+        for name, provider in self._providers():
             if provider:
                 try:
                     await provider.shutdown()
@@ -279,6 +264,28 @@ class CompanionOrchestrator:
 
         self._shutdown_clean = providers_clean
         logger.info("Companion orchestrator shut down.")
+
+    def _providers(self) -> list[tuple[str, Any]]:
+        """The (name, provider) table shared by startup and shutdown."""
+        return [
+            ("LLM", self._llm),
+            ("TTS", self._tts),
+            ("ASR", self._asr),
+            ("Memory", self._memory),
+            ("Avatar", self._avatar),
+            ("Action", self._action),
+            ("Perception", self._perception),
+        ]
+
+    def _error_response(self, turn_id: str, t_start: float) -> dict[str, Any]:
+        """The failure contract returned to callers after a failed publish."""
+        return {
+            "response_text": "抱歉，我暂时无法回应…",
+            "emotion": "concerned",
+            "latency_ms": int((time.time() - t_start) * 1000),
+            "model_id": "error",
+            "turn_id": turn_id,
+        }
 
     # ── Fast Loop: Real-time dialogue ─────────────────────────────────
 
@@ -371,13 +378,7 @@ class CompanionOrchestrator:
                 retryable=True,
                 started_at=t_start,
             )
-            return {
-                "response_text": "抱歉，我暂时无法回应…",
-                "emotion": "concerned",
-                "latency_ms": int((time.time() - t_start) * 1000),
-                "model_id": "error",
-                "turn_id": turn_id,
-            }
+            return self._error_response(turn_id, t_start)
 
         try:
             await self.bus.publish(
@@ -443,13 +444,7 @@ class CompanionOrchestrator:
                 retryable=True,
                 started_at=t_start,
             )
-            return {
-                "response_text": "抱歉，我暂时无法回应…",
-                "emotion": "concerned",
-                "latency_ms": int((time.time() - t_start) * 1000),
-                "model_id": "error",
-                "turn_id": turn_id,
-            }
+            return self._error_response(turn_id, t_start)
 
         await self._commit_response_uncancellable(text, response, completed_event.event_id)
 
@@ -624,12 +619,7 @@ class CompanionOrchestrator:
 
     # ── Internal ──────────────────────────────────────────────────────
 
-    def _detect_sentiment(self, text: str) -> float:
-        """Quick sentiment heuristic: positive words → +delta, negative → -delta.
-
-        Returns a value in [-0.3, 0.3] representing the emotional delta.
-        """
-        positive_words = {
+    _POSITIVE_WORDS = frozenset({
             "开心",
             "高兴",
             "好",
@@ -652,8 +642,8 @@ class CompanionOrchestrator:
             "happy",
             "awesome",
             "wow",
-        }
-        negative_words = {
+        })
+    _NEGATIVE_WORDS = frozenset({
             "难过",
             "伤心",
             "生气",
@@ -676,11 +666,16 @@ class CompanionOrchestrator:
             "awful",
             "tired",
             "upset",
-        }
+        })
 
+    def _detect_sentiment(self, text: str) -> float:
+        """Quick sentiment heuristic: positive words → +delta, negative → -delta.
+
+        Returns a value in [-0.3, 0.3] representing the emotional delta.
+        """
         text_lower = text.lower()
-        pos_count = sum(1 for w in positive_words if w in text_lower or w in text)
-        neg_count = sum(1 for w in negative_words if w in text_lower or w in text)
+        pos_count = sum(1 for w in self._POSITIVE_WORDS if w in text_lower or w in text)
+        neg_count = sum(1 for w in self._NEGATIVE_WORDS if w in text_lower or w in text)
 
         if pos_count > neg_count:
             return min(0.15, pos_count * 0.05)
@@ -741,7 +736,9 @@ class CompanionOrchestrator:
         )
         try:
             await self._avatar.update_state(avatar_state)
-            await self._avatar.set_proactive_level(snapshot.proactive_level_hint)
+            if snapshot.proactive_level_hint != self._last_sent_proactive_level:
+                await self._avatar.set_proactive_level(snapshot.proactive_level_hint)
+                self._last_sent_proactive_level = snapshot.proactive_level_hint
             return True
         except Exception:
             if strict:

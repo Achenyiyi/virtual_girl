@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from companion.security.windows_paths import is_remote_path as _is_remote_path
+
 _AVATAR_TOKEN_ENV = "COMPANION_AVATAR_TOKEN"
 _AVATAR_MODEL_PATH_ENV = "COMPANION_AVATAR_MODEL_PATH"
 _AVATAR_MODEL_SHA256_ENV = "COMPANION_AVATAR_MODEL_SHA256"
@@ -620,18 +622,6 @@ def _tcp_endpoint_accepts_connections(host: str, port: int) -> bool:
             return True
     except OSError:
         return False
-
-
-def _is_remote_path(path: Path, *, platform: str = sys.platform) -> bool:
-    if str(path).startswith("\\\\"):
-        return True
-    if platform != "win32":
-        return False
-    kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
-    get_drive_type = kernel32.GetDriveTypeW
-    get_drive_type.argtypes = [wintypes.LPCWSTR]
-    get_drive_type.restype = wintypes.UINT
-    return bool(get_drive_type(path.anchor) == 4)
 
 
 class _IoCounters(ctypes.Structure):

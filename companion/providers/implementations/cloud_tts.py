@@ -7,17 +7,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import contextlib
 import json
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, replace
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
 
 import httpx
 
+from companion.async_util import consume_task_result, wait_with_timeout
 from companion.providers.base import ProviderCapability, ProviderHealth, ProviderInfo
 from companion.providers.tts import (
     TTSChunk,
@@ -309,10 +309,10 @@ class CloudTTSProvider(TTSProvider):
             )
             if not done:
                 close_task.cancel()
-                close_task.add_done_callback(self._consume_task_result)
+                close_task.add_done_callback(consume_task_result)
         elif task is not None and task is not asyncio.current_task() and not task.done():
             task.cancel()
-            task.add_done_callback(self._consume_task_result)
+            task.add_done_callback(consume_task_result)
         return True
 
     async def list_voices(self) -> list[TTSVoice]:
@@ -581,26 +581,13 @@ class CloudTTSProvider(TTSProvider):
             self._active_tasks.pop(turn_id, None)
         self._cancelled_syntheses.discard(turn_id)
 
-    async def _await_bounded(self, operation: Any, *, operation_name: str) -> T:
+    async def _await_bounded(
+        self, operation: Awaitable[T], *, operation_name: str
+    ) -> T:
         task: asyncio.Future[T] = asyncio.ensure_future(operation)
-        try:
-            done, _ = await asyncio.wait([task], timeout=self._config.timeout_seconds)
-        except asyncio.CancelledError:
-            task.cancel()
-            task.add_done_callback(self._consume_task_result)
-            raise
-        if not done:
-            task.cancel()
-            task.add_done_callback(self._consume_task_result)
+        if not await wait_with_timeout(task, self._config.timeout_seconds):
             raise CloudTTSError(f"Fish Audio TTS {operation_name} timed out")
         return await task
-
-    @staticmethod
-    def _consume_task_result(task: asyncio.Future[Any]) -> None:
-        if task.cancelled():
-            return
-        with contextlib.suppress(Exception):
-            task.exception()
 
     def provider_info(self) -> ProviderInfo:
         return ProviderInfo(
@@ -665,7 +652,7 @@ class CloudTTSProvider(TTSProvider):
         for task in active_tasks:
             if task is not asyncio.current_task() and not task.done():
                 task.cancel()
-                task.add_done_callback(self._consume_task_result)
+                task.add_done_callback(consume_task_result)
         active_streams = tuple(self._active_streams.values())
         self._active_streams.clear()
         if active_streams:
@@ -675,18 +662,15 @@ class CloudTTSProvider(TTSProvider):
                 timeout=min(1.0, self._config.timeout_seconds),
             )
             for task in done:
-                self._consume_task_result(task)
+                consume_task_result(task)
             for task in pending:
                 task.cancel()
-                task.add_done_callback(self._consume_task_result)
+                task.add_done_callback(consume_task_result)
         if self._client:
             client = self._client
             self._client = None
-            close_task = asyncio.create_task(client.aclose())
-            done, _ = await asyncio.wait(
-                [close_task], timeout=min(1.0, self._config.timeout_seconds)
+            await wait_with_timeout(
+                asyncio.create_task(client.aclose()),
+                min(1.0, self._config.timeout_seconds),
             )
-            if not done:
-                close_task.cancel()
-                close_task.add_done_callback(self._consume_task_result)
         self._cancelled_syntheses.clear()

@@ -22,11 +22,11 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+from companion.async_util import wait_with_timeout
 from companion.audio.microphone import MicrophoneCapture, VoiceChatMode
 from companion.audio.player import SoundDeviceAudioOutput, SystemAudioOutput
+from companion.acceptance_report import failed_report, render_report
 from companion.avatar_acceptance import (
-    failed_avatar_acceptance_report,
-    render_avatar_acceptance_report,
     run_avatar_acceptance,
     shutdown_avatar_acceptance_provider,
 )
@@ -65,11 +65,7 @@ from companion.services.action_service import ActionService
 from companion.services.avatar_stage_supervisor import AvatarStageSupervisor
 from companion.services.proactive_scheduler import ProactiveScheduler, SchedulerConfig
 from companion.services.voice_pipeline import VoicePipeline
-from companion.voice_acceptance import (
-    failed_voice_acceptance_report,
-    render_voice_acceptance_report,
-    run_voice_acceptance,
-)
+from companion.voice_acceptance import run_voice_acceptance
 
 _SHUTDOWN_STEP_TIMEOUT_SECONDS = 5.0
 
@@ -435,24 +431,33 @@ class CompanionApp:
     async def retry_desktop_readiness(self) -> dict[str, str]:
         """Re-check providers without restarting either desktop process."""
         results: dict[str, str] = {}
-        for name, provider in (
-            ("llm", self._llm),
-            ("tts", self._tts),
-            ("asr", self._asr),
-            ("memory", self._memory),
-            ("avatar", self._avatar),
-            ("action", self._action_provider),
-        ):
+
+        async def check(name: str, provider: Any) -> tuple[str, str] | None:
             if provider is None:
-                results[name] = "unavailable"
-                continue
+                return None
             try:
-                results[name] = str(await provider.health_check())
+                return name, str(await provider.health_check())
             except Exception:
                 logging.getLogger(__name__).exception(
                     "Desktop %s readiness check failed", name
                 )
-                results[name] = "unhealthy"
+                return name, "unhealthy"
+
+        for result in await asyncio.gather(
+            *(
+                check(name, provider)
+                for name, provider in (
+                    ("llm", self._llm),
+                    ("tts", self._tts),
+                    ("asr", self._asr),
+                    ("memory", self._memory),
+                    ("avatar", self._avatar),
+                    ("action", self._action_provider),
+                )
+            )
+        ):
+            if result is not None:
+                results[result[0]] = result[1]
         llm_ready = results.get("llm") == "healthy"
         required_local_ready = results.get("memory") == "healthy"
         avatar_ready = results.get("avatar") in {None, "healthy", "unavailable"}
@@ -622,12 +627,7 @@ class CompanionApp:
     async def _stop_component(name: str, operation: Any) -> bool:
         task = asyncio.ensure_future(operation)
         try:
-            done, _ = await asyncio.wait(
-                [task], timeout=_SHUTDOWN_STEP_TIMEOUT_SECONDS
-            )
-            if not done:
-                task.cancel()
-                task.add_done_callback(CompanionApp._consume_task_result)
+            if not await wait_with_timeout(task, _SHUTDOWN_STEP_TIMEOUT_SECONDS):
                 logging.getLogger(__name__).error(
                     "Timed out after %.1fs while shutting down %s",
                     _SHUTDOWN_STEP_TIMEOUT_SECONDS,
@@ -637,20 +637,11 @@ class CompanionApp:
             await task
             return True
         except asyncio.CancelledError:
-            task.cancel()
-            task.add_done_callback(CompanionApp._consume_task_result)
             logging.getLogger(__name__).warning("Shutdown of %s was cancelled", name)
             return False
         except Exception:
             logging.getLogger(__name__).exception("Error shutting down %s", name)
             return False
-
-    @staticmethod
-    def _consume_task_result(task: asyncio.Future[Any]) -> None:
-        if task.cancelled():
-            return
-        with contextlib.suppress(Exception):
-            task.exception()
 
 
 async def async_main(args: argparse.Namespace) -> int:
@@ -783,22 +774,22 @@ async def async_main(args: argparse.Namespace) -> int:
         try:
             instance_guard.acquire()
         except InstanceAlreadyRunningError:
-            avatar_report = failed_avatar_acceptance_report(
+            avatar_report = failed_report(
                 "avatar.runtime_instance",
                 "Another runtime is already using this companion profile.",
             )
         else:
             try:
                 if not config.avatar_config:
-                    avatar_report = failed_avatar_acceptance_report(
+                    avatar_report = failed_report(
                         "avatar.config", "Avatar bridge is disabled or not configured."
                     )
                 elif not config.identity or not config.identity.avatar_model_id:
-                    avatar_report = failed_avatar_acceptance_report(
+                    avatar_report = failed_report(
                         "avatar.model_config", "Configured identity.avatar_model_id is empty."
                     )
                 elif not config.avatar_config.get_auth_token():
-                    avatar_report = failed_avatar_acceptance_report(
+                    avatar_report = failed_report(
                         "avatar.credential",
                         "Avatar token is unavailable from the configured secure source.",
                     )
@@ -833,7 +824,7 @@ async def async_main(args: argparse.Namespace) -> int:
                                 if stage
                                 else "Avatar acceptance failed"
                             )
-                            avatar_report = failed_avatar_acceptance_report(
+                            avatar_report = failed_report(
                                 code,
                                 f"{message}: {type(exc).__name__}.",
                             )
@@ -849,7 +840,7 @@ async def async_main(args: argparse.Namespace) -> int:
         print(
             avatar_report.to_json()
             if json_output
-            else render_avatar_acceptance_report(avatar_report)
+            else render_report(avatar_report, title="Avatar acceptance report")
         )
         return avatar_report.exit_code
 
@@ -876,14 +867,14 @@ async def async_main(args: argparse.Namespace) -> int:
             check_runtime_storage(config.action_audit_db_path)
     except OSError as exc:
         if accept_voice:
-            storage_report = failed_voice_acceptance_report(
+            storage_report = failed_report(
                 "voice.runtime_storage",
                 f"Runtime storage is not ready: {type(exc).__name__}.",
             )
             print(
                 storage_report.to_json()
                 if quiet_output
-                else render_voice_acceptance_report(storage_report)
+                else render_report(storage_report, title="Voice acceptance report")
             )
             return 1
         print(f"Runtime storage unavailable: {type(exc).__name__}", file=sys.stderr)
@@ -893,14 +884,14 @@ async def async_main(args: argparse.Namespace) -> int:
         instance_guard.acquire()
     except InstanceAlreadyRunningError as exc:
         if accept_voice:
-            instance_report = failed_voice_acceptance_report(
+            instance_report = failed_report(
                 "voice.runtime_instance",
                 "Another runtime is already using this companion profile.",
             )
             print(
                 instance_report.to_json()
                 if quiet_output
-                else render_voice_acceptance_report(instance_report)
+                else render_report(instance_report, title="Voice acceptance report")
             )
             return 1
         print(f"Runtime unavailable: {exc}", file=sys.stderr)
@@ -922,14 +913,14 @@ async def async_main(args: argparse.Namespace) -> int:
             app = CompanionApp(config)
         if await app.memory.health_check() != ProviderHealth.HEALTHY:
             if accept_voice:
-                memory_report = failed_voice_acceptance_report(
+                memory_report = failed_report(
                     "voice.memory_ready",
                     "Memory database did not pass local readiness.",
                 )
                 print(
                     memory_report.to_json()
                     if quiet_output
-                    else render_voice_acceptance_report(memory_report)
+                    else render_report(memory_report, title="Voice acceptance report")
                 )
             return 1
         recovery_guard = CrashRecoveryGuard.for_memory_path(memory_path)
@@ -937,14 +928,14 @@ async def async_main(args: argparse.Namespace) -> int:
             recovered_unclean_exit = recovery_guard.begin()
         except (OSError, ValueError, sqlite3.DatabaseError) as exc:
             if accept_voice:
-                recovery_report = failed_voice_acceptance_report(
+                recovery_report = failed_report(
                     "voice.crash_recovery",
                     f"Crash recovery validation failed: {type(exc).__name__}.",
                 )
                 print(
                     recovery_report.to_json()
                     if quiet_output
-                    else render_voice_acceptance_report(recovery_report)
+                    else render_report(recovery_report, title="Voice acceptance report")
                 )
             else:
                 print(
@@ -968,14 +959,14 @@ async def async_main(args: argparse.Namespace) -> int:
             ready = await app.start()
         if not ready:
             if accept_voice:
-                setup_report = failed_voice_acceptance_report(
+                setup_report = failed_report(
                     "voice.runtime_ready",
                     "Required runtime providers did not pass startup readiness.",
                 )
                 print(
                     setup_report.to_json()
                     if getattr(args, "accept_voice_json", False)
-                    else render_voice_acceptance_report(setup_report)
+                    else render_report(setup_report, title="Voice acceptance report")
                 )
             return 1
 
@@ -986,26 +977,26 @@ async def async_main(args: argparse.Namespace) -> int:
             else:
                 voice_ready = await app.start_voice_mode()
             if not voice_ready:
-                provider_report = failed_voice_acceptance_report(
+                provider_report = failed_report(
                     "voice.provider_ready",
                     "ASR or cloud TTS did not pass voice readiness.",
                 )
                 print(
                     provider_report.to_json()
                     if quiet_output
-                    else render_voice_acceptance_report(provider_report)
+                    else render_report(provider_report, title="Voice acceptance report")
                 )
                 return 1
             microphone = MicrophoneCapture(config.microphone_config)
             if not await microphone.start():
-                microphone_report = failed_voice_acceptance_report(
+                microphone_report = failed_report(
                     "voice.microphone_ready",
                     "Voice acceptance could not open the microphone.",
                 )
                 print(
                     microphone_report.to_json()
                     if quiet_output
-                    else render_voice_acceptance_report(microphone_report)
+                    else render_report(microphone_report, title="Voice acceptance report")
                 )
                 return 1
             try:
@@ -1037,7 +1028,7 @@ async def async_main(args: argparse.Namespace) -> int:
             print(
                 acceptance_report.to_json()
                 if getattr(args, "accept_voice_json", False)
-                else render_voice_acceptance_report(acceptance_report)
+                else render_report(acceptance_report, title="Voice acceptance report")
             )
             return acceptance_report.exit_code
 
@@ -1135,7 +1126,7 @@ async def async_main(args: argparse.Namespace) -> int:
                 elif not action_type:
                     print(f"{Colors.YELLOW}用法: /action status|window|app{Colors.RESET}")
                 else:
-                    _record, action_result = await app.action_service.request(action_type)
+                    action_result = (await app.action_service.request(action_type))[1]
                     if action_result and action_result.success:
                         print(
                             f"{Colors.BLUE}"

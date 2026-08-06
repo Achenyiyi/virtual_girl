@@ -33,10 +33,12 @@ class ConversationHistory:
     max_turns: int = 50
     max_history_tokens: int = 4000  # Budget for recent conversation
     _turns: list[TurnEntry] = field(default_factory=list)
+    _tokens: int = 0  # Running token total so trimming is O(1) per pop
 
     def add_turn(self, entry: TurnEntry) -> None:
         """Append a turn and trim if needed."""
         self._turns.append(entry)
+        self._tokens += self._turn_tokens(entry)
         self._trim()
 
     def get_recent_turns(self, n: int | None = None) -> list[TurnEntry]:
@@ -72,18 +74,20 @@ class ConversationHistory:
 
     def _trim(self) -> None:
         """Remove oldest turns until within token budget."""
-        while self._estimated_tokens() > self.max_history_tokens and len(self._turns) > 1:
-            self._turns.pop(0)
+        while self._tokens > self.max_history_tokens and len(self._turns) > 1:
+            self._tokens -= self._turn_tokens(self._turns.pop(0))
         # Also enforce max turn count
         if len(self._turns) > self.max_turns:
+            self._tokens -= sum(
+                self._turn_tokens(t)
+                for t in self._turns[: len(self._turns) - self.max_turns]
+            )
             self._turns = self._turns[-self.max_turns :]
 
-    def _estimated_tokens(self) -> int:
+    @staticmethod
+    def _turn_tokens(entry: TurnEntry) -> int:
         """Rough token estimation (4 chars ≈ 1 token for Chinese/English text)."""
-        total = 0
-        for t in self._turns:
-            total += len(t.user_text) // 3 + len(t.companion_text) // 3
-        return total
+        return len(entry.user_text) // 3 + len(entry.companion_text) // 3
 
     def summary(self) -> str:
         """Return a one-line summary of the conversation so far."""

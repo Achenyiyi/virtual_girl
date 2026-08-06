@@ -20,16 +20,15 @@ Key features:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
-import math
 import time
-from array import array
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal, Protocol, TypeVar
 
+from companion.async_util import consume_task_result, wait_with_timeout
+from companion.audio.dsp import pcm_int16_rms
 from companion.audio.player import PlaybackResult
 from companion.core.event_bus import EventBus
 from companion.core.orchestrator import CompanionOrchestrator
@@ -69,24 +68,6 @@ VoiceFailureStage = Literal[
     "persistence",
     "cancellation",
 ]
-
-
-def _pcm_int16_rms(audio_bytes: bytes) -> float:
-    """Return normalized RMS (0..1) for little-endian int16 PCM audio."""
-    if not audio_bytes:
-        return 0.0
-    usable = audio_bytes[: len(audio_bytes) - len(audio_bytes) % 2]
-    try:
-        samples = array("h")
-        samples.frombytes(usable)
-    except (ValueError, OverflowError):
-        return 0.0
-    if not samples:
-        return 0.0
-    sum_squares = 0.0
-    for value in samples:
-        sum_squares += value * value
-    return min(1.0, math.sqrt(sum_squares / len(samples)) / 32768.0)
 
 
 class VoiceStageError(Exception):
@@ -686,7 +667,7 @@ class VoicePipeline:
                 )
                 if not done:
                     close_task.cancel()
-                    close_task.add_done_callback(self._consume_future_result)
+                    close_task.add_done_callback(consume_task_result)
 
     async def _respond_streaming(
         self,
@@ -889,7 +870,7 @@ class VoicePipeline:
                     )
                     if not done:
                         close_task.cancel()
-                        close_task.add_done_callback(self._consume_future_result)
+                        close_task.add_done_callback(consume_task_result)
 
         producer = asyncio.create_task(produce())
         segment_index = 0
@@ -947,9 +928,9 @@ class VoicePipeline:
                 [producer], timeout=self._config.cleanup_timeout_seconds
             )
             if done:
-                self._consume_future_result(producer)
+                consume_task_result(producer)
             else:
-                producer.add_done_callback(self._consume_future_result)
+                producer.add_done_callback(consume_task_result)
 
     async def _notify_assistant_delta(self, turn_id: str, text: str) -> None:
         callback = self._assistant_delta_callback
@@ -967,12 +948,12 @@ class VoicePipeline:
             done, _ = await asyncio.wait([task], timeout=self._remaining_turn_seconds(deadline))
             if not done:
                 task.cancel()
-                task.add_done_callback(self._consume_future_result)
+                task.add_done_callback(consume_task_result)
                 raise VoiceStageError("generation", "turn_timeout", retryable=True)
             return await task
         except asyncio.CancelledError:
             task.cancel()
-            task.add_done_callback(self._consume_future_result)
+            task.add_done_callback(consume_task_result)
             raise
 
     async def _next_stream_item(
@@ -1064,14 +1045,14 @@ class VoicePipeline:
                         )
                         if not done_chunk:
                             next_chunk_task.cancel()
-                            next_chunk_task.add_done_callback(self._consume_future_result)
+                            next_chunk_task.add_done_callback(consume_task_result)
                             raise VoiceStageError(
                                 "tts", "tts_chunk_timeout", retryable=True
                             )
                         chunk = await next_chunk_task
                     except asyncio.CancelledError:
                         next_chunk_task.cancel()
-                        next_chunk_task.add_done_callback(self._consume_future_result)
+                        next_chunk_task.add_done_callback(consume_task_result)
                         raise
                     except StopAsyncIteration:
                         break
@@ -1131,7 +1112,7 @@ class VoicePipeline:
                             break
                         self._pipeline_state = PipelineState.SPEAKING
                         first_chunk = False
-                    rms = _pcm_int16_rms(chunk.audio_bytes)
+                    rms = pcm_int16_rms(chunk.audio_bytes)
                     mouth_open = 0.0 if rms <= 0.0 else min(0.85, 0.22 + rms * 2.6)
                     await self._update_avatar_speech(True, mouth_open, rms)
                     playback_task: asyncio.Future[PlaybackResult] = asyncio.ensure_future(
@@ -1147,14 +1128,14 @@ class VoicePipeline:
                         )
                         if not done_playback:
                             playback_task.cancel()
-                            playback_task.add_done_callback(self._consume_future_result)
+                            playback_task.add_done_callback(consume_task_result)
                             raise VoiceStageError(
                                 "playback", "playback_timeout", retryable=True
                             )
                         playback = await playback_task
                     except asyncio.CancelledError:
                         playback_task.cancel()
-                        playback_task.add_done_callback(self._consume_future_result)
+                        playback_task.add_done_callback(consume_task_result)
                         raise
                     except VoiceStageError:
                         raise
@@ -1206,10 +1187,10 @@ class VoicePipeline:
                     )
                     if not done_close:
                         close_task.cancel()
-                        close_task.add_done_callback(self._consume_future_result)
+                        close_task.add_done_callback(consume_task_result)
                 except asyncio.CancelledError:
                     close_task.cancel()
-                    close_task.add_done_callback(self._consume_future_result)
+                    close_task.add_done_callback(consume_task_result)
                     raise
                 except Exception:
                     logger.debug("TTS stream close failed during voice cleanup", exc_info=True)
@@ -1249,12 +1230,12 @@ class VoicePipeline:
             )
             if not done_finish:
                 finish_task.cancel()
-                finish_task.add_done_callback(self._consume_future_result)
+                finish_task.add_done_callback(consume_task_result)
                 raise VoiceStageError("playback", "playback_cleanup_timeout", retryable=True)
             await finish_task
         except asyncio.CancelledError:
             finish_task.cancel()
-            finish_task.add_done_callback(self._consume_future_result)
+            finish_task.add_done_callback(consume_task_result)
             raise
         except Exception as exc:
             if isinstance(exc, VoiceStageError):
@@ -1374,11 +1355,11 @@ class VoicePipeline:
                 timeout=self._config.interrupt_timeout_seconds,
             )
             for future in done:
-                self._consume_future_result(future)
+                consume_task_result(future)
             if pending:
                 for future in pending:
                     future.cancel()
-                    future.add_done_callback(self._consume_future_result)
+                    future.add_done_callback(consume_task_result)
                 logger.error(
                     "Turn %s provider cancellation exceeded %.3fs",
                     current.turn_id,
@@ -1580,13 +1561,6 @@ class VoicePipeline:
     def _remaining_turn_seconds(deadline: float) -> float:
         return max(0.0, deadline - time.monotonic())
 
-    @staticmethod
-    def _consume_future_result(future: asyncio.Future[Any]) -> None:
-        if future.cancelled():
-            return
-        with contextlib.suppress(Exception):
-            future.exception()
-
     async def _await_bounded(
         self,
         operation: Awaitable[T],
@@ -1596,15 +1570,7 @@ class VoicePipeline:
         timeout_error: str,
     ) -> T:
         future: asyncio.Future[T] = asyncio.ensure_future(operation)
-        try:
-            done, _ = await asyncio.wait([future], timeout=timeout_seconds)
-        except asyncio.CancelledError:
-            future.cancel()
-            future.add_done_callback(self._consume_future_result)
-            raise
-        if not done:
-            future.cancel()
-            future.add_done_callback(self._consume_future_result)
+        if not await wait_with_timeout(future, timeout_seconds):
             raise VoiceStageError(stage, timeout_error, retryable=True)
         return await future
 
@@ -1617,15 +1583,13 @@ class VoicePipeline:
             await self.interrupt()
         if not task.done():
             task.cancel()
-        done, _ = await asyncio.wait([task], timeout=self._config.cleanup_timeout_seconds)
-        if not done:
-            task.add_done_callback(self._consume_future_result)
+        if not await wait_with_timeout(task, self._config.cleanup_timeout_seconds):
             logger.error(
                 "Active voice turn did not stop within %.3fs",
                 self._config.cleanup_timeout_seconds,
             )
             return
-        self._consume_future_result(task)
+        consume_task_result(task)
 
     # ── Cleanup ───────────────────────────────────────────────────────
 

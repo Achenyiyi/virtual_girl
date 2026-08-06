@@ -203,16 +203,8 @@ class EpisodeSegmenter:
 
     # ── Internal helpers ──────────────────────────────────────────────
 
-    def _extract_keywords(self, text: str) -> set[str]:
-        """Extract keywords from text for topic tracking.
-
-        Uses jieba for Chinese tokenization if available;
-        falls back to character bigram extraction otherwise.
-        """
-        if not text:
-            return set()
-
-        stop_words = {
+    _STOP_WORDS = frozenset(
+        {
             "的",
             "了",
             "是",
@@ -253,6 +245,18 @@ class EpisodeSegmenter:
             "一",
             "个",
         }
+    )
+
+    def _extract_keywords(self, text: str) -> set[str]:
+        """Extract keywords from text for topic tracking.
+
+        Uses jieba for Chinese tokenization if available;
+        falls back to character bigram extraction otherwise.
+        """
+        if not text:
+            return set()
+
+        stop_words = self._STOP_WORDS
         words = set()
 
         if _HAS_JIEBA:

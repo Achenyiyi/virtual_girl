@@ -86,6 +86,18 @@ class FactExtractor:
         ("面试", "schedule"),
     ]
 
+    # Longest patterns win so "不喜欢" is not also recorded as "喜欢".
+    ALL_PATTERNS: tuple[tuple[str, str], ...] = tuple(
+        sorted(
+            PREFERENCE_PATTERNS
+            + IDENTITY_PATTERNS
+            + RELATIONSHIP_PATTERNS
+            + SCHEDULE_PATTERNS,
+            key=lambda item: len(item[0]),
+            reverse=True,
+        )
+    )
+
     def extract(self, text: str, source_event_ids: list[str]) -> FactExtractionResult:
         """Extract facts from a user's conversation text.
 
@@ -98,19 +110,8 @@ class FactExtractor:
         """
         facts: list[SemanticFact] = []
 
-        # Longest patterns win so "不喜欢" is not also recorded as "喜欢".
-        patterns = sorted(
-            (
-                self.PREFERENCE_PATTERNS
-                + self.IDENTITY_PATTERNS
-                + self.RELATIONSHIP_PATTERNS
-                + self.SCHEDULE_PATTERNS
-            ),
-            key=lambda item: len(item[0]),
-            reverse=True,
-        )
         matched_spans: list[tuple[int, int]] = []
-        for pattern, category in patterns:
+        for pattern, category in self.ALL_PATTERNS:
             pattern_start = text.find(pattern)
             if pattern_start >= 0:
                 pattern_span = (pattern_start, pattern_start + len(pattern))
@@ -119,7 +120,7 @@ class FactExtractor:
                     for start, end in matched_spans
                 ):
                     continue
-                context = self._extract_context(text, pattern)
+                context = self._extract_context(text, pattern, pattern_start)
                 if context:
                     matched_spans.append(pattern_span)
                     # Map to standardized category
@@ -130,7 +131,7 @@ class FactExtractor:
                         key=self._make_key(pattern, context),
                         value=context,
                         category=std_category,
-                        confidence=self._compute_confidence(pattern, context),
+                        confidence=self._compute_confidence(pattern),
                         source_event_ids=list(source_event_ids),
                         extraction_method="structured",
                     )
@@ -138,15 +139,11 @@ class FactExtractor:
 
         return FactExtractionResult(facts=facts)
 
-    def _extract_context(self, text: str, pattern: str) -> str:
+    def _extract_context(self, text: str, pattern: str, pattern_start: int) -> str:
         """Extract the relevant phrase around a pattern match."""
-        idx = text.find(pattern)
-        if idx < 0:
-            return ""
-
         # Take from pattern start to end of sentence or 50 chars
-        start = max(0, idx - 5)
-        end = min(len(text), idx + len(pattern) + 30)
+        start = max(0, pattern_start - 5)
+        end = min(len(text), pattern_start + len(pattern) + 30)
 
         # Try to end at sentence boundary
         context = text[start:end]
@@ -158,31 +155,32 @@ class FactExtractor:
 
         return context.strip()
 
+    _KEY_MAP = {
+        "喜欢": "preference_like",
+        "讨厌": "preference_dislike",
+        "不喜欢": "preference_dislike",
+        "最爱": "preference_favorite",
+        "更喜欢": "preference_prefer",
+        "我是": "identity",
+        "我叫": "identity_name",
+        "我是做": "identity_job",
+        "我今年": "identity_age",
+        "我住在": "identity_location",
+        "明天要": "schedule_tomorrow",
+        "今天要": "schedule_today",
+        "下周": "schedule_next_week",
+        "要去": "plan_go",
+        "打算": "plan",
+        "计划": "plan",
+    }
+    _PREFERENCE_PATTERN_SET = frozenset(item[0] for item in PREFERENCE_PATTERNS)
+
     def _make_key(self, pattern: str, value: str) -> str:
         """Generate a normalized fact key."""
         # Keys represent semantic slots, not values. A changed value therefore
         # closes the previous version instead of creating a second active fact.
-        key_map = {
-            "喜欢": "preference_like",
-            "讨厌": "preference_dislike",
-            "不喜欢": "preference_dislike",
-            "最爱": "preference_favorite",
-            "更喜欢": "preference_prefer",
-            "我是": "identity",
-            "我叫": "identity_name",
-            "我是做": "identity_job",
-            "我今年": "identity_age",
-            "我住在": "identity_location",
-            "明天要": "schedule_tomorrow",
-            "今天要": "schedule_today",
-            "下周": "schedule_next_week",
-            "要去": "plan_go",
-            "打算": "plan",
-            "计划": "plan",
-        }
-        prefix = key_map.get(pattern, f"fact_{pattern}")
-        preference_patterns = {item[0] for item in self.PREFERENCE_PATTERNS}
-        if pattern in preference_patterns:
+        prefix = self._KEY_MAP.get(pattern, f"fact_{pattern}")
+        if pattern in self._PREFERENCE_PATTERN_SET:
             subject = value.split(pattern, 1)[-1]
             subject = re.sub(r"[。！？，,!?…\s]+$", "", subject).strip()
             subject_hash = hashlib.sha256(subject.encode()).hexdigest()[:12]
@@ -204,8 +202,8 @@ class FactExtractor:
             return "schedule"
         return "general"
 
-    def _compute_confidence(self, pattern: str, context: str) -> float:
-        """Compute confidence based on pattern explicitness and context length."""
+    def _compute_confidence(self, pattern: str) -> float:
+        """Compute confidence based on pattern explicitness."""
         # Explicit statements ("我是", "我叫") have higher confidence
         explicit_patterns = {"我是", "我叫", "我的名字是", "我今年", "我住在"}
         if pattern in explicit_patterns:

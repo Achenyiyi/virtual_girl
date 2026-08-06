@@ -7,6 +7,7 @@ import contextlib
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from companion.async_util import consume_task_result
 from companion.audio.microphone import MicConfig, MicrophoneCapture
 from companion.protocols.turn import TurnState
 
@@ -111,7 +112,7 @@ class DesktopVoiceController:
                     continue
                 done, _ = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
                 if response_task in done:
-                    self._consume_task(response_task)
+                    consume_task_result(response_task)
                     response_task = None
                     self._response_task = None
                     if speech_start_task is not None:
@@ -138,11 +139,4 @@ class DesktopVoiceController:
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
             if response_task is not None and not response_task.done():
-                response_task.add_done_callback(self._consume_task)
-
-    @staticmethod
-    def _consume_task(task: asyncio.Future[Any]) -> None:
-        if task.cancelled():
-            return
-        with contextlib.suppress(Exception):
-            task.result()
+                response_task.add_done_callback(consume_task_result)

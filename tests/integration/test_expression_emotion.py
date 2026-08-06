@@ -39,7 +39,7 @@ class TestExpressionMapper:
     def test_tts_params_from_affect(self):
         mapper = ExpressionMapper()
         affect = AffectState(valence=0.5, arousal=0.6)
-        voice = mapper.map_for_tts(affect)
+        voice = mapper.map(affect).voice
 
         assert 0.7 <= voice.rate <= 1.4
         assert 0.8 <= voice.pitch <= 1.2
@@ -48,7 +48,7 @@ class TestExpressionMapper:
     def test_facial_params_from_affect(self):
         mapper = ExpressionMapper()
         affect = AffectState(valence=0.3, arousal=0.4)
-        facial = mapper.map_for_avatar(affect)
+        facial = mapper.map(affect).facial
 
         assert 0.3 <= facial.eye_open <= 1.0
         assert facial.expression_id
@@ -58,8 +58,8 @@ class TestExpressionMapper:
         energetic = AffectState(valence=0, arousal=0.5, energy=1.0)
         tired = AffectState(valence=0, arousal=0.5, energy=0.1)
 
-        energetic_facial = mapper.map_for_avatar(energetic)
-        tired_facial = mapper.map_for_avatar(tired)
+        energetic_facial = mapper.map(energetic).facial
+        tired_facial = mapper.map(tired).facial
 
         assert energetic_facial.eye_open > tired_facial.eye_open
 

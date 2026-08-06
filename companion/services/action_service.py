@@ -14,7 +14,6 @@ Key design from the PLAN:
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import time
 from collections import deque
@@ -23,6 +22,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, TypeVar
 
+from companion.async_util import wait_with_timeout
 from companion.core.event_bus import EventBus
 from companion.core.policy_gate import PolicyGate
 from companion.events.base import generate_ulid
@@ -696,28 +696,21 @@ class ActionService:
     ) -> T:
         task: asyncio.Future[T] = asyncio.ensure_future(operation)
         try:
-            done, _ = await asyncio.wait(
-                [task], timeout=self._config.action_timeout_seconds
-            )
+            if not await wait_with_timeout(task, self._config.action_timeout_seconds):
+                self._provider_quarantined_reason = operation_name
+                logger.critical(
+                    "Action provider %s exceeded %.1fs and was quarantined",
+                    operation_name,
+                    self._config.action_timeout_seconds,
+                )
+                raise ActionProviderTimeoutError(operation_name)
         except asyncio.CancelledError:
-            task.cancel()
-            task.add_done_callback(self._consume_task_result)
             self._provider_quarantined_reason = f"cancelled {operation_name}"
             logger.critical(
                 "Action provider %s was cancelled and quarantined because its outcome is unknown",
                 operation_name,
             )
             raise
-        if not done:
-            task.cancel()
-            task.add_done_callback(self._consume_task_result)
-            self._provider_quarantined_reason = operation_name
-            logger.critical(
-                "Action provider %s exceeded %.1fs and was quarantined",
-                operation_name,
-                self._config.action_timeout_seconds,
-            )
-            raise ActionProviderTimeoutError(operation_name)
         if task.cancelled():
             self._provider_quarantined_reason = f"self-cancelled {operation_name}"
             raise RuntimeError(f"Action provider {operation_name} cancelled unexpectedly")
@@ -733,13 +726,6 @@ class ActionService:
                 "Action provider is quarantined after a timed-out operation; restart required"
             ),
         )
-
-    @staticmethod
-    def _consume_task_result(task: asyncio.Future[Any]) -> None:
-        if task.cancelled():
-            return
-        with contextlib.suppress(Exception):
-            task.exception()
 
     # ── Policy ────────────────────────────────────────────────────────
 
@@ -799,12 +785,9 @@ class ActionService:
                     )
                 )
             )
-            done, _ = await asyncio.wait(
-                [audit_task], timeout=self._config.action_timeout_seconds
-            )
-            if not done:
-                audit_task.cancel()
-                audit_task.add_done_callback(self._consume_task_result)
+            if not await wait_with_timeout(
+                audit_task, self._config.action_timeout_seconds
+            ):
                 self._audit_store_quarantined = True
                 logger.critical(
                     "Action audit persistence timed out for stage %s after %.1fs",
@@ -818,10 +801,7 @@ class ActionService:
                 return False
             await audit_task
         except asyncio.CancelledError:
-            if "audit_task" in locals() and not audit_task.done():
-                audit_task.cancel()
-                audit_task.add_done_callback(self._consume_task_result)
-                self._audit_store_quarantined = True
+            self._audit_store_quarantined = True
             raise
         except Exception:
             logger.exception("Failed to persist action audit record for stage %s", stage)

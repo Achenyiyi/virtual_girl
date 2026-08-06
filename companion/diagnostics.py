@@ -130,19 +130,19 @@ async def run_diagnostics(
 
     if online and config.llm_config and llm_key_available:
         provider = CloudLLMProvider(config.llm_config)
-        try:
-            health = await provider.health_check()
-            checks.append(_health_check("llm.online", "LLM endpoint", health))
-        finally:
-            await provider.shutdown()
+        checks.append(
+            await _check_provider_online(
+                "llm.online", "LLM endpoint", provider
+            )
+        )
 
     if online and require_voice and config.tts_config and config.tts_config.get_api_key():
         provider_tts = CloudTTSProvider(config.tts_config)
-        try:
-            health = await provider_tts.health_check()
-            checks.append(_health_check("tts.online", "Fish Audio TTS endpoint", health))
-        finally:
-            await provider_tts.shutdown()
+        checks.append(
+            await _check_provider_online(
+                "tts.online", "Fish Audio TTS endpoint", provider_tts
+            )
+        )
 
     return DiagnosticReport(
         checks=checks,
@@ -505,12 +505,9 @@ async def _optional_provider_checks(
             )
         elif online and not config.avatar_stage_launch_config:
             avatar = WebSocketAvatarProvider(config.avatar_config)
-            try:
-                checks.append(
-                    _health_check("avatar.online", "Avatar bridge", await avatar.health_check())
-                )
-            finally:
-                await avatar.shutdown()
+            checks.append(
+                await _check_provider_online("avatar.online", "Avatar bridge", avatar)
+            )
         else:
             message = (
                 "Managed AIRI is not launched by doctor; connectivity was not tested."
@@ -534,16 +531,11 @@ async def _optional_provider_checks(
 
     if config.action_provider_config:
         action = WindowsReadOnlyActionProvider(config.action_provider_config)
-        try:
-            checks.append(
-                _health_check(
-                    "action.local",
-                    "Windows read-only actions",
-                    await action.health_check(),
-                )
+        checks.append(
+            await _check_provider_online(
+                "action.local", "Windows read-only actions", action
             )
-        finally:
-            await action.shutdown()
+        )
     else:
         checks.append(
             DiagnosticCheck(
@@ -573,3 +565,11 @@ def _health_check(code: str, label: str, health: ProviderHealth) -> DiagnosticCh
         if health != ProviderHealth.HEALTHY
         else "",
     )
+
+
+async def _check_provider_online(code: str, label: str, provider: Any) -> DiagnosticCheck:
+    """Health-check one provider and always shut it down afterwards."""
+    try:
+        return _health_check(code, label, await provider.health_check())
+    finally:
+        await provider.shutdown()

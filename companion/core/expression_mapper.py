@@ -112,14 +112,6 @@ class ExpressionMapper:
             source_trust=affect.trust,
         )
 
-    def map_for_tts(self, affect: AffectState) -> VoiceParams:
-        """Map affect to TTS voice parameters only."""
-        return self._map_voice(affect)
-
-    def map_for_avatar(self, affect: AffectState) -> FacialParams:
-        """Map affect to facial expression parameters only."""
-        return self._map_facial(affect)
-
     # ── Internal mappers ──────────────────────────────────────────────
 
     def _map_facial(self, a: AffectState) -> FacialParams:
@@ -130,17 +122,13 @@ class ExpressionMapper:
         params = FacialParams(
             expression_id=expression_id,
             expression_intensity=intensity,
-            eye_open=0.5 + a.arousal * 0.5,
+            eye_open=0.3 + a.energy * 0.7,
             brow_raise=abs(a.valence) * 0.3 if a.valence > 0 else 0.1,
             cheek_raise=max(0, a.valence) * 0.8,
             mouth_smile=max(0, a.valence) * 0.9,
             mouth_frown=max(0, -a.valence) * 0.6,
             mouth_open=0.0,  # Set by lip-sync, not emotion
         )
-
-        # Energy affects eye openness
-        params.eye_open = 0.3 + a.energy * 0.7
-
         return params
 
     def _map_voice(self, a: AffectState) -> VoiceParams:

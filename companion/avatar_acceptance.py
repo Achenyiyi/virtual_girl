@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import time
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
-from typing import Any, Protocol
+from collections.abc import Awaitable, Callable
+from typing import Protocol, TypeVar
 
-from companion import __version__
+T = TypeVar("T")
+
+from companion.acceptance_report import AcceptanceCheck, AcceptanceReport, failed_report
+from companion.async_util import wait_with_timeout
 from companion.providers.avatar import AvatarModel, AvatarState, BodyPose, FacialExpression
 from companion.providers.base import ProviderHealth
 from companion.providers.implementations.websocket_avatar import (
@@ -41,50 +42,16 @@ class AvatarAcceptanceProvider(Protocol):
     async def trigger_gesture(self, gesture_id: str, intensity: float = 0.5) -> None: ...
 
 
-@dataclass(frozen=True)
-class AvatarAcceptanceCheck:
-    code: str
-    passed: bool
-    message: str
-
-
-@dataclass(frozen=True)
-class AvatarAcceptanceReport:
-    checks: list[AvatarAcceptanceCheck]
-
-    @property
-    def exit_code(self) -> int:
-        return 0 if self.checks and all(check.passed for check in self.checks) else 1
-
-    def to_json(self) -> str:
-        return json.dumps(
-            {
-                "schema_version": 1,
-                "app_version": __version__,
-                "generated_at": datetime.now(UTC).isoformat(),
-                "exit_code": self.exit_code,
-                "passed": self.exit_code == 0,
-                "checks": [asdict(check) for check in self.checks],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-
-
-def failed_avatar_acceptance_report(code: str, message: str) -> AvatarAcceptanceReport:
-    return AvatarAcceptanceReport([AvatarAcceptanceCheck(code, False, message)])
-
-
 async def run_avatar_acceptance(
     provider: AvatarAcceptanceProvider,
     *,
     model_id: str,
     apply_timeout_seconds: float = 5.0,
     visual_hold_seconds: float = 0.0,
-) -> AvatarAcceptanceReport:
+) -> AcceptanceReport:
     """Prove model loading and renderer-applied state through the real bridge."""
     if not model_id:
-        return failed_avatar_acceptance_report(
+        return failed_report(
             "avatar.model_config", "Configured identity.avatar_model_id is empty."
         )
     if apply_timeout_seconds <= 0:
@@ -92,16 +59,16 @@ async def run_avatar_acceptance(
     if visual_hold_seconds < 0:
         raise ValueError("avatar visual hold must not be negative")
 
-    checks: list[AvatarAcceptanceCheck] = []
+    checks: list[AcceptanceCheck] = []
     try:
         if not await _wait_for_healthy(
             provider, timeout_seconds=apply_timeout_seconds
         ):
-            return failed_avatar_acceptance_report(
+            return failed_report(
                 "avatar.bridge_health", "Avatar bridge did not report healthy."
             )
         checks.append(
-            AvatarAcceptanceCheck(
+            AcceptanceCheck(
                 "avatar.bridge_health", True, "Authenticated avatar bridge is healthy."
             )
         )
@@ -110,17 +77,17 @@ async def run_avatar_acceptance(
         model = next((item for item in models if item.model_id == model_id), None)
         if model is None:
             checks.append(
-                AvatarAcceptanceCheck(
+                AcceptanceCheck(
                     "avatar.model_available",
                     False,
                     "Configured avatar model was not returned by the stage.",
                 )
             )
-            return AvatarAcceptanceReport(checks)
+            return AcceptanceReport(checks)
         model_type = model.type.lower()
         available = model_type in {"live2d", "vrm"}
         checks.append(
-            AvatarAcceptanceCheck(
+            AcceptanceCheck(
                 "avatar.model_available",
                 available,
                 "Configured Live2D/VRM model is available."
@@ -129,12 +96,12 @@ async def run_avatar_acceptance(
             )
         )
         if not available:
-            return AvatarAcceptanceReport(checks)
+            return AcceptanceReport(checks)
 
         validation_errors = await provider.validate_model(model_id)
         loaded = not validation_errors and await provider.load_model(model_id)
         checks.append(
-            AvatarAcceptanceCheck(
+            AcceptanceCheck(
                 "avatar.model_loaded",
                 loaded,
                 "Stage validated and loaded the configured model."
@@ -143,12 +110,12 @@ async def run_avatar_acceptance(
             )
         )
         if not loaded:
-            return AvatarAcceptanceReport(checks)
+            return AcceptanceReport(checks)
 
         baseline = await provider.inspect_stage()
         baseline_ok = _baseline_matches(baseline, model_id=model_id, model_type=model_type)
         checks.append(
-            AvatarAcceptanceCheck(
+            AcceptanceCheck(
                 "avatar.renderer_ready",
                 baseline_ok,
                 "Visible renderer reports the loaded model."
@@ -157,7 +124,7 @@ async def run_avatar_acceptance(
             )
         )
         if not baseline_ok:
-            return AvatarAcceptanceReport(checks)
+            return AcceptanceReport(checks)
 
         expected = AvatarState(
             expression=FacialExpression("happy", intensity=0.73, eye_open=0.91),
@@ -178,7 +145,7 @@ async def run_avatar_acceptance(
         )
         applied_ok = applied is not None
         checks.append(
-            AvatarAcceptanceCheck(
+            AcceptanceCheck(
                 "avatar.state_rendered",
                 applied_ok,
                 "Renderer applied the state, expression, gesture, and proactive level."
@@ -196,7 +163,7 @@ async def run_avatar_acceptance(
             )
         frame_ok = presented is not None
         checks.append(
-            AvatarAcceptanceCheck(
+            AcceptanceCheck(
                 "avatar.frame_presented",
                 frame_ok,
                 "Renderer frame sequence advanced after the state update."
@@ -206,27 +173,18 @@ async def run_avatar_acceptance(
         )
         if frame_ok and visual_hold_seconds:
             await asyncio.sleep(visual_hold_seconds)
-        return AvatarAcceptanceReport(checks)
+        return AcceptanceReport(checks)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         checks.append(
-            AvatarAcceptanceCheck(
+            AcceptanceCheck(
                 "avatar.runtime",
                 False,
                 f"Avatar acceptance failed: {type(exc).__name__}.",
             )
         )
-        return AvatarAcceptanceReport(checks)
-
-
-def render_avatar_acceptance_report(report: AvatarAcceptanceReport) -> str:
-    lines = ["Avatar acceptance report"]
-    for check in report.checks:
-        status = "PASS" if check.passed else "FAIL"
-        lines.append(f"[{status}] {check.code}: {check.message}")
-    lines.append("Result: PASS" if report.exit_code == 0 else "Result: FAIL")
-    return "\n".join(lines)
+        return AcceptanceReport(checks)
 
 
 def _baseline_matches(
@@ -240,17 +198,36 @@ def _baseline_matches(
     )
 
 
+async def _poll_until(
+    predicate: Callable[[], Awaitable[T | None]],
+    *,
+    timeout_seconds: float,
+    interval: float = 0.05,
+) -> T | None:
+    """Poll *predicate* until it returns a truthy value or the deadline passes.
+
+    Returns the first truthy predicate result, or None on timeout.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        result = await predicate()
+        if result:
+            return result
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        await asyncio.sleep(min(interval, remaining))
+
+
 async def _wait_for_healthy(
     provider: AvatarAcceptanceProvider, *, timeout_seconds: float
 ) -> bool:
-    deadline = time.monotonic() + timeout_seconds
-    while True:
-        if await provider.health_check() == ProviderHealth.HEALTHY:
-            return True
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        await asyncio.sleep(min(0.1, remaining))
+    async def healthy() -> bool:
+        return await provider.health_check() == ProviderHealth.HEALTHY
+
+    return bool(
+        await _poll_until(healthy, timeout_seconds=timeout_seconds, interval=0.1)
+    )
 
 
 async def _wait_for_rendered_state(
@@ -260,15 +237,15 @@ async def _wait_for_rendered_state(
     expected: AvatarState,
     timeout_seconds: float,
 ) -> AvatarStageInspection | None:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
+    async def rendered() -> AvatarStageInspection | None:
         inspection = await provider.inspect_stage()
         if _matches_expected(
             inspection, baseline=baseline, expected=expected, require_advance=True
         ):
             return inspection
-        await asyncio.sleep(0.05)
-    return None
+        return None
+
+    return await _poll_until(rendered, timeout_seconds=timeout_seconds)  # type: ignore[return-value]
 
 
 async def _wait_for_presented_frame(
@@ -278,8 +255,7 @@ async def _wait_for_presented_frame(
     expected: AvatarState,
     timeout_seconds: float,
 ) -> AvatarStageInspection | None:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
+    async def presented() -> AvatarStageInspection | None:
         inspection = await provider.inspect_stage()
         if (
             inspection.frame_sequence > applied.frame_sequence
@@ -288,8 +264,9 @@ async def _wait_for_presented_frame(
             )
         ):
             return inspection
-        await asyncio.sleep(0.05)
-    return None
+        return None
+
+    return await _poll_until(presented, timeout_seconds=timeout_seconds)  # type: ignore[return-value]
 
 
 def _matches_expected(
@@ -329,18 +306,7 @@ async def shutdown_avatar_acceptance_provider(
     provider: WebSocketAvatarProvider, *, timeout_seconds: float = 5.0
 ) -> None:
     """Bound release-gate cleanup even if a third-party WebSocket close stalls."""
-    task: asyncio.Future[Any] = asyncio.ensure_future(provider.shutdown())
-    done, _ = await asyncio.wait([task], timeout=timeout_seconds)
-    if done:
+    task = asyncio.ensure_future(provider.shutdown())
+    if await wait_with_timeout(task, timeout_seconds):
         with contextlib.suppress(Exception):
             await task
-        return
-    task.cancel()
-    task.add_done_callback(_consume_task_result)
-
-
-def _consume_task_result(task: asyncio.Future[Any]) -> None:
-    if task.cancelled():
-        return
-    with contextlib.suppress(Exception):
-        task.exception()

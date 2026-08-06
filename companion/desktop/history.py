@@ -30,8 +30,10 @@ class ConversationHistoryProjector:
     ) -> dict[str, Any]:
         bounded_limit = _bounded_limit(limit, default=20, maximum=50)
         cursor_data = _decode_cursor(cursor, expected_kind="sessions")
-        events = await self._completed_events()
-        snapshot = str(cursor_data.get("snapshot", "")) or _latest_occurred_at(events)
+        snapshot = str(cursor_data.get("snapshot", ""))
+        events = await self._completed_events(snapshot)
+        if not snapshot:
+            snapshot = _latest_occurred_at(events)
         visible = [event for event in events if str(event.get("occurred_at", "")) <= snapshot]
         sessions: OrderedDict[str, dict[str, Any]] = OrderedDict()
         for event in visible:
@@ -80,8 +82,10 @@ class ConversationHistoryProjector:
             raise ValueError("session_id is invalid")
         bounded_limit = _bounded_limit(limit, default=50, maximum=100)
         cursor_data = _decode_cursor(cursor, expected_kind=f"history:{session_id}")
-        events = await self._completed_events()
-        snapshot = str(cursor_data.get("snapshot", "")) or _latest_occurred_at(events)
+        snapshot = str(cursor_data.get("snapshot", ""))
+        events = await self._completed_events(snapshot)
+        if not snapshot:
+            snapshot = _latest_occurred_at(events)
         turns: list[dict[str, Any]] = []
         for event in reversed(events):
             if str(event.get("occurred_at", "")) > snapshot:
@@ -118,13 +122,27 @@ class ConversationHistoryProjector:
             ),
         }
 
-    async def _completed_events(self) -> list[dict[str, Any]]:
+    async def _completed_events(self, snapshot: str = "") -> list[dict[str, Any]]:
+        """Fetch completed-turn events, bounded by a cursor snapshot when given.
+
+        The snapshot pushdown keeps paged history from re-reading the whole
+        ledger; the round-trip guard skips it for formats the DB cannot compare.
+        """
+        end_time: datetime | None = None
+        if snapshot:
+            try:
+                parsed = datetime.fromisoformat(snapshot)
+                if str(parsed) == snapshot:
+                    end_time = parsed
+            except ValueError:
+                pass
         events: list[dict[str, Any]] = []
         offset = 0
         while offset < _MAX_PROJECTED_EVENTS:
             batch = await self._memory.query_events(
                 EventQuery(
                     event_types=[_COMPLETED_EVENT],
+                    end_time=end_time,
                     limit=min(_BATCH_SIZE, _MAX_PROJECTED_EVENTS - offset),
                     offset=offset,
                     sort_ascending=False,

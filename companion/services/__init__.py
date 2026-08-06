@@ -1,7 +1,6 @@
 """Service layer — high-level services that coordinate multiple providers."""
 
 from companion.services.action_service import ActionRecord, ActionService, ActionServiceConfig
-from companion.services.perception_service import ContextAssessment, PerceptionService
 from companion.services.proactive_scheduler import (
     ProactiveScheduler,
     ProactiveTrigger,
@@ -14,8 +13,6 @@ __all__ = [
     "VoicePipeline",
     "VoicePipelineConfig",
     "PipelineMetrics",
-    "PerceptionService",
-    "ContextAssessment",
     "ProactiveScheduler",
     "SchedulerConfig",
     "ProactiveTrigger",

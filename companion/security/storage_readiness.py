@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import ctypes
 import os
 import secrets
 import shutil
-import sys
-from ctypes import wintypes
 from dataclasses import dataclass
 from pathlib import Path
 
+from companion.security.windows_paths import is_remote_path as _is_remote_path
+
 MINIMUM_RUNTIME_FREE_BYTES = 512 * 1024 * 1024
-_DRIVE_REMOTE = 4
 
 
 @dataclass(frozen=True)
@@ -80,21 +78,6 @@ def _create_missing_parents(parent: Path, existing_parent: Path) -> list[Path]:
             directory.rmdir()
         raise
     return created
-
-
-def _is_remote_path(path: Path) -> bool:
-    if str(path).startswith("\\\\"):
-        return True
-    if sys.platform != "win32":
-        return False
-    anchor = path.anchor
-    if not anchor:
-        return False
-    kernel32 = ctypes.WinDLL("Kernel32.dll", use_last_error=True)
-    get_drive_type = kernel32.GetDriveTypeW
-    get_drive_type.argtypes = [wintypes.LPCWSTR]
-    get_drive_type.restype = wintypes.UINT
-    return bool(get_drive_type(anchor) == _DRIVE_REMOTE)
 
 
 def _nearest_existing_parent(path: Path) -> Path:

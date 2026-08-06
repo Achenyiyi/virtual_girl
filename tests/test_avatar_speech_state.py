@@ -9,7 +9,7 @@ from companion.core.orchestrator import CompanionOrchestrator
 from companion.core.policy_gate import PolicyGate
 from companion.core.state_manager import StateManager
 from companion.providers.avatar import AvatarState
-from companion.services.voice_pipeline import _pcm_int16_rms
+from companion.audio.dsp import pcm_int16_rms as _pcm_int16_rms
 from tests.test_providers import MockLLMProvider
 
 

@@ -189,7 +189,3 @@ class StateManager:
                 "days_together": self._relationship.days_together,
             },
         }
-
-    @property
-    def state_version(self) -> int:
-        return self._state_version

@@ -509,27 +509,29 @@ class MemoryService(MemoryProvider):
         conn = await self._ensure_db()
         # Use LIKE as primary search (works for Chinese without tokenizers).
         # FTS5 is tried first for non-CJK queries; on error falls back to LIKE.
-        rows: list[aiosqlite.Row] = []
-        if self._config.fts_enabled and self._has_latin_chars(query):
-            try:
-                fts_query = " OR ".join(f'"{term}"' for term in query.split() if term) or query
-                conditions = [
-                    "facts_fts MATCH ?",
-                    "f.rowid = facts_fts.rowid",
-                    "f.valid_to IS NULL",
-                ]
-                params: list[Any] = [fts_query]
-                if category:
-                    conditions.append("f.category = ?")
-                    params.append(category)
-                sql = f"SELECT f.* FROM facts f, facts_fts WHERE {' AND '.join(conditions)} LIMIT ?"
-                params.append(limit)
-                cursor = await conn.execute(sql, params)
-                rows = list(await cursor.fetchall())
-            except Exception:
-                rows = []
-        if not rows:
-            rows = await self._search_facts_like(conn, query, category, limit)
+        fts_query = " OR ".join(f'"{term}"' for term in query.split() if term) or query
+        conditions = [
+            "facts_fts MATCH ?",
+            "f.rowid = facts_fts.rowid",
+            "f.valid_to IS NULL",
+        ]
+        params: list[Any] = [fts_query]
+        if category:
+            conditions.append("f.category = ?")
+            params.append(category)
+        like_conditions = ["(key LIKE ? OR value LIKE ?)", "valid_to IS NULL"]
+        like_params: list[Any] = [f"%{query}%", f"%{query}%"]
+        if category:
+            like_conditions.append("category = ?")
+            like_params.append(category)
+        rows = await self._run_fts_or_like(
+            conn,
+            query=query,
+            fts_sql=f"SELECT f.* FROM facts f, facts_fts WHERE {' AND '.join(conditions)} LIMIT ?",
+            fts_params=[*params, limit],
+            like_sql=f"SELECT * FROM facts WHERE {' AND '.join(like_conditions)} LIMIT ?",
+            like_params=[*like_params, limit],
+        )
         return [
             SemanticFact(
                 fact_id=r["fact_id"],
@@ -551,19 +553,28 @@ class MemoryService(MemoryProvider):
         latin_count = sum(1 for c in text if c.isascii() and c.isalpha())
         return latin_count > len(text.replace(" ", "")) * 0.3
 
-    async def _search_facts_like(
-        self, conn: aiosqlite.Connection, query: str, category: str | None, limit: int
+    async def _run_fts_or_like(
+        self,
+        conn: aiosqlite.Connection,
+        *,
+        query: str,
+        fts_sql: str,
+        fts_params: list[Any],
+        like_sql: str,
+        like_params: list[Any],
     ) -> list[aiosqlite.Row]:
-        conditions = ["(key LIKE ? OR value LIKE ?)", "valid_to IS NULL"]
-        like_q = f"%{query}%"
-        params: list[Any] = [like_q, like_q]
-        if category:
-            conditions.append("category = ?")
-            params.append(category)
-        sql = f"SELECT * FROM facts WHERE {' AND '.join(conditions)} LIMIT ?"
-        params.append(limit)
-        cursor = await conn.execute(sql, params)
-        return list(await cursor.fetchall())
+        """Run the FTS query for Latin-heavy input, falling back to LIKE."""
+        rows: list[aiosqlite.Row] = []
+        if self._config.fts_enabled and self._has_latin_chars(query):
+            try:
+                cursor = await conn.execute(fts_sql, fts_params)
+                rows = list(await cursor.fetchall())
+            except Exception:
+                rows = []
+        if not rows:
+            cursor = await conn.execute(like_sql, like_params)
+            rows = list(await cursor.fetchall())
+        return rows
 
     @_serialized_operation
     async def list_fact_updates(self, key: str) -> list[dict[str, Any]]:
@@ -605,36 +616,28 @@ class MemoryService(MemoryProvider):
         conn = await self._ensure_db()
         # LIKE search (works for all languages including Chinese).
         # FTS5 is attempted for Latin-heavy queries; falls back to LIKE.
-        rows: list[aiosqlite.Row] = []
-        if self._config.fts_enabled and self._has_latin_chars(query):
-            try:
-                fts_query = " OR ".join(f'"{term}"' for term in query.split() if term) or query
-                conditions = [
-                    "episodes_fts MATCH ?",
-                    "e.rowid = episodes_fts.rowid",
-                    "e.emotional_salience >= ?",
-                ]
-                fts_params: list[Any] = [fts_query, min_salience]
-                sql = (
-                    "SELECT e.* FROM episodes e, episodes_fts WHERE "
-                    f"{' AND '.join(conditions)} "
-                    "ORDER BY e.occurred_at DESC LIMIT ?"
-                )
-                fts_params.append(limit)
-                cursor = await conn.execute(sql, fts_params)
-                rows = list(await cursor.fetchall())
-            except Exception:
-                rows = []
-        if not rows:
-            conditions = ["emotional_salience >= ?", "(title LIKE ? OR summary LIKE ?)"]
-            like_params: list[Any] = [min_salience, f"%{query}%", f"%{query}%"]
-            sql = (
-                f"SELECT * FROM episodes WHERE {' AND '.join(conditions)} "
+        fts_query = " OR ".join(f'"{term}"' for term in query.split() if term) or query
+        fts_conditions = [
+            "episodes_fts MATCH ?",
+            "e.rowid = episodes_fts.rowid",
+            "e.emotional_salience >= ?",
+        ]
+        like_conditions = ["emotional_salience >= ?", "(title LIKE ? OR summary LIKE ?)"]
+        rows = await self._run_fts_or_like(
+            conn,
+            query=query,
+            fts_sql=(
+                "SELECT e.* FROM episodes e, episodes_fts WHERE "
+                f"{' AND '.join(fts_conditions)} "
+                "ORDER BY e.occurred_at DESC LIMIT ?"
+            ),
+            fts_params=[fts_query, min_salience, limit],
+            like_sql=(
+                f"SELECT * FROM episodes WHERE {' AND '.join(like_conditions)} "
                 "ORDER BY occurred_at DESC LIMIT ?"
-            )
-            like_params.append(limit)
-            cursor = await conn.execute(sql, like_params)
-            rows = list(await cursor.fetchall())
+            ),
+            like_params=[min_salience, f"%{query}%", f"%{query}%", limit],
+        )
         return [
             Episode(
                 episode_id=r["episode_id"],

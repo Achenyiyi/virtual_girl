@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import json
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
 from typing import Any, Protocol
 
-from companion import __version__
+from companion.acceptance_report import AcceptanceCheck, AcceptanceReport, failed_report
+from companion.async_util import consume_task_result, wait_with_timeout
 from companion.core.event_bus import EventBus
 from companion.events.base import BaseEvent
 from companion.events.conversation import (
@@ -61,43 +58,6 @@ class VoiceAcceptancePipeline(Protocol):
     def get_voice_acceptance_snapshot(self) -> VoiceAcceptanceSnapshot: ...
 
 
-@dataclass(frozen=True)
-class VoiceAcceptanceCheck:
-    code: str
-    passed: bool
-    message: str
-    actual_ms: int | None = None
-    target_ms: int | None = None
-
-
-@dataclass(frozen=True)
-class VoiceAcceptanceReport:
-    checks: list[VoiceAcceptanceCheck]
-
-    @property
-    def exit_code(self) -> int:
-        return 0 if self.checks and all(check.passed for check in self.checks) else 1
-
-    def to_json(self) -> str:
-        return json.dumps(
-            {
-                "schema_version": 1,
-                "app_version": __version__,
-                "generated_at": datetime.now(UTC).isoformat(),
-                "exit_code": self.exit_code,
-                "passed": self.exit_code == 0,
-                "checks": [asdict(check) for check in self.checks],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
-
-
-def failed_voice_acceptance_report(code: str, message: str) -> VoiceAcceptanceReport:
-    """Build a stable failure result for setup paths outside the interactive runner."""
-    return VoiceAcceptanceReport([VoiceAcceptanceCheck(code, False, message)])
-
-
 _VOICE_EVENT_TYPES = (
     "conversation.turn.started",
     "conversation.asr.finalized",
@@ -132,7 +92,7 @@ async def run_voice_acceptance(
     target_interrupt_latency_ms: int,
     barge_in_guard_seconds: float = 0.5,
     announce: Callable[[str], None] | None = None,
-) -> VoiceAcceptanceReport:
+) -> AcceptanceReport:
     """Exercise one complete spoken turn and one real-microphone interruption."""
     if min(sample_rate, utterance_timeout_seconds, turn_timeout_seconds) <= 0:
         raise ValueError("voice acceptance timeouts and sample rate must be positive")
@@ -161,9 +121,9 @@ async def run_voice_acceptance(
             )
             first_audio = await microphone.get_speech_audio(timeout=capture_timeout)
             if not _usable_utterance(first_audio, sample_rate):
-                return VoiceAcceptanceReport(
+                return AcceptanceReport(
                     [
-                        VoiceAcceptanceCheck(
+                        AcceptanceCheck(
                             "voice.complete_input",
                             False,
                             "No usable microphone utterance was captured before the deadline.",
@@ -183,7 +143,7 @@ async def run_voice_acceptance(
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                return failed_voice_acceptance_report(
+                return failed_report(
                     "voice.complete_turn",
                     f"The complete spoken turn failed: {type(exc).__name__}.",
                 )
@@ -203,7 +163,7 @@ async def run_voice_acceptance(
             target_e2e_latency_ms=target_e2e_latency_ms,
         )
         if not all(check.passed for check in checks):
-            return VoiceAcceptanceReport(checks)
+            return AcceptanceReport(checks)
 
         output(
             "【第二轮：打断】现在请对着麦克风清晰说出下面这句话，说完后保持安静，"
@@ -223,14 +183,14 @@ async def run_voice_acceptance(
                 second_audio = await microphone.get_speech_audio(timeout=capture_timeout)
                 if not _usable_utterance(second_audio, sample_rate):
                     checks.append(
-                        VoiceAcceptanceCheck(
+                        AcceptanceCheck(
                             "voice.interrupt_input",
                             False,
                             "No usable microphone utterance was captured "
                             "for the interruption test.",
                         )
                     )
-                    return VoiceAcceptanceReport(checks)
+                    return AcceptanceReport(checks)
                 assert second_audio is not None
 
                 second_start = len(events)
@@ -252,20 +212,20 @@ async def run_voice_acceptance(
                 response_task = None
                 if not _is_no_speech_failure(second_events):
                     checks.append(_interruption_setup_failure(second_events))
-                    return VoiceAcceptanceReport(checks)
+                    return AcceptanceReport(checks)
                 if (
                     attempt == _MAX_NO_SPEECH_ATTEMPTS
                     or time.monotonic() >= interruption_deadline
                 ):
                     checks.append(_interruption_setup_failure(second_events))
-                    return VoiceAcceptanceReport(checks)
+                    return AcceptanceReport(checks)
                 output(
                     "没有识别到语音，请立即把第二轮的完整句子再说一次。"
                 )
 
             if response_task is None:
                 checks.append(_interruption_setup_failure(events[second_start:]))
-                return VoiceAcceptanceReport(checks)
+                return AcceptanceReport(checks)
 
             speech_start_sequence = microphone.speech_start_sequence
             barge_in_task = asyncio.create_task(
@@ -278,18 +238,18 @@ async def run_voice_acceptance(
                 if premature_sequence is not None:
                     await _settle_task(barge_in_task)
                     checks.append(
-                        VoiceAcceptanceCheck(
+                        AcceptanceCheck(
                             "voice.echo_guard",
                             False,
                             "VAD fired before the barge-in prompt; "
                             "check speaker echo or crosstalk.",
                         )
                     )
-                    return VoiceAcceptanceReport(checks)
+                    return AcceptanceReport(checks)
                 if response_task.done():
                     await _settle_task(barge_in_task)
                     checks.append(_interruption_setup_failure(events[second_start:]))
-                    return VoiceAcceptanceReport(checks)
+                    return AcceptanceReport(checks)
 
             output("【现在打断】AD学姐已经开始说话，请立刻持续说话 2 至 3 秒。")
             detected_sequence = await microphone.wait_for_speech_start(
@@ -298,13 +258,13 @@ async def run_voice_acceptance(
             if detected_sequence is None:
                 await _settle_task(barge_in_task)
                 checks.append(
-                    VoiceAcceptanceCheck(
+                    AcceptanceCheck(
                         "voice.barge_in_input",
                         False,
                         "No VAD speech-start signal was detected while playback was active.",
                     )
                 )
-                return VoiceAcceptanceReport(checks)
+                return AcceptanceReport(checks)
 
             started = time.perf_counter()
             try:
@@ -315,25 +275,25 @@ async def run_voice_acceptance(
                 raise
             except Exception as exc:
                 checks.append(
-                    VoiceAcceptanceCheck(
+                    AcceptanceCheck(
                         "voice.interrupt_terminal",
                         False,
                         f"Barge-in failed: {type(exc).__name__}.",
                     )
                 )
-                return VoiceAcceptanceReport(checks)
+                return AcceptanceReport(checks)
             barge_in_audio = await _run_turn(
                 barge_in_task, timeout_seconds=utterance_timeout_seconds
             )
             if not _usable_utterance(barge_in_audio, sample_rate):
                 checks.append(
-                    VoiceAcceptanceCheck(
+                    AcceptanceCheck(
                         "voice.barge_in_input",
                         False,
                         "The VAD signal did not produce a usable barge-in utterance.",
                     )
                 )
-                return VoiceAcceptanceReport(checks)
+                return AcceptanceReport(checks)
             second_events = events[second_start:]
             interrupted_events = _events_for_turn(
                 second_events, "conversation.turn.interrupted"
@@ -347,7 +307,7 @@ async def run_voice_acceptance(
                 and terminal_events[0].was_interrupted
             )
             checks.append(
-                VoiceAcceptanceCheck(
+                AcceptanceCheck(
                     "voice.interrupt_terminal",
                     interrupt_ok,
                     "Barge-in produced one interruption notice and one completed terminal."
@@ -360,7 +320,7 @@ async def run_voice_acceptance(
             )
             latency_ok = interrupt_ok and interrupt_ms <= target_interrupt_latency_ms
             checks.append(
-                VoiceAcceptanceCheck(
+                AcceptanceCheck(
                     "voice.interrupt_latency",
                     latency_ok,
                     "Provider cancellation and playback stop met the interruption target."
@@ -377,7 +337,7 @@ async def run_voice_acceptance(
                 and interrupted_snapshot.history_matches_played_text
             )
             checks.append(
-                VoiceAcceptanceCheck(
+                AcceptanceCheck(
                     "voice.interrupted_history",
                     interrupted_history_ok,
                     "Interrupted history contains only text confirmed as played."
@@ -385,7 +345,7 @@ async def run_voice_acceptance(
                     else "Interrupted history did not match the confirmed played text.",
                 )
             )
-            return VoiceAcceptanceReport(checks)
+            return AcceptanceReport(checks)
         finally:
             if response_task is not None:
                 _cancel_and_detach(response_task)
@@ -396,23 +356,9 @@ async def run_voice_acceptance(
             event_bus.unsubscribe(event_type, capture)
 
 
-def render_voice_acceptance_report(report: VoiceAcceptanceReport) -> str:
-    lines = ["Voice acceptance report"]
-    for check in report.checks:
-        status = "PASS" if check.passed else "FAIL"
-        timing = ""
-        if check.actual_ms is not None and check.target_ms is not None:
-            timing = f" ({check.actual_ms}ms / target {check.target_ms}ms)"
-        lines.append(f"[{status}] {check.code}: {check.message}{timing}")
-    lines.append("Result: PASS" if report.exit_code == 0 else "Result: FAIL")
-    return "\n".join(lines)
-
-
 async def _run_turn(operation: Any, *, timeout_seconds: float) -> Any:
     task = operation if isinstance(operation, asyncio.Task) else asyncio.create_task(operation)
-    done, _ = await asyncio.wait([task], timeout=timeout_seconds)
-    if not done:
-        _cancel_and_detach(task)
+    if not await wait_with_timeout(task, timeout_seconds):
         raise TimeoutError("voice acceptance turn exceeded its deadline")
     return await task
 
@@ -425,14 +371,7 @@ async def _settle_task(task: asyncio.Task[Any]) -> None:
 def _cancel_and_detach(task: asyncio.Future[Any]) -> None:
     if not task.done():
         task.cancel()
-    task.add_done_callback(_consume_task_result)
-
-
-def _consume_task_result(task: asyncio.Future[Any]) -> None:
-    if task.cancelled():
-        return
-    with contextlib.suppress(Exception):
-        task.exception()
+    task.add_done_callback(consume_task_result)
 
 
 async def _wait_until_speaking(
@@ -474,11 +413,11 @@ def _complete_turn_checks(
     *,
     snapshot: VoiceAcceptanceSnapshot,
     target_e2e_latency_ms: int,
-) -> list[VoiceAcceptanceCheck]:
+) -> list[AcceptanceCheck]:
     started = [event for event in events if event.event_type == "conversation.turn.started"]
     if len(started) != 1:
         return [
-            VoiceAcceptanceCheck(
+            AcceptanceCheck(
                 "voice.complete_turn",
                 False,
                 _failure_message(events, "The spoken turn did not start exactly once."),
@@ -504,7 +443,7 @@ def _complete_turn_checks(
         and terminals[0].event_type == "conversation.turn.completed"
     )
     checks = [
-        VoiceAcceptanceCheck(
+        AcceptanceCheck(
             "voice.complete_turn",
             complete_ok,
             "Microphone, ASR, LLM, streaming TTS, playback, and durable completion all ran."
@@ -516,7 +455,7 @@ def _complete_turn_checks(
     e2e_ms = int(getattr(completed, "total_latency_ms", 0)) if completed else 0
     latency_ok = complete_ok and 0 < e2e_ms <= target_e2e_latency_ms
     checks.append(
-        VoiceAcceptanceCheck(
+        AcceptanceCheck(
             "voice.first_audio_latency",
             latency_ok,
             "Voice-turn-to-first-audio latency met the configured target."
@@ -532,7 +471,7 @@ def _complete_turn_checks(
         and snapshot.incremental_playback is True
     )
     checks.append(
-        VoiceAcceptanceCheck(
+        AcceptanceCheck(
             "voice.incremental_playback",
             incremental_ok,
             "The first played audio began before the LLM stream completed."
@@ -550,7 +489,7 @@ def _complete_turn_checks(
         and snapshot.output_underflow_count == 0
     )
     checks.append(
-        VoiceAcceptanceCheck(
+        AcceptanceCheck(
             "voice.pcm_continuity",
             continuity_ok,
             "All PCM chunks used one output stream without underflow."
@@ -564,7 +503,7 @@ def _complete_turn_checks(
         and snapshot.history_matches_played_text
     )
     checks.append(
-        VoiceAcceptanceCheck(
+        AcceptanceCheck(
             "voice.completed_history",
             completed_history_ok,
             "Completed history exactly matches text confirmed as played."
@@ -606,8 +545,8 @@ def _failure_message(events: list[BaseEvent], fallback: str) -> str:
     return f"Voice stage failed: {failure.stage}/{failure.error_type}."
 
 
-def _interruption_setup_failure(events: list[BaseEvent]) -> VoiceAcceptanceCheck:
-    return VoiceAcceptanceCheck(
+def _interruption_setup_failure(events: list[BaseEvent]) -> AcceptanceCheck:
+    return AcceptanceCheck(
         "voice.interrupt_setup",
         False,
         _failure_message(

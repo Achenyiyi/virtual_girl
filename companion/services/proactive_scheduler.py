@@ -28,7 +28,6 @@ from typing import Any
 
 from companion.core.event_bus import EventBus
 from companion.core.policy_gate import PolicyGate, ProactiveDecision, ProactiveLevel
-from companion.services.perception_service import PerceptionService
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +85,10 @@ class ProactiveScheduler:
     def __init__(
         self,
         policy_gate: PolicyGate,
-        perception: PerceptionService | None = None,
         bus: EventBus | None = None,
         config: SchedulerConfig | None = None,
     ) -> None:
         self._policy = policy_gate
-        self._perception = perception
         self._bus = bus
         self._config = config or SchedulerConfig()
 

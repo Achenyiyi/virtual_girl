@@ -11,7 +11,7 @@ Supports:
 from __future__ import annotations
 
 import asyncio
-import contextlib
+import json
 import logging
 import time
 from collections.abc import AsyncIterator, Awaitable
@@ -21,6 +21,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from companion.async_util import consume_task_result, wait_with_timeout
 from companion.providers.base import ProviderCapability, ProviderHealth, ProviderInfo
 from companion.providers.model import (
     LLMProvider,
@@ -32,6 +33,23 @@ from companion.security.redaction import redact_text
 from companion.security.windows_credentials import configured_secret_sources, resolve_secret
 
 logger = logging.getLogger(__name__)
+
+
+async def _iter_sse_data(resp: httpx.Response) -> AsyncIterator[dict[str, Any]]:
+    """Yield parsed JSON objects from SSE ``data:`` lines.
+
+    Skips non-``data:`` lines, the ``[DONE]`` sentinel, and malformed JSON.
+    """
+    async for line in resp.aiter_lines():
+        if not line.startswith("data: "):
+            continue
+        data_str = line[6:]
+        if data_str == "[DONE]":
+            return
+        try:
+            yield json.loads(data_str)
+        except json.JSONDecodeError:
+            continue
 
 
 @dataclass
@@ -138,20 +156,13 @@ class CloudLLMProvider(LLMProvider):
         if request.turn_id:
             self._active_tasks[request.turn_id] = generation_task
         try:
-            done, _ = await asyncio.wait(
-                [generation_task], timeout=self._config.timeout_seconds
-            )
-            if not done:
-                generation_task.cancel()
-                generation_task.add_done_callback(self._consume_task_result)
+            if not await wait_with_timeout(
+                generation_task, self._config.timeout_seconds
+            ):
                 self._failed_requests += 1
                 logger.error("LLM generation exceeded the configured total timeout")
                 return self._error_response(request)
             return await generation_task
-        except asyncio.CancelledError:
-            generation_task.cancel()
-            generation_task.add_done_callback(self._consume_task_result)
-            raise
         finally:
             if request.turn_id and self._active_tasks.get(request.turn_id) is generation_task:
                 self._active_tasks.pop(request.turn_id, None)
@@ -246,7 +257,7 @@ class CloudLLMProvider(LLMProvider):
                 done, _ = await asyncio.wait([stream_task], timeout=remaining)
                 if not done:
                     stream_task.cancel()
-                    stream_task.add_done_callback(self._consume_task_result)
+                    stream_task.add_done_callback(consume_task_result)
                     raise TimeoutError("stream total timeout")
                 try:
                     text_chunk = await stream_task
@@ -269,7 +280,7 @@ class CloudLLMProvider(LLMProvider):
         except asyncio.CancelledError:
             if stream_task is not None and not stream_task.done():
                 stream_task.cancel()
-                stream_task.add_done_callback(self._consume_task_result)
+                stream_task.add_done_callback(consume_task_result)
             raise
         except Exception as e:
             logger.error("Streaming LLM error: %s", redact_text(e))
@@ -289,20 +300,13 @@ class CloudLLMProvider(LLMProvider):
             if task is not None and not task.done():
                 self._active_cancellations.add(turn_id)
                 task.cancel()
-                task.add_done_callback(self._consume_task_result)
+                task.add_done_callback(consume_task_result)
                 return True
         return False
 
     @staticmethod
     def _is_retryable_status(status_code: int) -> bool:
         return status_code in {408, 409, 425, 429} or status_code >= 500
-
-    @staticmethod
-    def _consume_task_result(task: asyncio.Future[Any]) -> None:
-        if task.cancelled():
-            return
-        with contextlib.suppress(Exception):
-            task.exception()
 
     # ── Internal API call builders ────────────────────────────────────
 
@@ -422,22 +426,12 @@ class CloudLLMProvider(LLMProvider):
         url = self._config.get_base_url()
         async with client.stream("POST", url, json=body, headers=headers) as resp:
             resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if line.startswith("data: "):
-                    data_str = line[6:]
-                    if data_str == "[DONE]":
-                        return
-                    import json
-
-                    try:
-                        data = json.loads(data_str)
-                        if data.get("type") == "content_block_delta":
-                            delta = data.get("delta", {})
-                            text = delta.get("text", "")
-                            if text:
-                                yield text
-                    except json.JSONDecodeError:
-                        continue
+            async for data in _iter_sse_data(resp):
+                if data.get("type") == "content_block_delta":
+                    delta = data.get("delta", {})
+                    text = delta.get("text", "")
+                    if text:
+                        yield text
 
     async def _stream_openai(self, request: LLMRequest, api_key: str) -> AsyncIterator[str]:
         """Stream from OpenAI-compatible API with SSE."""
@@ -456,22 +450,12 @@ class CloudLLMProvider(LLMProvider):
         url = self._config.get_base_url()
         async with client.stream("POST", url, json=body, headers=headers) as resp:
             resp.raise_for_status()
-            async for line in resp.aiter_lines():
-                if line.startswith("data: "):
-                    data_str = line[6:]
-                    if data_str == "[DONE]":
-                        return
-                    import json
-
-                    try:
-                        data = json.loads(data_str)
-                        choices = data.get("choices", [{}])
-                        delta = choices[0].get("delta", {})
-                        text = delta.get("content", "")
-                        if text:
-                            yield text
-                    except json.JSONDecodeError:
-                        continue
+            async for data in _iter_sse_data(resp):
+                choices = data.get("choices", [{}])
+                delta = choices[0].get("delta", {})
+                text = delta.get("content", "")
+                if text:
+                    yield text
 
     # ── Provider lifecycle ────────────────────────────────────────────
 
@@ -540,7 +524,7 @@ class CloudLLMProvider(LLMProvider):
         self._active_tasks.clear()
         for task in active_tasks:
             task.cancel()
-            task.add_done_callback(self._consume_task_result)
+            task.add_done_callback(consume_task_result)
         self._active_cancellations.clear()
         if self._client:
             await self._client.aclose()

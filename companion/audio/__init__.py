@@ -11,10 +11,10 @@ Handles:
 
 from companion.audio.microphone import MicConfig, MicrophoneCapture, VoiceChatMode
 from companion.audio.player import (
-    AudioPlayer,
     PlaybackResult,
     SoundDeviceAudioOutput,
     SystemAudioOutput,
+    pcm_to_wav,
 )
 from companion.audio.vad import VADConfig, VADResult, VoiceActivityDetector
 
@@ -22,7 +22,7 @@ __all__ = [
     "VADConfig",
     "VADResult",
     "VoiceActivityDetector",
-    "AudioPlayer",
+    "pcm_to_wav",
     "PlaybackResult",
     "SystemAudioOutput",
     "SoundDeviceAudioOutput",

@@ -278,6 +278,8 @@ class ControlServer:
     async def _send_locked(
         websocket: ServerConnection, value: dict[str, Any]
     ) -> None:
+        # Send text (not bytes): the websockets library encodes str as a TEXT
+        # frame, which the AIRI client requires; bytes would go out as BINARY.
         message = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
         if len(message.encode("utf-8")) > MAX_MESSAGE_BYTES:
             raise ControlError("message_too_large", "Response exceeds the size limit.")
