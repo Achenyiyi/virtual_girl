@@ -1,0 +1,3996 @@
+diff --git a/apps/stage-tamagotchi/electron.vite.config.ts b/apps/stage-tamagotchi/electron.vite.config.ts
+index b37474c6..a27964dc 100644
+--- a/apps/stage-tamagotchi/electron.vite.config.ts
++++ b/apps/stage-tamagotchi/electron.vite.config.ts
+@@ -100,6 +100,7 @@ export default defineConfig({
+       rolldownOptions: {
+         input: {
+           'main': resolve(join(import.meta.dirname, 'src', 'renderer', 'index.html')),
++          'companion': resolve(join(import.meta.dirname, 'src', 'renderer', 'companion.html')),
+           'beat-sync': resolve(join(import.meta.dirname, 'src', 'renderer', 'beat-sync.html')),
+         },
+       },
+diff --git a/apps/stage-tamagotchi/src/main/companion-runtime-boundary.test.ts b/apps/stage-tamagotchi/src/main/companion-runtime-boundary.test.ts
+new file mode 100644
+index 00000000..7d0a0f8c
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/main/companion-runtime-boundary.test.ts
+@@ -0,0 +1,55 @@
++import { readFileSync } from 'node:fs'
++
++import { describe, expect, it } from 'vitest'
++
++const mainSource = readFileSync(new URL('./index.ts', import.meta.url), 'utf8')
++const windowSource = readFileSync(new URL('./windows/main/index.ts', import.meta.url), 'utf8')
++const rendererSource = readFileSync(new URL('../renderer/CompanionApp.vue', import.meta.url), 'utf8')
++const stageSource = readFileSync(new URL('../renderer/components/companion-desktop/CompanionDesktopStage.vue', import.meta.url), 'utf8')
++
++describe('companion desktop runtime boundary', () => {
++  it('returns from the minimal main-process graph before full AIRI providers are declared', () => {
++    const companionBranch = mainSource.indexOf('if (companionControl) {')
++    const companionReturn = mainSource.indexOf('return', companionBranch)
++    const fullRuntimeGraph = mainSource.indexOf('injeca.provide(\'modules:channel-server\'')
++
++    expect(companionBranch).toBeGreaterThan(-1)
++    expect(companionReturn).toBeGreaterThan(companionBranch)
++    expect(fullRuntimeGraph).toBeGreaterThan(companionReturn)
++    expect(mainSource).toContain('if (!companionControl)\n    setupMediaPermissionHandlers(session.defaultSession)')
++  })
++
++  it('loads a dedicated companion renderer and minimal Eventa handlers', () => {
++    expect(windowSource).toContain('companionDesktop ? \'companion.html\' : undefined')
++    expect(windowSource).toContain('setupCompanionWindowElectronInvokes({ window, eventa: avatarEventa })')
++    expect(windowSource).toContain('setupMainWindowElectronInvokes({')
++  })
++
++  it('installs managed avatar and Control IPC before loading the companion renderer', () => {
++    const managedAvatarHandler = windowSource.indexOf('const cleanupManagedAvatarHandler = defineInvokeHandler(')
++    const installControlIpc = windowSource.indexOf('const cleanupCompanionIpc = params.companionControl.installIpc(')
++    const connectControl = windowSource.indexOf('await params.companionControl.connect()')
++    const registerControlCleanup = windowSource.indexOf('onAppBeforeQuit(async () => {', connectControl)
++    const rendererLoad = windowSource.indexOf('await load(window, baseUrl(')
++
++    expect(managedAvatarHandler).toBeGreaterThan(-1)
++    expect(installControlIpc).toBeGreaterThan(managedAvatarHandler)
++    expect(connectControl).toBeGreaterThan(installControlIpc)
++    expect(registerControlCleanup).toBeGreaterThan(connectControl)
++    expect(rendererLoad).toBeGreaterThan(registerControlCleanup)
++  })
++
++  it('does not initialize full AIRI renderer services in the companion entrypoint', () => {
++    expect(rendererSource).not.toContain('useAuthProviderSync')
++    expect(rendererSource).not.toContain('useSharedAnalyticsStore')
++    expect(rendererSource).not.toContain('useModsServerChannelStore')
++    expect(rendererSource).not.toContain('useTamagotchiMcpToolsStore')
++    expect(rendererSource).not.toContain('useTamagotchiPluginToolsStore')
++    expect(rendererSource).not.toContain('useOnboardingStore')
++    expect(rendererSource).not.toContain('useChatSessionStore')
++  })
++
++  it('notifies the avatar runtime when the dedicated stage unmounts', () => {
++    expect(stageSource).toContain('onUnmounted(() => props.runtime.notifyStageUnmounted())')
++  })
++})
+diff --git a/apps/stage-tamagotchi/src/main/index.ts b/apps/stage-tamagotchi/src/main/index.ts
+index f0023f81..38df8d29 100644
+--- a/apps/stage-tamagotchi/src/main/index.ts
++++ b/apps/stage-tamagotchi/src/main/index.ts
+@@ -31,6 +31,7 @@ import { createI18n } from './libs/i18n'
+ import { createWindowAuthManagerService } from './services/airi/auth'
+ import { installManagedAvatarProtocolFromEnvironment } from './services/airi/avatar-bridge/managed-avatar'
+ import { setupServerChannel } from './services/airi/channel-server'
++import { createCompanionControlClientFromEnvironment } from './services/airi/companion-control/client'
+ import { setupGodotStageManager } from './services/airi/godot-stage'
+ import { setupBuiltInServer } from './services/airi/http-server'
+ import { setupMcpStdioManager } from './services/airi/mcp-servers'
+@@ -39,7 +40,7 @@ import { setupArtistryBridge } from './services/airi/widgets/artistry-bridge'
+ import { setupAutoUpdater } from './services/electron/auto-updater'
+ import { setupGlobalShortcutService } from './services/electron/global-shortcut'
+ import { setupMediaPermissionHandlers } from './services/electron/media-permissions'
+-import { setupTray } from './tray'
++import { setupCompanionTray, setupTray } from './tray'
+ import { setupAboutWindowReusable } from './windows/about'
+ import { setupBeatSync } from './windows/beat-sync'
+ import { setupCaptionWindowManager } from './windows/caption'
+@@ -121,7 +122,11 @@ app.whenReady().then(async () => {
+     return
+   }
+ 
+-  setupMediaPermissionHandlers(session.defaultSession)
++  const companionControl = createCompanionControlClientFromEnvironment(process.env)
++  if (companionControl)
++    process.env.COMPANION_CONTROL_PRELOAD_ENABLED = '1'
++  if (!companionControl)
++    setupMediaPermissionHandlers(session.defaultSession)
+   const managedAvatar = await installManagedAvatarProtocolFromEnvironment({
+     COMPANION_AVATAR_TOKEN: process.env.COMPANION_AVATAR_TOKEN,
+     COMPANION_AVATAR_MODEL_PATH: process.env.COMPANION_AVATAR_MODEL_PATH,
+@@ -130,6 +135,23 @@ app.whenReady().then(async () => {
+     COMPANION_AVATAR_MODEL_NAME: process.env.COMPANION_AVATAR_MODEL_NAME,
+   })
+ 
++  if (companionControl) {
++    if (!managedAvatar)
++      throw new Error('Companion Desktop requires a managed avatar')
++
++    const mainWindow = await setupMainWindow({
++      managedAvatar,
++      companionControl,
++      onWindowCreated: (window) => {
++        userFacingMainWindow = window
++      },
++    })
++    setupCompanionTray({ mainWindow, companionControl })
++    emitAppReady()
++    app.on('browser-window-created', (_, window) => optimizer.watchWindowShortcuts(window))
++    return
++  }
++
+   // Initialize file logger and register the hook
+   fileLogger = await setupFileLogger()
+ 
+@@ -240,6 +262,7 @@ app.whenReady().then(async () => {
+     build: async ({ dependsOn }) => setupMainWindow({
+       ...dependsOn,
+       managedAvatar,
++      companionControl,
+       onWindowCreated: (window) => {
+         userFacingMainWindow = window
+       },
+diff --git a/apps/stage-tamagotchi/src/main/services/airi/companion-control/client.test.ts b/apps/stage-tamagotchi/src/main/services/airi/companion-control/client.test.ts
+new file mode 100644
+index 00000000..3ad76625
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/main/services/airi/companion-control/client.test.ts
+@@ -0,0 +1,288 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++
++import {
++  COMPANION_CONTROL_IPC_EVENT,
++  COMPANION_CONTROL_IPC_REQUEST,
++  COMPANION_CONTROL_IPC_WINDOW_MODE,
++  COMPANION_CONTROL_PROTOCOL,
++  COMPANION_CONTROL_VERSION,
++  consumeCompanionControlEnvironment,
++  createCompanionConnectionErrorEvent,
++} from '../../../../shared/companion-control'
++import { createCompanionControlClient } from './client'
++
++type CompanionControlRenderer = Parameters<ReturnType<typeof createCompanionControlClient>['installIpc']>[0]
++
++const ipcMainMock = vi.hoisted(() => ({
++  handle: vi.fn(),
++  on: vi.fn(),
++  removeHandler: vi.fn(),
++  removeListener: vi.fn(),
++}))
++
++vi.mock('electron', () => ({
++  ipcMain: ipcMainMock,
++}))
++
++beforeEach(() => {
++  vi.clearAllMocks()
++})
++
++function createRenderer(id: number): CompanionControlRenderer {
++  return {
++    id,
++    isDestroyed: vi.fn(() => false),
++    send: vi.fn(),
++  }
++}
++
++describe('companion control environment', () => {
++  it('remains disabled for ordinary AIRI starts', () => {
++    const environment: NodeJS.ProcessEnv = {}
++
++    expect(consumeCompanionControlEnvironment(environment)).toBeUndefined()
++  })
++
++  it('reads and removes both control secrets from the process environment', () => {
++    const environment: NodeJS.ProcessEnv = {
++      COMPANION_CONTROL_URL: 'ws://127.0.0.1:49152',
++      COMPANION_CONTROL_TOKEN: 'secret-token',
++    }
++
++    const client = consumeCompanionControlEnvironment(environment)
++
++    expect(client).toEqual({ url: 'ws://127.0.0.1:49152', token: 'secret-token' })
++    expect(environment.COMPANION_CONTROL_URL).toBeUndefined()
++    expect(environment.COMPANION_CONTROL_TOKEN).toBeUndefined()
++  })
++
++  it('rejects partial or non-loopback configuration', () => {
++    expect(() => consumeCompanionControlEnvironment({
++      COMPANION_CONTROL_URL: 'ws://127.0.0.1:49152',
++    })).toThrow('environment is invalid')
++    expect(() => consumeCompanionControlEnvironment({
++      COMPANION_CONTROL_URL: 'ws://192.168.1.4:49152',
++      COMPANION_CONTROL_TOKEN: 'secret-token',
++    })).toThrow('environment is invalid')
++  })
++
++  it('creates a sanitized renderer snapshot when the host disconnects', () => {
++    const event = createCompanionConnectionErrorEvent()
++    const serialized = JSON.stringify(event)
++
++    expect(event).toMatchObject({
++      event: 'runtime.snapshot',
++      payload: {
++        phase: 'error',
++        active_turn: null,
++        error: {
++          code: 'control_disconnected',
++          retryable: true,
++        },
++      },
++    })
++    expect(serialized).not.toContain('COMPANION_CONTROL_TOKEN')
++    expect(serialized).not.toContain('stack')
++    expect(serialized).not.toMatch(/[A-Z]:\\/)
++  })
++})
++
++describe('companion control IPC sender boundary', () => {
++  function installIpc() {
++    const client = createCompanionControlClient('ws://127.0.0.1:49152', 'secret-token')
++    const setWindowMode = vi.fn()
++    const webContents = createRenderer(41)
++
++    client.installIpc(webContents, setWindowMode)
++
++    const requestHandler = ipcMainMock.handle.mock.calls.find(([channel]) => channel === COMPANION_CONTROL_IPC_REQUEST)?.[1]
++    const modeHandler = ipcMainMock.on.mock.calls.find(([channel]) => channel === COMPANION_CONTROL_IPC_WINDOW_MODE)?.[1]
++
++    expect(requestHandler).toBeTypeOf('function')
++    expect(modeHandler).toBeTypeOf('function')
++    return { modeHandler, requestHandler, setWindowMode }
++  }
++
++  it('rejects requests from a renderer other than the installed web contents', async () => {
++    const { requestHandler } = installIpc()
++
++    // ROOT CAUSE:
++    //
++    // ipcMain handlers are process-global. Without checking event.sender, any renderer
++    // could call the privileged Control bridge registered for the companion window.
++    await expect(requestHandler(
++      { sender: { id: 42 } },
++      { method: 'runtime.snapshot', params: {} },
++    )).rejects.toThrow('Companion Control renderer is unauthorized')
++  })
++
++  it('accepts window mode changes only from the installed web contents', () => {
++    const { modeHandler, setWindowMode } = installIpc()
++
++    modeHandler({ sender: { id: 42 } }, 'compact')
++    expect(setWindowMode).not.toHaveBeenCalled()
++
++    modeHandler({ sender: { id: 41 } }, 'compact')
++    expect(setWindowMode).toHaveBeenCalledOnce()
++    expect(setWindowMode).toHaveBeenCalledWith('compact')
++  })
++})
++
++describe('companion control event validation', () => {
++  class MockWebSocket {
++    static readonly CONNECTING = 0
++    static readonly OPEN = 1
++    static readonly CLOSING = 2
++
++    readonly sent: string[] = []
++    readyState = MockWebSocket.CONNECTING
++    private readonly listeners = new Map<string, Set<(event: unknown) => void>>()
++
++    addEventListener(type: string, listener: (event: unknown) => void): void {
++      const listeners = this.listeners.get(type) ?? new Set()
++      listeners.add(listener)
++      this.listeners.set(type, listeners)
++    }
++
++    send(message: string): void {
++      this.sent.push(message)
++    }
++
++    close(): void {
++      this.readyState = MockWebSocket.CLOSING
++    }
++
++    emit(type: string, event: unknown = {}): void {
++      for (const listener of this.listeners.get(type) ?? [])
++        listener(event)
++    }
++  }
++
++  it('forwards only known events with monotonic safe sequences and object payloads', async () => {
++    let socket: MockWebSocket | undefined
++    vi.stubGlobal('WebSocket', class extends MockWebSocket {
++      constructor() {
++        super()
++        socket = this
++      }
++    })
++    const client = createCompanionControlClient('ws://127.0.0.1:49152', 'secret-token')
++    const renderer = createRenderer(41)
++    client.installIpc(renderer, vi.fn())
++
++    const connection = client.connect()
++    socket!.readyState = MockWebSocket.OPEN
++    socket!.emit('open')
++    await vi.waitFor(() => expect(socket!.sent).toHaveLength(1))
++    const handshake = JSON.parse(socket!.sent[0]) as { id: string }
++    socket!.emit('message', { data: JSON.stringify({
++      protocol: COMPANION_CONTROL_PROTOCOL,
++      version: COMPANION_CONTROL_VERSION,
++      type: 'response',
++      id: handshake.id,
++      result: {},
++    }) })
++    await connection
++
++    const emitEvent = (event: string, sequence: unknown, payload: unknown) => socket!.emit('message', {
++      data: JSON.stringify({
++        protocol: COMPANION_CONTROL_PROTOCOL,
++        version: COMPANION_CONTROL_VERSION,
++        type: 'event',
++        event,
++        sequence,
++        payload,
++      }),
++    })
++    emitEvent('runtime.snapshot', 3, { phase: 'ready' })
++    emitEvent('plugin.tools.changed', 4, {})
++    emitEvent('emotion.changed', 3, {})
++    emitEvent('emotion.changed', 2, {})
++    emitEvent('emotion.changed', 4.5, {})
++    emitEvent('emotion.changed', 5, [])
++    emitEvent('emotion.changed', 6, { valence: 0.25 })
++
++    expect(renderer.send).toHaveBeenCalledTimes(2)
++    expect(renderer.send).toHaveBeenNthCalledWith(1, COMPANION_CONTROL_IPC_EVENT, {
++      event: 'runtime.snapshot',
++      sequence: 3,
++      payload: { phase: 'ready' },
++    })
++    expect(renderer.send).toHaveBeenNthCalledWith(2, COMPANION_CONTROL_IPC_EVENT, {
++      event: 'emotion.changed',
++      sequence: 6,
++      payload: { valence: 0.25 },
++    })
++  })
++
++  it('rejects and clears pending requests when the client closes', async () => {
++    let socket: MockWebSocket | undefined
++    vi.stubGlobal('WebSocket', class extends MockWebSocket {
++      constructor() {
++        super()
++        socket = this
++      }
++    })
++    const client = createCompanionControlClient('ws://127.0.0.1:49152', 'secret-token')
++    const connection = client.connect()
++    socket!.readyState = MockWebSocket.OPEN
++    socket!.emit('open')
++    await vi.waitFor(() => expect(socket!.sent).toHaveLength(1))
++    const handshake = JSON.parse(socket!.sent[0]) as { id: string }
++    socket!.emit('message', { data: JSON.stringify({
++      protocol: COMPANION_CONTROL_PROTOCOL,
++      version: COMPANION_CONTROL_VERSION,
++      type: 'response',
++      id: handshake.id,
++      result: {},
++    }) })
++    await connection
++
++    const pending = client.request('runtime.snapshot')
++    await vi.waitFor(() => expect(socket!.sent).toHaveLength(2))
++    await client.close()
++
++    await expect(pending).rejects.toThrow('Companion Control closed')
++    expect(socket!.readyState).toBe(MockWebSocket.CLOSING)
++  })
++
++  it('removes timed-out requests so a late response is ignored', async () => {
++    vi.useFakeTimers()
++    let socket: MockWebSocket | undefined
++    vi.stubGlobal('WebSocket', class extends MockWebSocket {
++      constructor() {
++        super()
++        socket = this
++      }
++    })
++    const client = createCompanionControlClient('ws://127.0.0.1:49152', 'secret-token')
++    const connection = client.connect()
++    socket!.readyState = MockWebSocket.OPEN
++    socket!.emit('open')
++    await Promise.resolve()
++    const handshake = JSON.parse(socket!.sent[0]) as { id: string }
++    socket!.emit('message', { data: JSON.stringify({
++      protocol: COMPANION_CONTROL_PROTOCOL,
++      version: COMPANION_CONTROL_VERSION,
++      type: 'response',
++      id: handshake.id,
++      result: {},
++    }) })
++    await connection
++
++    const pending = client.request('runtime.snapshot')
++    const request = JSON.parse(socket!.sent[1]) as { id: string }
++    const rejection = expect(pending).rejects.toThrow('Companion Control request timed out')
++    await vi.advanceTimersByTimeAsync(5_000)
++    await rejection
++    socket!.emit('message', { data: JSON.stringify({
++      protocol: COMPANION_CONTROL_PROTOCOL,
++      version: COMPANION_CONTROL_VERSION,
++      type: 'response',
++      id: request.id,
++      result: { late: true },
++    }) })
++    await client.close()
++    vi.useRealTimers()
++  })
++})
+diff --git a/apps/stage-tamagotchi/src/main/services/airi/companion-control/client.ts b/apps/stage-tamagotchi/src/main/services/airi/companion-control/client.ts
+new file mode 100644
+index 00000000..1fde4c96
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/main/services/airi/companion-control/client.ts
+@@ -0,0 +1,284 @@
++import type { WebContents } from 'electron'
++
++import type { CompanionControlEvent, CompanionWindowMode } from '../../../../shared/companion-control'
++
++import { Buffer } from 'node:buffer'
++import { randomUUID } from 'node:crypto'
++
++import { ipcMain } from 'electron'
++
++import {
++  COMPANION_CONTROL_IPC_EVENT,
++  COMPANION_CONTROL_IPC_REQUEST,
++  COMPANION_CONTROL_IPC_WINDOW_MODE,
++  COMPANION_CONTROL_PROTOCOL,
++  COMPANION_CONTROL_VERSION,
++  consumeCompanionControlEnvironment,
++  createCompanionConnectionErrorEvent,
++} from '../../../../shared/companion-control'
++
++const MAX_MESSAGE_BYTES = 256 * 1024
++const RPC_TIMEOUT_MS = 5000
++const MAX_RENDERER_REQUESTS = 8
++const ALLOWED_EVENT_NAMES = new Set<CompanionControlEvent['event']>([
++  'runtime.snapshot',
++  'conversation.turn.started',
++  'conversation.response.delta',
++  'conversation.turn.interrupted',
++  'conversation.turn.completed',
++  'conversation.turn.failed',
++  'voice.state.changed',
++  'emotion.changed',
++])
++const ALLOWED_METHODS = new Set([
++  'runtime.snapshot',
++  'runtime.retry',
++  'conversation.sessions.list',
++  'conversation.history',
++  'conversation.send',
++  'conversation.cancel',
++  'voice.start',
++  'voice.stop',
++  'credential.set',
++  'application.quit',
++])
++
++interface PendingRequest {
++  resolve: (value: Record<string, unknown>) => void
++  reject: (error: Error) => void
++  timeout: ReturnType<typeof setTimeout>
++}
++
++interface RpcError {
++  code?: unknown
++  message?: unknown
++  retryable?: unknown
++}
++
++type CompanionControlRenderer = Pick<WebContents, 'id' | 'isDestroyed' | 'send'>
++
++export interface CompanionControlClient {
++  enabled: boolean
++  connect: () => Promise<void>
++  close: () => Promise<void>
++  request: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>
++  installIpc: (webContents: CompanionControlRenderer, setWindowMode: (mode: CompanionWindowMode) => void) => () => void
++}
++
++export function createCompanionControlClientFromEnvironment(environment: NodeJS.ProcessEnv): CompanionControlClient | undefined {
++  const configuration = consumeCompanionControlEnvironment(environment)
++  if (!configuration)
++    return undefined
++  return createCompanionControlClient(configuration.url, configuration.token)
++}
++
++export function createCompanionControlClient(url: string, token: string): CompanionControlClient {
++  let socket: WebSocket | undefined
++  let authenticated = false
++  let intentionalClose = false
++  let lastEventSequence = -1
++  let rendererRequests = 0
++  let connectionPromise: Promise<void> | undefined
++  let launchToken = token
++  let renderer: CompanionControlRenderer | undefined
++  const pending = new Map<string, PendingRequest>()
++
++  function forwardToRenderer(event: CompanionControlEvent): void {
++    if (renderer && !renderer.isDestroyed())
++      renderer.send(COMPANION_CONTROL_IPC_EVENT, event)
++  }
++
++  function rejectPending(message: string): void {
++    for (const request of pending.values()) {
++      clearTimeout(request.timeout)
++      request.reject(new Error(message))
++    }
++    pending.clear()
++  }
++
++  function parseMessage(raw: string): Record<string, unknown> {
++    if (Buffer.byteLength(raw, 'utf8') > MAX_MESSAGE_BYTES)
++      throw new Error('Companion Control message exceeded limit')
++    const value: unknown = JSON.parse(raw)
++    if (!value || typeof value !== 'object' || Array.isArray(value))
++      throw new Error('Companion Control message is invalid')
++    return value as Record<string, unknown>
++  }
++
++  function onMessage(event: MessageEvent<string>): void {
++    let message: Record<string, unknown>
++    try {
++      message = parseMessage(event.data)
++    }
++    catch {
++      forwardToRenderer(createCompanionConnectionErrorEvent())
++      void close()
++      return
++    }
++    if (message.protocol !== COMPANION_CONTROL_PROTOCOL || message.version !== COMPANION_CONTROL_VERSION)
++      return
++    if (message.type === 'event') {
++      if (!authenticated
++        || typeof message.event !== 'string'
++        || !ALLOWED_EVENT_NAMES.has(message.event as CompanionControlEvent['event'])
++        || !Number.isSafeInteger(message.sequence)
++        || (message.sequence as number) < 0
++        || (message.sequence as number) <= lastEventSequence
++        || typeof message.payload !== 'object'
++        || message.payload === null
++        || Array.isArray(message.payload)) {
++        return
++      }
++      lastEventSequence = message.sequence as number
++      const forwarded: CompanionControlEvent = {
++        event: message.event as CompanionControlEvent['event'],
++        sequence: message.sequence as number,
++        payload: message.payload as Record<string, unknown>,
++      }
++      forwardToRenderer(forwarded)
++      return
++    }
++    const requestId = typeof message.id === 'string' ? message.id : ''
++    const request = pending.get(requestId)
++    if (!request)
++      return
++    pending.delete(requestId)
++    clearTimeout(request.timeout)
++    if (message.type === 'response') {
++      request.resolve(typeof message.result === 'object' && message.result !== null
++        ? message.result as Record<string, unknown>
++        : {})
++      return
++    }
++    const error = typeof message.error === 'object' && message.error !== null
++      ? message.error as RpcError
++      : {}
++    request.reject(new Error(typeof error.message === 'string' ? error.message : 'Companion Control request failed'))
++  }
++
++  function sendRequest(method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
++    if (!socket || socket.readyState !== WebSocket.OPEN)
++      return Promise.reject(new Error('Companion Control is disconnected'))
++    const requestId = randomUUID()
++    const message = JSON.stringify({
++      protocol: COMPANION_CONTROL_PROTOCOL,
++      version: COMPANION_CONTROL_VERSION,
++      type: 'request',
++      id: requestId,
++      method,
++      params,
++    })
++    if (Buffer.byteLength(message, 'utf8') > MAX_MESSAGE_BYTES)
++      return Promise.reject(new Error('Companion Control request exceeded limit'))
++    return new Promise((resolve, reject) => {
++      const timeout = setTimeout(() => {
++        pending.delete(requestId)
++        reject(new Error('Companion Control request timed out'))
++      }, RPC_TIMEOUT_MS)
++      pending.set(requestId, { resolve, reject, timeout })
++      socket!.send(message)
++    })
++  }
++
++  async function connectOnce(): Promise<void> {
++    if (authenticated)
++      return
++    intentionalClose = false
++    lastEventSequence = -1
++    socket = new WebSocket(url)
++    socket.addEventListener('message', onMessage)
++    socket.addEventListener('close', () => {
++      authenticated = false
++      rejectPending('Companion Control disconnected')
++      if (!intentionalClose)
++        forwardToRenderer(createCompanionConnectionErrorEvent())
++    })
++    await new Promise<void>((resolve, reject) => {
++      const timeout = setTimeout(() => reject(new Error('Companion Control connection timed out')), RPC_TIMEOUT_MS)
++      socket!.addEventListener('open', () => {
++        clearTimeout(timeout)
++        resolve()
++      }, { once: true })
++      socket!.addEventListener('error', () => {
++        clearTimeout(timeout)
++        reject(new Error('Companion Control connection failed'))
++      }, { once: true })
++    })
++    await sendRequest('handshake', { token: launchToken, version: COMPANION_CONTROL_VERSION })
++    authenticated = true
++    launchToken = ''
++  }
++
++  async function connect(): Promise<void> {
++    if (authenticated)
++      return
++    if (!launchToken)
++      throw new Error('Companion Control cannot reconnect after the launch token was consumed')
++    if (!connectionPromise) {
++      connectionPromise = connectOnce().finally(() => {
++        connectionPromise = undefined
++      })
++    }
++    await connectionPromise
++  }
++
++  async function close(): Promise<void> {
++    intentionalClose = true
++    authenticated = false
++    launchToken = ''
++    rejectPending('Companion Control closed')
++    const active = socket
++    socket = undefined
++    if (active && active.readyState < WebSocket.CLOSING)
++      active.close(1000, 'AIRI closing')
++  }
++
++  function installIpc(webContents: CompanionControlRenderer, setWindowMode: (mode: CompanionWindowMode) => void): () => void {
++    renderer = webContents
++    const rendererId = webContents.id
++    const handleRequest = async (event: Electron.IpcMainInvokeEvent, payload: unknown) => {
++      if (event.sender.id !== rendererId)
++        throw new Error('Companion Control renderer is unauthorized')
++      if (!payload || typeof payload !== 'object' || Array.isArray(payload))
++        throw new Error('Invalid Companion Control request')
++      const request = payload as { method?: unknown, params?: unknown }
++      if (typeof request.method !== 'string' || !ALLOWED_METHODS.has(request.method))
++        throw new Error('Companion Control method is unavailable')
++      const params = request.params && typeof request.params === 'object' && !Array.isArray(request.params)
++        ? request.params as Record<string, unknown>
++        : {}
++      if (rendererRequests >= MAX_RENDERER_REQUESTS)
++        throw new Error('Too many concurrent Companion Control requests')
++      rendererRequests += 1
++      try {
++        await connect()
++        return await sendRequest(request.method, params)
++      }
++      finally {
++        rendererRequests -= 1
++      }
++    }
++    const handleMode = (event: Electron.IpcMainEvent, mode: unknown) => {
++      if (event.sender.id !== rendererId)
++        return
++      if (mode === 'standard' || mode === 'compact')
++        setWindowMode(mode)
++    }
++    ipcMain.handle(COMPANION_CONTROL_IPC_REQUEST, handleRequest)
++    ipcMain.on(COMPANION_CONTROL_IPC_WINDOW_MODE, handleMode)
++    return () => {
++      renderer = undefined
++      rendererRequests = 0
++      ipcMain.removeHandler(COMPANION_CONTROL_IPC_REQUEST)
++      ipcMain.removeListener(COMPANION_CONTROL_IPC_WINDOW_MODE, handleMode)
++    }
++  }
++
++  return {
++    enabled: true,
++    connect,
++    close,
++    request: sendRequest,
++    installIpc,
++  }
++}
+diff --git a/apps/stage-tamagotchi/src/main/tray/companion-tray.test.ts b/apps/stage-tamagotchi/src/main/tray/companion-tray.test.ts
+new file mode 100644
+index 00000000..3401dea4
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/main/tray/companion-tray.test.ts
+@@ -0,0 +1,104 @@
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++
++const electronState = vi.hoisted(() => ({
++  appQuit: vi.fn(),
++  menuTemplate: undefined as Electron.MenuItemConstructorOptions[] | undefined,
++}))
++
++vi.mock('electron', () => ({
++  app: { quit: electronState.appQuit },
++  Menu: {
++    buildFromTemplate: vi.fn((template: Electron.MenuItemConstructorOptions[]) => {
++      electronState.menuTemplate = template
++      return {}
++    }),
++  },
++  nativeImage: {
++    createFromPath: vi.fn(() => ({
++      resize: vi.fn(() => ({ setTemplateImage: vi.fn() })),
++    })),
++  },
++  screen: {},
++  Tray: class {
++    addListener = vi.fn()
++    destroy = vi.fn()
++    setContextMenu = vi.fn()
++    setToolTip = vi.fn()
++  },
++}))
++
++vi.mock('@electron-toolkit/utils', () => ({
++  is: { dev: false },
++}))
++
++vi.mock('@proj-airi/electron-vueuse/main', () => ({
++  isRendererUnavailable: vi.fn(() => false),
++}))
++
++vi.mock('alien-signals', () => ({
++  effect: vi.fn(),
++}))
++
++vi.mock('std-env', () => ({
++  isMacOS: false,
++}))
++
++vi.mock('../libs/bootkit/lifecycle', () => ({
++  onAppBeforeQuit: vi.fn(),
++}))
++
++vi.mock('../windows/shared/window', () => ({
++  toggleWindowShow: vi.fn(),
++}))
++
++vi.mock('../windows/shared/display', () => ({
++  computeResizedBoundsAnchoredToDominantDisplay: vi.fn(),
++  findDominantDisplayArea: vi.fn(),
++}))
++
++vi.mock('../windows/inlay', () => ({
++  setupInlayWindow: vi.fn(),
++}))
++
++describe('companion tray quit lifecycle', () => {
++  beforeEach(() => {
++    vi.resetModules()
++    vi.clearAllMocks()
++    electronState.menuTemplate = undefined
++  })
++
++  it('quits Electron only after the host accepts application.quit', async () => {
++    const request = vi.fn().mockResolvedValue({ accepted: true })
++    const { setupCompanionTray } = await import('./index')
++    setupCompanionTray({
++      mainWindow: {} as Electron.BrowserWindow,
++      companionControl: { request } as never,
++    })
++
++    const quitItem = electronState.menuTemplate?.find(item => item.label === '退出')
++    expect(quitItem?.click).toBeTypeOf('function')
++    quitItem?.click?.({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as Electron.KeyboardEvent)
++    await vi.waitFor(() => expect(request).toHaveBeenCalledWith('application.quit'))
++    expect(electronState.appQuit).toHaveBeenCalledOnce()
++  })
++
++  it('keeps Electron running when the host rejects or fails application.quit', async () => {
++    const request = vi.fn()
++      .mockResolvedValueOnce({ accepted: false })
++      .mockRejectedValueOnce(new Error('host unavailable'))
++    const { setupCompanionTray } = await import('./index')
++    setupCompanionTray({
++      mainWindow: {} as Electron.BrowserWindow,
++      companionControl: { request } as never,
++    })
++
++    const quitItem = electronState.menuTemplate?.find(item => item.label === '退出')
++    quitItem?.click?.({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as Electron.KeyboardEvent)
++    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(1))
++    expect(electronState.appQuit).not.toHaveBeenCalled()
++
++    quitItem?.click?.({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as Electron.KeyboardEvent)
++    await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2))
++    expect(electronState.appQuit).not.toHaveBeenCalled()
++  })
++})
+diff --git a/apps/stage-tamagotchi/src/main/tray/index.ts b/apps/stage-tamagotchi/src/main/tray/index.ts
+index 66e12e00..22052562 100644
+--- a/apps/stage-tamagotchi/src/main/tray/index.ts
++++ b/apps/stage-tamagotchi/src/main/tray/index.ts
+@@ -3,6 +3,7 @@ import type { BrowserWindow } from 'electron'
+ 
+ import type { I18n } from '../libs/i18n'
+ import type { ServerChannel } from '../services/airi/channel-server'
++import type { CompanionControlClient } from '../services/airi/companion-control/client'
+ import type { setupBeatSync } from '../windows/beat-sync'
+ import type { setupCaptionWindowManager } from '../windows/caption'
+ import type { SettingsWindowManager } from '../windows/settings'
+@@ -244,3 +245,35 @@ export function setupTray(params: {
+     }
+   })()
+ }
++
++export function setupCompanionTray(params: {
++  mainWindow: BrowserWindow
++  companionControl: CompanionControlClient
++}): void {
++  once(() => {
++    const trayImage = nativeImage.createFromPath(isMacOS ? macOSTrayIcon : icon).resize({ width: 16 })
++    trayImage.setTemplateImage(isMacOS)
++
++    const appTray = new Tray(trayImage)
++    onAppBeforeQuit(() => appTray.destroy())
++    appTray.setContextMenu(Menu.buildFromTemplate([
++      { label: '显示桌面伴侣', click: () => toggleWindowShow(params.mainWindow) },
++      { type: 'separator' },
++      {
++        label: '退出',
++        click: () => {
++          void params.companionControl.request('application.quit')
++            .then((response) => {
++              if (response.accepted === true)
++                app.quit()
++            })
++            .catch(() => undefined)
++        },
++      },
++    ]))
++    appTray.setToolTip('Project AIRI')
++    appTray.addListener('click', () => toggleWindowShow(params.mainWindow))
++    if (isMacOS)
++      appTray.addListener('double-click', () => toggleWindowShow(params.mainWindow))
++  })()
++}
+diff --git a/apps/stage-tamagotchi/src/main/windows/main/companion-window.test.ts b/apps/stage-tamagotchi/src/main/windows/main/companion-window.test.ts
+new file mode 100644
+index 00000000..be8498c4
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/main/windows/main/companion-window.test.ts
+@@ -0,0 +1,52 @@
++import { describe, expect, it, vi } from 'vitest'
++
++import { createCompanionCloseToTrayHandler, resolveCompanionWindowProfile, shouldPersistCompanionBounds } from './companion-window'
++
++describe('companion desktop window profile', () => {
++  it('uses a resizable standard desktop window', () => {
++    expect(resolveCompanionWindowProfile(true)).toMatchObject({
++      width: 1180,
++      height: 760,
++      minWidth: 920,
++      minHeight: 640,
++      transparent: true,
++      alwaysOnTop: false,
++    })
++  })
++
++  it('preserves AIRI pet-window defaults outside desktop mode', () => {
++    expect(resolveCompanionWindowProfile(false)).toMatchObject({
++      width: 450,
++      height: 600,
++      transparent: true,
++      alwaysOnTop: true,
++    })
++  })
++
++  it('persists only standard desktop bounds', () => {
++    expect(shouldPersistCompanionBounds(true, 'standard')).toBe(true)
++    expect(shouldPersistCompanionBounds(true, 'compact')).toBe(false)
++    expect(shouldPersistCompanionBounds(false, 'compact')).toBe(true)
++  })
++
++  it('stops voice before hiding and deduplicates repeated close events', async () => {
++    let finishStopVoice: (() => void) | undefined
++    const stopVoice = vi.fn(() => new Promise<void>((resolve) => {
++      finishStopVoice = resolve
++    }))
++    const hideWindow = vi.fn()
++    const closeToTray = createCompanionCloseToTrayHandler({ stopVoice, hideWindow })
++
++    const firstClose = closeToTray()
++    const repeatedClose = closeToTray()
++
++    expect(stopVoice).toHaveBeenCalledOnce()
++    expect(hideWindow).not.toHaveBeenCalled()
++    expect(repeatedClose).toBe(firstClose)
++
++    finishStopVoice?.()
++    await firstClose
++
++    expect(hideWindow).toHaveBeenCalledOnce()
++  })
++})
+diff --git a/apps/stage-tamagotchi/src/main/windows/main/companion-window.ts b/apps/stage-tamagotchi/src/main/windows/main/companion-window.ts
+new file mode 100644
+index 00000000..66dc4e4e
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/main/windows/main/companion-window.ts
+@@ -0,0 +1,59 @@
++export interface CompanionWindowProfile {
++  width: number
++  height: number
++  minWidth?: number
++  minHeight?: number
++  transparent: boolean
++  hasShadow: boolean
++  alwaysOnTop: boolean
++}
++
++export function resolveCompanionWindowProfile(enabled: boolean): CompanionWindowProfile {
++  return enabled
++    ? {
++        width: 1180,
++        height: 760,
++        minWidth: 920,
++        minHeight: 640,
++        transparent: true,
++        hasShadow: true,
++        alwaysOnTop: false,
++      }
++    : {
++        width: 450,
++        height: 600,
++        transparent: true,
++        hasShadow: false,
++        alwaysOnTop: true,
++      }
++}
++
++export function shouldPersistCompanionBounds(
++  enabled: boolean,
++  mode: 'standard' | 'compact',
++): boolean {
++  return !enabled || mode === 'standard'
++}
++
++/**
++ * Creates the companion close-to-tray transition.
++ *
++ * Repeated close events share one in-flight stop request so microphone release
++ * completes before the window is hidden and the transition cannot re-enter.
++ */
++export function createCompanionCloseToTrayHandler(params: {
++  stopVoice: () => Promise<unknown>
++  hideWindow: () => void
++}): () => Promise<void> {
++  let transition: Promise<void> | undefined
++
++  return () => {
++    transition ??= params.stopVoice()
++      .catch(() => undefined)
++      .then(() => params.hideWindow())
++      .finally(() => {
++        transition = undefined
++      })
++    return transition
++  }
++}
+diff --git a/apps/stage-tamagotchi/src/main/windows/main/index.ts b/apps/stage-tamagotchi/src/main/windows/main/index.ts
+index 4a35d630..a5b7d044 100644
+--- a/apps/stage-tamagotchi/src/main/windows/main/index.ts
++++ b/apps/stage-tamagotchi/src/main/windows/main/index.ts
+@@ -1,10 +1,12 @@
+ import type { Rectangle } from 'electron'
+ import type { InferOutput } from 'valibot'
+ 
++import type { CompanionWindowMode } from '../../../shared/companion-control'
+ import type { I18n } from '../../libs/i18n'
+ import type { WindowAuthManager } from '../../services/airi/auth'
+ import type { ManagedAvatarModel } from '../../services/airi/avatar-bridge/managed-avatar'
+ import type { ServerChannel } from '../../services/airi/channel-server'
++import type { CompanionControlClient } from '../../services/airi/companion-control/client'
+ import type { GodotStageManager } from '../../services/airi/godot-stage'
+ import type { McpStdioManager } from '../../services/airi/mcp-servers'
+ import type { AutoUpdater } from '../../services/electron/auto-updater'
+@@ -37,6 +39,9 @@ import { createConfig } from '../../libs/electron/persistence'
+ import { createEventaStageAdapter } from '../../services/airi/avatar-bridge/eventa-adapter'
+ import { startAvatarBridgeServerFromEnvironment } from '../../services/airi/avatar-bridge/server'
+ import { protectPrivilegedWindowNavigation, transparentWindowConfig } from '../shared'
++import { createCompanionCloseToTrayHandler, resolveCompanionWindowProfile, shouldPersistCompanionBounds } from './companion-window'
++import { createCompanionWindowEventaContext } from './rpc/companion-eventa.electron'
++import { setupCompanionWindowElectronInvokes } from './rpc/companion.electron'
+ import { setupMainWindowElectronInvokes } from './rpc/index.electron'
+ 
+ const appConfigSchema = object({
+@@ -52,21 +57,37 @@ const appConfigSchema = object({
+ 
+ type AppConfig = InferOutput<typeof appConfigSchema>
+ 
+-export async function setupMainWindow(params: {
++interface MainWindowSharedParams {
++  onWindowCreated?: (window: BrowserWindow) => void
++  managedAvatar?: ManagedAvatarModel
++}
++
++interface CompanionMainWindowParams extends MainWindowSharedParams {
++  companionControl: CompanionControlClient
++}
++
++interface FullMainWindowParams extends MainWindowSharedParams {
+   settingsWindow: SettingsWindowManager
+   chatWindow: () => Promise<BrowserWindow>
+   widgetsManager: WidgetsWindowManager
+   noticeWindow: NoticeWindowManager
+   autoUpdater: AutoUpdater
+-  onWindowCreated?: (window: BrowserWindow) => void
+   serverChannel: ServerChannel
+   godotStageManager: GodotStageManager
+   mcpStdioManager: McpStdioManager
+   i18n: I18n
+   onboardingWindowManager: OnboardingWindowManager
+   windowAuthManager: WindowAuthManager
+-  managedAvatar?: ManagedAvatarModel
+-}) {
++  companionControl?: undefined
++}
++
++type MainWindowParams = CompanionMainWindowParams | FullMainWindowParams
++
++function isCompanionMainWindowParams(params: MainWindowParams): params is CompanionMainWindowParams {
++  return Boolean(params.companionControl)
++}
++
++export async function setupMainWindow(params: MainWindowParams) {
+   const {
+     setup: setupConfig,
+     get: getConfigRaw,
+@@ -79,12 +100,17 @@ export async function setupMainWindow(params: {
+ 
+   setupConfig()
+ 
+-  const mainWindowConfig = getConfig().windows?.find(w => w.title === 'AIRI' && w.tag === 'main')
++  const companionDesktop = isCompanionMainWindowParams(params)
++  const windowProfile = resolveCompanionWindowProfile(companionDesktop)
++  const mainWindowTag = companionDesktop ? 'companion-desktop' : 'main'
++  const mainWindowConfig = getConfig().windows?.find(w => w.title === 'AIRI' && w.tag === mainWindowTag)
+ 
+   const window = new BrowserWindow({
+     title: 'AIRI',
+-    width: mainWindowConfig?.width ?? 450.0,
+-    height: mainWindowConfig?.height ?? 600.0,
++    width: mainWindowConfig?.width ?? windowProfile.width,
++    height: mainWindowConfig?.height ?? windowProfile.height,
++    minWidth: windowProfile.minWidth,
++    minHeight: windowProfile.minHeight,
+     x: mainWindowConfig?.x,
+     y: mainWindowConfig?.y,
+     show: false,
+@@ -99,7 +125,11 @@ export async function setupMainWindow(params: {
+     // https://stackoverflow.com/questions/39835282/set-browserwindow-always-on-top-even-other-app-is-in-fullscreen-electron-mac
+     type: 'panel',
+     ...transparentWindowConfig(),
++    transparent: windowProfile.transparent,
++    hasShadow: windowProfile.hasShadow,
+   })
++  if (companionDesktop)
++    window.setBackgroundColor('#00000000')
+ 
+   if (params.onWindowCreated) {
+     params.onWindowCreated(window)
+@@ -120,18 +150,23 @@ export async function setupMainWindow(params: {
+     }
+   }
+ 
++  let companionWindowMode: CompanionWindowMode = 'standard'
++
+   function handleNewBounds(newBounds: Rectangle) {
++    if (!shouldPersistCompanionBounds(companionDesktop, companionWindowMode))
++      return
++
+     const config = getConfig()
+     if (!config.windows || !Array.isArray(config.windows)) {
+       config.windows = []
+     }
+ 
+-    const existingConfigIndex = config.windows.findIndex(w => w.title === 'AIRI' && w.tag === 'main')
++    const existingConfigIndex = config.windows.findIndex(w => w.title === 'AIRI' && w.tag === mainWindowTag)
+ 
+     if (existingConfigIndex === -1) {
+       config.windows.push({
+         title: 'AIRI',
+-        tag: 'main',
++        tag: mainWindowTag,
+         x: newBounds.x,
+         y: newBounds.y,
+         width: newBounds.width,
+@@ -139,7 +174,7 @@ export async function setupMainWindow(params: {
+       })
+     }
+     else {
+-      const mainWindowConfig = defu(config.windows[existingConfigIndex], { title: 'AIRI', tag: 'main' })
++      const mainWindowConfig = defu(config.windows[existingConfigIndex], { title: 'AIRI', tag: mainWindowTag })
+ 
+       mainWindowConfig.x = newBounds.x
+       mainWindowConfig.y = newBounds.y
+@@ -154,12 +189,22 @@ export async function setupMainWindow(params: {
+ 
+   window.on('resize', () => handleNewBounds(window.getBounds()))
+   window.on('move', () => handleNewBounds(window.getBounds()))
++  const closeCompanionToTray = isCompanionMainWindowParams(params)
++    ? createCompanionCloseToTrayHandler({
++        stopVoice: () => params.companionControl.request('voice.stop'),
++        hideWindow: () => window.hide(),
++      })
++    : undefined
+   window.on('close', (event) => {
+     if (allowClose) {
+       return
+     }
+ 
+     event.preventDefault()
++    if (closeCompanionToTray) {
++      void closeCompanionToTray()
++      return
++    }
+     window.hide()
+   })
+ 
+@@ -167,7 +212,7 @@ export async function setupMainWindow(params: {
+   //
+   // https://github.com/electron/electron/issues/10078#issuecomment-3410164802
+   // https://stackoverflow.com/questions/39835282/set-browserwindow-always-on-top-even-other-app-is-in-fullscreen-electron-mac
+-  window.setAlwaysOnTop(true, 'screen-saver', 1)
++  window.setAlwaysOnTop(windowProfile.alwaysOnTop, 'screen-saver', 1)
+   window.setFullScreenable(false)
+   window.setVisibleOnAllWorkspaces(true)
+   if (isMacOS) {
+@@ -177,29 +222,68 @@ export async function setupMainWindow(params: {
+   window.on('ready-to-show', () => window!.show())
+   protectPrivilegedWindowNavigation(window)
+ 
+-  await setupMainWindowElectronInvokes({
+-    window,
+-    settingsWindow: params.settingsWindow,
+-    chatWindow: params.chatWindow,
+-    widgetsManager: params.widgetsManager,
+-    noticeWindow: params.noticeWindow,
+-    autoUpdater: params.autoUpdater,
+-    serverChannel: params.serverChannel,
+-    godotStageManager: params.godotStageManager,
+-    mcpStdioManager: params.mcpStdioManager,
+-    i18n: params.i18n,
+-    onboardingWindowManager: params.onboardingWindowManager,
+-    windowAuthManager: params.windowAuthManager,
+-  })
++  const avatarEventa = createCompanionWindowEventaContext({ window })
++  const disposeWindowEventa = isCompanionMainWindowParams(params)
++    ? setupCompanionWindowElectronInvokes({ window, eventa: avatarEventa })
++    : avatarEventa.dispose
++
++  if (!isCompanionMainWindowParams(params)) {
++    await setupMainWindowElectronInvokes({
++      window,
++      settingsWindow: params.settingsWindow,
++      chatWindow: params.chatWindow,
++      widgetsManager: params.widgetsManager,
++      noticeWindow: params.noticeWindow,
++      autoUpdater: params.autoUpdater,
++      serverChannel: params.serverChannel,
++      godotStageManager: params.godotStageManager,
++      mcpStdioManager: params.mcpStdioManager,
++      i18n: params.i18n,
++      onboardingWindowManager: params.onboardingWindowManager,
++      windowAuthManager: params.windowAuthManager,
++    })
++  }
+ 
+-  const { context: avatarBridgeContext } = createContext(ipcMain, window)
++  const { context: avatarBridgeContext } = avatarEventa
+   const cleanupManagedAvatarHandler = defineInvokeHandler(
+     avatarBridgeContext,
+     avatarManagedModelGet,
+     () => params.managedAvatar,
+   )
+ 
+-  await load(window, baseUrl(resolve(getElectronMainDirname(), '..', 'renderer')))
++  if (isCompanionMainWindowParams(params)) {
++    let standardBounds = window.getBounds()
++    const setWindowMode = (mode: CompanionWindowMode) => {
++      if (mode === companionWindowMode)
++        return
++
++      if (mode === 'compact') {
++        standardBounds = window.getBounds()
++        companionWindowMode = 'compact'
++        window.setMinimumSize(450, 600)
++        window.setResizable(false)
++        window.setBounds({ width: 450, height: 600 })
++        window.setAlwaysOnTop(true, 'screen-saver', 1)
++        return
++      }
++      companionWindowMode = 'standard'
++      window.setResizable(true)
++      window.setMinimumSize(920, 640)
++      window.setBounds(standardBounds)
++      window.setAlwaysOnTop(false)
++    }
++    const cleanupCompanionIpc = params.companionControl.installIpc(window.webContents, setWindowMode)
++    await params.companionControl.connect()
++    onAppBeforeQuit(async () => {
++      cleanupCompanionIpc()
++      await params.companionControl.close()
++    })
++  }
++
++  await load(window, baseUrl(
++    resolve(getElectronMainDirname(), '..', 'renderer'),
++    companionDesktop ? 'companion.html' : undefined,
++  ))
+ 
+   const invokeAvatarRenderer = defineInvoke(avatarBridgeContext, avatarRendererInvoke)
+   const avatarBridgeServer = await startAvatarBridgeServerFromEnvironment({
+@@ -211,11 +295,21 @@ export async function setupMainWindow(params: {
+       () => window.isVisible() && !window.isMinimized(),
+     ),
+   })
+-  onAppBeforeQuit(async () => {
++  let avatarEventaDisposed = false
++  const disposeAvatarEventa = () => {
++    if (avatarEventaDisposed)
++      return
++    avatarEventaDisposed = true
+     cleanupManagedAvatarHandler()
++    disposeWindowEventa()
++  }
++  onAppBeforeQuit(async () => {
++    disposeAvatarEventa()
+     await avatarBridgeServer?.close()
+   })
+ 
++  window.on('closed', disposeAvatarEventa)
++
+   /**
+    * This is a know issue (or expected behavior maybe) to Electron.
+    * We don't use this approach on Linux because it's not working.
+diff --git a/apps/stage-tamagotchi/src/main/windows/main/rpc/companion-eventa.electron.ts b/apps/stage-tamagotchi/src/main/windows/main/rpc/companion-eventa.electron.ts
+new file mode 100644
+index 00000000..b6dac342
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/main/windows/main/rpc/companion-eventa.electron.ts
+@@ -0,0 +1,44 @@
++import type { BrowserWindow, IpcMain } from 'electron'
++
++import { createContext } from '@moeru/eventa/adapters/electron/main'
++import { ipcMain } from 'electron'
++
++export type CompanionWindowEventaContext = ReturnType<typeof createContext>
++
++export function createCompanionWindowEventaContext(params: {
++  window: BrowserWindow
++  ipcMain?: IpcMain
++}): CompanionWindowEventaContext {
++  const sourceIpcMain = params.ipcMain ?? ipcMain
++  const listenerWrappers = new Map<Parameters<IpcMain['on']>[1], Parameters<IpcMain['on']>[1]>()
++  const windowBoundIpcMain = new Proxy(sourceIpcMain, {
++    get(target, property, receiver) {
++      if (property === 'on') {
++        return (channel: string, listener: Parameters<IpcMain['on']>[1]) => {
++          const wrapped: typeof listener = (event, ...args) => {
++            if (event.sender.id === params.window.webContents.id)
++              listener(event, ...args)
++          }
++          listenerWrappers.set(listener, wrapped)
++          target.on(channel, wrapped)
++          return windowBoundIpcMain
++        }
++      }
++      if (property === 'off') {
++        return (channel: string, listener: Parameters<IpcMain['off']>[1]) => {
++          const wrapped = listenerWrappers.get(listener)
++          if (wrapped) {
++            listenerWrappers.delete(listener)
++            target.off(channel, wrapped)
++          }
++          return windowBoundIpcMain
++        }
++      }
++
++      const value: unknown = Reflect.get(target, property, receiver)
++      return typeof value === 'function' ? value.bind(target) : value
++    },
++  })
++
++  return createContext(windowBoundIpcMain, params.window, { onlySameWindow: true })
++}
+diff --git a/apps/stage-tamagotchi/src/main/windows/main/rpc/companion.electron.ts b/apps/stage-tamagotchi/src/main/windows/main/rpc/companion.electron.ts
+new file mode 100644
+index 00000000..9225ba8c
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/main/windows/main/rpc/companion.electron.ts
+@@ -0,0 +1,24 @@
++import type { BrowserWindow } from 'electron'
++
++import type { CompanionWindowEventaContext } from './companion-eventa.electron'
++
++import { createScreenService, createWindowService } from '../../../services/electron'
++import { createCompanionWindowEventaContext } from './companion-eventa.electron'
++
++/**
++ * Installs only the Eventa handlers required by the Companion Desktop stage.
++ *
++ * This intentionally omits app quit, onboarding, auth, updater, plugin, MCP,
++ * Godot, widgets, server-channel and settings handlers. Application shutdown is
++ * available only through the narrow Companion Control preload API.
++ */
++export function setupCompanionWindowElectronInvokes(params: {
++  window: BrowserWindow
++  eventa?: CompanionWindowEventaContext
++}): () => void {
++  const eventa = params.eventa ?? createCompanionWindowEventaContext(params)
++  const { context } = eventa
++  createScreenService({ context, window: params.window })
++  createWindowService({ context, window: params.window })
++  return eventa.dispose
++}
+diff --git a/apps/stage-tamagotchi/src/preload/companion-api.test.ts b/apps/stage-tamagotchi/src/preload/companion-api.test.ts
+new file mode 100644
+index 00000000..734ee2cf
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/preload/companion-api.test.ts
+@@ -0,0 +1,95 @@
++import type { CompanionControlEvent } from '../shared/companion-control'
++
++import { beforeEach, describe, expect, it, vi } from 'vitest'
++
++const processState = vi.hoisted(() => ({
++  env: { COMPANION_CONTROL_PRELOAD_ENABLED: '1' } as Record<string, string | undefined>,
++}))
++const electronState = vi.hoisted(() => ({
++  invoke: vi.fn(),
++  on: vi.fn(),
++  removeListener: vi.fn(),
++  send: vi.fn(),
++}))
++const exposedState = vi.hoisted(() => ({
++  api: undefined as Record<string, unknown> | undefined,
++  electron: undefined as Record<string, unknown> | undefined,
++}))
++
++vi.mock('node:process', () => ({ default: processState }))
++
++vi.mock('electron', () => ({
++  ipcRenderer: electronState,
++}))
++
++vi.mock('./shared', () => ({
++  expose: vi.fn(),
++  exposeCustomAPI: vi.fn((api: Record<string, unknown>) => {
++    exposedState.api = api
++  }),
++  exposeRestrictedElectronAPI: vi.fn((electron: Record<string, unknown>) => {
++    exposedState.electron = electron
++  }),
++}))
++
++describe('companion desktop preload capability surface', () => {
++  beforeEach(() => {
++    vi.resetModules()
++    vi.clearAllMocks()
++    processState.env.COMPANION_CONTROL_PRELOAD_ENABLED = '1'
++    exposedState.api = undefined
++    exposedState.electron = undefined
++  })
++
++  it('exposes only the fixed Control methods and restricted Eventa transport', async () => {
++    await import('./index')
++
++    expect(Object.keys(exposedState.api ?? {}).sort()).toEqual([
++      'cancel',
++      'enabled',
++      'history',
++      'listSessions',
++      'quit',
++      'runtimeRetry',
++      'runtimeSnapshot',
++      'send',
++      'setCredential',
++      'setWindowMode',
++      'startVoice',
++      'stopVoice',
++      'subscribe',
++    ])
++    expect(Object.keys(exposedState.electron ?? {})).toEqual(['ipcRenderer'])
++    expect(Object.keys((exposedState.electron?.ipcRenderer as Record<string, unknown>) ?? {}).sort()).toEqual([
++      'on',
++      'removeListener',
++      'send',
++    ])
++    expect(processState.env.COMPANION_CONTROL_PRELOAD_ENABLED).toBeUndefined()
++    expect(JSON.stringify(exposedState)).not.toContain('secret-token')
++    expect(exposedState.electron).not.toHaveProperty('ipcRenderer.invoke')
++    expect(exposedState.electron).not.toHaveProperty('ipcRenderer.sendSync')
++  })
++
++  it('subscribes only to the fixed Control event channel and removes the exact wrapper', async () => {
++    await import('./index')
++    const listener = vi.fn<(event: CompanionControlEvent) => void>()
++    const api = exposedState.api as { subscribe: (callback: typeof listener) => () => void }
++
++    const unsubscribe = api.subscribe(listener)
++    const [channel, wrapped] = electronState.on.mock.calls[0]
++    const event: CompanionControlEvent = {
++      event: 'runtime.snapshot',
++      sequence: 1,
++      payload: { phase: 'ready' },
++    }
++    wrapped({}, event)
++    unsubscribe()
++
++    expect(channel).toBe('companion-control:event')
++    expect(listener).toHaveBeenCalledOnce()
++    expect(listener).toHaveBeenCalledWith(event)
++    expect(electronState.removeListener).toHaveBeenCalledOnce()
++    expect(electronState.removeListener).toHaveBeenCalledWith('companion-control:event', wrapped)
++  })
++})
+diff --git a/apps/stage-tamagotchi/src/preload/companion-eventa.integration.test.ts b/apps/stage-tamagotchi/src/preload/companion-eventa.integration.test.ts
+new file mode 100644
+index 00000000..e3987d4d
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/preload/companion-eventa.integration.test.ts
+@@ -0,0 +1,218 @@
++import type { IpcRenderer } from '@electron-toolkit/preload'
++import type { BrowserWindow, IpcMain, IpcMainEvent, IpcRendererEvent, WebContents } from 'electron'
++
++import type { CompanionEventaIpcRenderer } from './companion-eventa'
++
++import { defineInvoke, defineInvokeHandler } from '@moeru/eventa'
++import { createContext as createRendererContext } from '@moeru/eventa/adapters/electron/renderer'
++import { describe, expect, it, vi } from 'vitest'
++
++import { createCompanionWindowEventaContext } from '../main/windows/main/rpc/companion-eventa.electron'
++import { avatarManagedModelGet, avatarRendererInvoke, electron } from '../shared/eventa'
++import { createCompanionEventaElectronApi } from './companion-eventa'
++
++vi.mock('electron', () => ({ ipcMain: undefined }))
++
++type MainListener = (event: IpcMainEvent, ...args: unknown[]) => void
++type RendererListener = (event: IpcRendererEvent, ...args: unknown[]) => void
++
++function createMemoryElectronTransport() {
++  const mainListeners = new Map<string, Set<MainListener>>()
++  const rendererListeners = new Map<string, Set<RendererListener>>()
++  const foreignRendererListeners = new Map<string, Set<RendererListener>>()
++
++  function addListener<T extends (...args: never[]) => unknown>(
++    listeners: Map<string, Set<T>>,
++    channel: string,
++    listener: T,
++  ) {
++    const channelListeners = listeners.get(channel) ?? new Set<T>()
++    channelListeners.add(listener)
++    listeners.set(channel, channelListeners)
++  }
++
++  function removeListener<T extends (...args: never[]) => unknown>(
++    listeners: Map<string, Set<T>>,
++    channel: string,
++    listener: T,
++  ) {
++    listeners.get(channel)?.delete(listener)
++  }
++
++  const rendererWebContents = {
++    id: 41,
++    isDestroyed: () => false,
++    send(channel: string, ...args: unknown[]) {
++      for (const listener of rendererListeners.get(channel) ?? [])
++        listener({} as IpcRendererEvent, ...args)
++    },
++  } as WebContents
++  const foreignWebContents = {
++    id: 42,
++    isDestroyed: () => false,
++    send(channel: string, ...args: unknown[]) {
++      for (const listener of foreignRendererListeners.get(channel) ?? [])
++        listener({} as IpcRendererEvent, ...args)
++    },
++  } as WebContents
++
++  const ipcMain = {
++    on(channel: string, listener: MainListener) {
++      addListener(mainListeners, channel, listener)
++      return ipcMain
++    },
++    off(channel: string, listener: MainListener) {
++      removeListener(mainListeners, channel, listener)
++      return ipcMain
++    },
++  } as IpcMain
++  const ipcMainOff = vi.spyOn(ipcMain, 'off')
++
++  function createRendererTransport(sender: WebContents, listeners: Map<string, Set<RendererListener>>): IpcRenderer {
++    const transport: IpcRenderer = {
++      send(channel: string, ...args: unknown[]) {
++        for (const listener of mainListeners.get(channel) ?? [])
++          listener({ sender } as IpcMainEvent, ...args)
++      },
++      on(channel: string, listener: RendererListener) {
++        addListener(listeners, channel, listener)
++        return () => removeListener(listeners, channel, listener)
++      },
++      removeListener(channel: string, listener: RendererListener) {
++        removeListener(listeners, channel, listener)
++        return transport
++      },
++      once(channel: string, listener: RendererListener) {
++        const onceListener: RendererListener = (event, ...args) => {
++          removeListener(listeners, channel, onceListener)
++          listener(event, ...args)
++        }
++        addListener(listeners, channel, onceListener)
++        return () => removeListener(listeners, channel, onceListener)
++      },
++      removeAllListeners(channel: string) {
++        listeners.delete(channel)
++      },
++      invoke: vi.fn(),
++      postMessage: vi.fn(),
++      sendSync: vi.fn(),
++      sendTo: vi.fn(),
++      sendToHost: vi.fn(),
++    }
++    return transport
++  }
++
++  const browserWindow = {
++    isDestroyed: () => false,
++    webContents: rendererWebContents,
++  } as BrowserWindow
++
++  return {
++    browserWindow,
++    foreignRenderer: createRendererTransport(foreignWebContents, foreignRendererListeners),
++    ipcMain,
++    ipcMainOff,
++    mainListeners,
++    renderer: createRendererTransport(rendererWebContents, rendererListeners),
++    window: browserWindow,
++  }
++}
++
++function createRendererContextAdapter(restricted: CompanionEventaIpcRenderer): IpcRenderer {
++  const unavailable = () => {
++    throw new Error('Unexpected generic Electron IPC call in Companion Eventa test')
++  }
++  const adapter: IpcRenderer = {
++    send: restricted.send,
++    on: restricted.on,
++    removeListener(channel, listener) {
++      restricted.removeListener(channel, listener)
++      return adapter
++    },
++    once: unavailable,
++    removeAllListeners: unavailable,
++    invoke: unavailable,
++    postMessage: unavailable,
++    sendSync: unavailable,
++    sendTo: unavailable,
++    sendToHost: unavailable,
++  }
++  return adapter
++}
++
++describe('companion desktop Eventa integration boundary', () => {
++  it('round-trips renderer-to-main managed model and window invokes', async () => {
++    const transport = createMemoryElectronTransport()
++    const { context: mainContext } = createCompanionWindowEventaContext(transport)
++    const rendererApi = createCompanionEventaElectronApi(transport.renderer)
++    const { context: rendererContext } = createRendererContext(createRendererContextAdapter(rendererApi.ipcRenderer))
++
++    const managedModel = {
++      id: 'managed-avatar',
++      name: 'Managed Avatar',
++      renderer: 'vrm' as const,
++      url: 'https://127.0.0.1/avatar.vrm',
++    }
++    const resize = vi.fn()
++    defineInvokeHandler(mainContext, avatarManagedModelGet, () => managedModel)
++    defineInvokeHandler(mainContext, electron.window.resize, (payload) => {
++      resize(payload)
++    })
++
++    await expect(defineInvoke(rendererContext, avatarManagedModelGet)()).resolves.toEqual(managedModel)
++    await defineInvoke(rendererContext, electron.window.resize)({
++      deltaX: 8,
++      deltaY: -4,
++      direction: 'se',
++    })
++
++    expect(resize).toHaveBeenCalledOnce()
++    expect(resize).toHaveBeenCalledWith({ deltaX: 8, deltaY: -4, direction: 'se' })
++  })
++
++  it('round-trips main-to-renderer avatar invokes through correlated renderer-receive events', async () => {
++    const transport = createMemoryElectronTransport()
++    const { context: mainContext } = createCompanionWindowEventaContext(transport)
++    const rendererApi = createCompanionEventaElectronApi(transport.renderer)
++    const { context: rendererContext } = createRendererContext(createRendererContextAdapter(rendererApi.ipcRenderer))
++
++    defineInvokeHandler(rendererContext, avatarRendererInvoke, request => ({
++      method: request.method,
++      renderer: 'vrm',
++    }))
++
++    await expect(defineInvoke(mainContext, avatarRendererInvoke)({
++      method: 'health',
++      params: {},
++    })).resolves.toEqual({ method: 'health', renderer: 'vrm' })
++  })
++
++  it('does not let a foreign renderer invoke the companion main context', async () => {
++    const transport = createMemoryElectronTransport()
++    const { context: mainContext } = createCompanionWindowEventaContext(transport)
++    const foreignApi = createCompanionEventaElectronApi(transport.foreignRenderer)
++    const { context: foreignContext, dispose } = createRendererContext(createRendererContextAdapter(foreignApi.ipcRenderer))
++    const handler = vi.fn(() => ({ id: 'should-not-run' }))
++    defineInvokeHandler(mainContext, avatarManagedModelGet, handler)
++
++    const invocation = defineInvoke(foreignContext, avatarManagedModelGet)()
++    dispose(new Error('test disposed pending foreign invoke'))
++
++    await expect(invocation).rejects.toThrow('test disposed pending foreign invoke')
++    expect(handler).not.toHaveBeenCalled()
++  })
++
++  it('removes every underlying ipcMain listener when the window context is disposed', () => {
++    const transport = createMemoryElectronTransport()
++    const { dispose } = createCompanionWindowEventaContext(transport)
++
++    expect(transport.mainListeners.get('eventa-message')).toHaveLength(1)
++    expect(transport.mainListeners.get('eventa-error')).toHaveLength(1)
++
++    dispose()
++
++    expect(transport.ipcMainOff).toHaveBeenCalledTimes(2)
++    expect(transport.mainListeners.get('eventa-message')).toHaveLength(0)
++    expect(transport.mainListeners.get('eventa-error')).toHaveLength(0)
++  })
++})
+diff --git a/apps/stage-tamagotchi/src/preload/companion-eventa.test.ts b/apps/stage-tamagotchi/src/preload/companion-eventa.test.ts
+new file mode 100644
+index 00000000..a557b4a4
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/preload/companion-eventa.test.ts
+@@ -0,0 +1,168 @@
++import { describe, expect, it, vi } from 'vitest'
++
++import { createCompanionEventaElectronApi } from './companion-eventa'
++
++function envelope(type: string) {
++  const correlatedId = type.match(/-(\w{16})$/u)?.[1]
++  return {
++    id: 'event-id',
++    type,
++    payload: {
++      body: type.includes(':invoke:') || type.endsWith('-send-abort')
++        ? { invokeId: correlatedId ?? 'Abcdef0123456789' }
++        : {},
++    },
++  }
++}
++
++function createTransport() {
++  const listeners = new Map<string, (event: Electron.IpcRendererEvent, ...args: unknown[]) => void>()
++  const send = vi.fn()
++  const on = vi.fn((channel: string, listener: (event: Electron.IpcRendererEvent, ...args: unknown[]) => void) => {
++    listeners.set(channel, listener)
++  })
++  const removeListener = vi.fn((channel: string) => {
++    listeners.delete(channel)
++  })
++  return { listeners, transport: { send, on, removeListener } }
++}
++
++describe('companion desktop Eventa preload boundary', () => {
++  it('passes exact avatar, model, and window Eventa ids', () => {
++    const { transport } = createTransport()
++    const api = createCompanionEventaElectronApi(transport)
++
++    api.ipcRenderer.send('eventa-message', envelope('eventa:invoke:electron:avatar-bridge:managed-model:get-send'))
++    api.ipcRenderer.send('eventa-message', envelope('eventa:invoke:electron:avatar-bridge:renderer-receive-Abcdef0123456789'))
++    api.ipcRenderer.send('eventa-message', envelope('eventa:invoke:electron:window:resize-send'))
++
++    expect(transport.send).toHaveBeenCalledTimes(3)
++  })
++
++  it('rejects arbitrary channels and malformed envelopes', () => {
++    const { transport } = createTransport()
++    const api = createCompanionEventaElectronApi(transport)
++
++    expect(() => api.ipcRenderer.send('companion-control:request', envelope('eventa:invoke:electron:window:resize-send'))).toThrow('channel is unavailable')
++    expect(() => api.ipcRenderer.send('eventa-message', { id: 'event-id', payload: {} })).toThrow('method is unavailable')
++    expect(() => api.ipcRenderer.send('eventa-message', {
++      id: 'event-id',
++      type: 'eventa:invoke:electron:window:resize-send',
++      payload: { body: {} },
++    })).toThrow('method is unavailable')
++    expect(() => api.ipcRenderer.on('arbitrary-channel', vi.fn())).toThrow('channel is unavailable')
++    expect(transport.send).not.toHaveBeenCalled()
++  })
++
++  it('rejects MCP, plugin, onboarding, and application quit Eventa ids', () => {
++    const { transport } = createTransport()
++    const api = createCompanionEventaElectronApi(transport)
++
++    expect(() => api.ipcRenderer.send('eventa-message', envelope('eventa:invoke:electron:mcp:list-tools-send'))).toThrow('method is unavailable')
++    expect(() => api.ipcRenderer.send('eventa-message', envelope('eventa:invoke:electron:plugin:host:list-send'))).toThrow('method is unavailable')
++    expect(() => api.ipcRenderer.send('eventa-message', envelope('eventa:invoke:electron:windows:onboarding:open-send'))).toThrow('method is unavailable')
++    expect(() => api.ipcRenderer.send('eventa-message', envelope('eventa:invoke:electron:app:quit-send'))).toThrow('method is unavailable')
++  })
++
++  it('filters pushed Eventa payloads before invoking renderer listeners', () => {
++    const { listeners, transport } = createTransport()
++    const api = createCompanionEventaElectronApi(transport)
++    const listener = vi.fn()
++    api.ipcRenderer.on('eventa-push', listener)
++
++    const push = listeners.get('eventa-push')!
++    push({} as Electron.IpcRendererEvent, envelope('eventa:event:electron:window:lifecycle-changed'))
++    push({} as Electron.IpcRendererEvent, envelope('eventa:event:electron:plugin:tools-changed'))
++    push({} as Electron.IpcRendererEvent, { id: 'bad', type: 42, payload: {} })
++
++    expect(listener).toHaveBeenCalledTimes(1)
++  })
++
++  it('accepts only exact correlated response bases', () => {
++    const { listeners, transport } = createTransport()
++    const api = createCompanionEventaElectronApi(transport)
++    const listener = vi.fn()
++    api.ipcRenderer.on('eventa-message', listener)
++
++    const receive = listeners.get('eventa-message')!
++    receive({} as Electron.IpcRendererEvent, envelope('eventa:invoke:electron:avatar-bridge:managed-model:get-receive-Abcdef0123456789'))
++    receive({} as Electron.IpcRendererEvent, envelope('eventa:invoke:electron:avatar-bridge:managed-model:get-receive-extra-Abcdef0123456789'))
++
++    expect(listener).toHaveBeenCalledTimes(1)
++  })
++
++  it('keeps correlated response bases directional', () => {
++    const { listeners, transport } = createTransport()
++    const api = createCompanionEventaElectronApi(transport)
++    const listener = vi.fn()
++    api.ipcRenderer.on('eventa-message', listener)
++
++    expect(() => api.ipcRenderer.send(
++      'eventa-message',
++      envelope('eventa:invoke:electron:avatar-bridge:managed-model:get-receive-Abcdef0123456789'),
++    )).toThrow('method is unavailable')
++
++    const receive = listeners.get('eventa-message')!
++    receive(
++      {} as Electron.IpcRendererEvent,
++      envelope('eventa:invoke:electron:avatar-bridge:renderer-receive-Abcdef0123456789'),
++    )
++
++    expect(listener).not.toHaveBeenCalled()
++  })
++
++  it('rejects mismatched correlation and malformed abort invoke ids', () => {
++    const { listeners, transport } = createTransport()
++    const api = createCompanionEventaElectronApi(transport)
++    const listener = vi.fn()
++    api.ipcRenderer.on('eventa-message', listener)
++
++    expect(() => api.ipcRenderer.send('eventa-message', {
++      ...envelope('eventa:invoke:electron:avatar-bridge:renderer-receive-Abcdef0123456789'),
++      payload: { body: { invokeId: 'Different1234567' } },
++    })).toThrow('method is unavailable')
++    expect(() => api.ipcRenderer.send('eventa-message', {
++      ...envelope('eventa:invoke:electron:window:resize-send-abort'),
++      payload: { body: { invokeId: '../bad' } },
++    })).toThrow('method is unavailable')
++
++    const receive = listeners.get('eventa-message')!
++    receive({} as Electron.IpcRendererEvent, {
++      ...envelope('eventa:invoke:electron:window:resize-receive-Abcdef0123456789'),
++      payload: { body: { invokeId: 'Different1234567' } },
++    })
++    expect(listener).not.toHaveBeenCalled()
++  })
++
++  it('replaces Eventa transport errors with a generic renderer-safe value', () => {
++    const { listeners, transport } = createTransport()
++    const api = createCompanionEventaElectronApi(transport)
++    const listener = vi.fn()
++    api.ipcRenderer.on('eventa-error', listener)
++
++    listeners.get('eventa-error')!(
++      {} as Electron.IpcRendererEvent,
++      new Error('C:\\Users\\secret\\token.txt\n    at handler (C:\\app\\main.js:8:3)'),
++    )
++
++    const forwarded = listener.mock.calls[0]?.[1]
++    expect(forwarded).toEqual({ message: 'Companion Desktop Eventa transport failed' })
++    expect(JSON.stringify(forwarded)).not.toContain('secret')
++    expect(JSON.stringify(forwarded)).not.toContain('main.js')
++    expect(JSON.stringify(forwarded)).not.toContain('stack')
++  })
++
++  it('does not expose generic Electron IPC primitives', () => {
++    const { transport } = createTransport()
++    const api = createCompanionEventaElectronApi(transport)
++    const renderer = api.ipcRenderer as unknown as Record<string, unknown>
++
++    expect(Object.keys(renderer).sort()).toEqual(['on', 'removeListener', 'send'])
++    expect(renderer.invoke).toBeUndefined()
++    expect(renderer.sendSync).toBeUndefined()
++    expect(renderer.postMessage).toBeUndefined()
++    expect(renderer.sendTo).toBeUndefined()
++    expect(renderer.sendToHost).toBeUndefined()
++    expect(renderer.removeAllListeners).toBeUndefined()
++  })
++})
+diff --git a/apps/stage-tamagotchi/src/preload/companion-eventa.ts b/apps/stage-tamagotchi/src/preload/companion-eventa.ts
+new file mode 100644
+index 00000000..cb568af3
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/preload/companion-eventa.ts
+@@ -0,0 +1,225 @@
++const EVENTA_MESSAGE_CHANNEL = 'eventa-message'
++const EVENTA_PUSH_CHANNEL = 'eventa-push'
++const EVENTA_ERROR_CHANNEL = 'eventa-error'
++
++const ALLOWED_CHANNELS = new Set([
++  EVENTA_MESSAGE_CHANNEL,
++  EVENTA_PUSH_CHANNEL,
++  EVENTA_ERROR_CHANNEL,
++])
++
++// Eventa appends the correlation id to receive events, so the immutable base id is
++// followed by exactly one generated segment. Each direction has a separate allowlist:
++// renderer requests may only receive main responses, while renderer responses may
++// only answer the avatar invoke initiated by Electron main.
++const INBOUND_CORRELATED_RESPONSE_IDS = new Set([
++  'eventa:invoke:electron:avatar-bridge:managed-model:get-receive',
++  'eventa:invoke:electron:avatar-bridge:managed-model:get-receive-error',
++  'eventa:event:electron:screen:start-loop-get-cursor-screen-point-receive',
++  'eventa:event:electron:screen:start-loop-get-cursor-screen-point-receive-error',
++  'eventa:event:electron:window:start-loop-get-bounds-receive',
++  'eventa:event:electron:window:start-loop-get-bounds-receive-error',
++  'eventa:invoke:electron:window:get-lifecycle-state-receive',
++  'eventa:invoke:electron:window:get-lifecycle-state-receive-error',
++  'eventa:invoke:electron:window:set-ignore-mouse-events-receive',
++  'eventa:invoke:electron:window:set-ignore-mouse-events-receive-error',
++  'eventa:invoke:electron:window:resize-receive',
++  'eventa:invoke:electron:window:resize-receive-error',
++])
++
++const OUTBOUND_CORRELATED_RESPONSE_IDS = new Set([
++  'eventa:invoke:electron:avatar-bridge:renderer-receive',
++  'eventa:invoke:electron:avatar-bridge:renderer-receive-error',
++])
++
++const ALLOWED_OUTBOUND_IDS = new Set([
++  'eventa:invoke:electron:avatar-bridge:managed-model:get-send',
++  'eventa:invoke:electron:avatar-bridge:managed-model:get-send-abort',
++  'eventa:event:electron:screen:start-loop-get-cursor-screen-point-send',
++  'eventa:event:electron:screen:start-loop-get-cursor-screen-point-send-abort',
++  'eventa:event:electron:window:start-loop-get-bounds-send',
++  'eventa:event:electron:window:start-loop-get-bounds-send-abort',
++  'eventa:invoke:electron:window:get-lifecycle-state-send',
++  'eventa:invoke:electron:window:get-lifecycle-state-send-abort',
++  'eventa:invoke:electron:window:set-ignore-mouse-events-send',
++  'eventa:invoke:electron:window:set-ignore-mouse-events-send-abort',
++  'eventa:invoke:electron:window:resize-send',
++  'eventa:invoke:electron:window:resize-send-abort',
++])
++
++const ALLOWED_INBOUND_IDS = new Set([
++  'eventa:event:electron:screen:cursor-screen-point',
++  'eventa:event:electron:window:bounds',
++  'eventa:event:electron:window:lifecycle-changed',
++  'eventa:invoke:electron:avatar-bridge:renderer-send',
++  'eventa:invoke:electron:avatar-bridge:renderer-send-abort',
++])
++
++interface EventaEnvelope {
++  id: string
++  type: string
++  payload: {
++    body?: unknown
++  }
++}
++
++interface EventaBody {
++  invokeId?: string
++}
++
++type EventaListener = (event: Electron.IpcRendererEvent, ...args: unknown[]) => void
++
++interface IpcRendererTransport {
++  send: (channel: string, ...args: unknown[]) => unknown
++  on: (channel: string, listener: EventaListener) => unknown
++  removeListener: (channel: string, listener: EventaListener) => unknown
++}
++
++export interface CompanionEventaIpcRenderer {
++  send: (channel: string, ...args: unknown[]) => void
++  on: (channel: string, listener: EventaListener) => () => void
++  removeListener: (channel: string, listener: EventaListener) => CompanionEventaIpcRenderer
++}
++
++export interface CompanionEventaElectronApi {
++  ipcRenderer: CompanionEventaIpcRenderer
++}
++
++function isRecord(value: unknown): value is Record<string, unknown> {
++  return typeof value === 'object' && value !== null && !Array.isArray(value)
++}
++
++function parseEnvelope(value: unknown): EventaEnvelope | undefined {
++  if (!isRecord(value)
++    || typeof value.id !== 'string'
++    || !value.id
++    || value.id.length > 128
++    || typeof value.type !== 'string'
++    || !value.type
++    || value.type.length > 256
++    || !isRecord(value.payload)) {
++    return undefined
++  }
++
++  return value as unknown as EventaEnvelope
++}
++
++function parseBody(envelope: EventaEnvelope): EventaBody | undefined {
++  if (typeof envelope.payload.body === 'undefined')
++    return {}
++  if (!isRecord(envelope.payload.body))
++    return undefined
++  return envelope.payload.body
++}
++
++function correlationIdFromType(id: string, direction: 'inbound' | 'outbound'): string | undefined {
++  const bases = direction === 'outbound'
++    ? OUTBOUND_CORRELATED_RESPONSE_IDS
++    : INBOUND_CORRELATED_RESPONSE_IDS
++
++  for (const base of bases) {
++    const marker = `${base}-`
++    if (!id.startsWith(marker))
++      continue
++
++    const correlationId = id.slice(marker.length)
++    return /^\w{16}$/u.test(correlationId) ? correlationId : undefined
++  }
++
++  return undefined
++}
++
++function isAllowedType(type: string, direction: 'inbound' | 'outbound'): boolean {
++  const allowed = direction === 'outbound' ? ALLOWED_OUTBOUND_IDS : ALLOWED_INBOUND_IDS
++  return allowed.has(type) || Boolean(correlationIdFromType(type, direction))
++}
++
++function isInvokeSendType(type: string): boolean {
++  return type.endsWith('-send') && type.includes(':invoke:')
++}
++
++function isInvokeReceiveType(type: string): boolean {
++  return type.endsWith('-receive')
++}
++
++function isInvokeAbortType(type: string): boolean {
++  return type.endsWith('-send-abort')
++}
++
++function isValidInvokeBody(envelope: EventaEnvelope, direction: 'inbound' | 'outbound'): boolean {
++  const correlatedId = correlationIdFromType(envelope.type, direction)
++  if (correlatedId) {
++    const body = parseBody(envelope)
++    return body?.invokeId === correlatedId
++  }
++
++  if (!isInvokeSendType(envelope.type)
++    && !isInvokeReceiveType(envelope.type)
++    && !isInvokeAbortType(envelope.type)) {
++    return true
++  }
++
++  const body = parseBody(envelope)
++  return typeof body?.invokeId === 'string' && /^\w{16}$/u.test(body.invokeId)
++}
++
++/**
++ * Creates the renderer's Eventa-only IPC surface for Companion Desktop.
++ *
++ * The proxy preserves Eventa's `send/on/removeListener` adapter contract while
++ * rejecting all other Electron channels and every Eventa method outside the exact
++ * stage/avatar/window allowlist. No Node, socket, token, invoke, sync, transfer, or
++ * generic IPC primitive crosses into the renderer.
++ */
++export function createCompanionEventaElectronApi(ipcRenderer: IpcRendererTransport): CompanionEventaElectronApi {
++  const listenerWrappers = new Map<EventaListener, EventaListener>()
++
++  const restrictedIpcRenderer: CompanionEventaIpcRenderer = {
++    send(channel: string, ...args: unknown[]): void {
++      if (channel !== EVENTA_MESSAGE_CHANNEL || args.length !== 1)
++        throw new Error('Companion Desktop IPC channel is unavailable')
++
++      const envelope = parseEnvelope(args[0])
++      if (!envelope || !isAllowedType(envelope.type, 'outbound') || !isValidInvokeBody(envelope, 'outbound'))
++        throw new Error('Companion Desktop Eventa method is unavailable')
++
++      ipcRenderer.send(channel, envelope)
++    },
++    on(channel: string, listener: EventaListener): () => void {
++      if (!ALLOWED_CHANNELS.has(channel))
++        throw new Error('Companion Desktop IPC channel is unavailable')
++
++      const wrapped: EventaListener = (event, ...args) => {
++        if (channel === EVENTA_ERROR_CHANNEL) {
++          // Eventa's error channel may carry a native Error with stack and paths.
++          // The renderer only needs a generic signal to reject pending work safely.
++          listener(event, { message: 'Companion Desktop Eventa transport failed' })
++          return
++        }
++
++        if (args.length !== 1)
++          return
++        const envelope = parseEnvelope(args[0])
++        if (!envelope || !isAllowedType(envelope.type, 'inbound') || !isValidInvokeBody(envelope, 'inbound'))
++          return
++        listener(event, envelope)
++      }
++      listenerWrappers.set(listener, wrapped)
++      ipcRenderer.on(channel, wrapped)
++      return () => restrictedIpcRenderer.removeListener(channel, listener)
++    },
++    removeListener(channel: string, listener: EventaListener) {
++      if (!ALLOWED_CHANNELS.has(channel))
++        throw new Error('Companion Desktop IPC channel is unavailable')
++
++      const wrapped = listenerWrappers.get(listener)
++      if (wrapped) {
++        listenerWrappers.delete(listener)
++        ipcRenderer.removeListener(channel, wrapped)
++      }
++      return restrictedIpcRenderer
++    },
++  }
++
++  return { ipcRenderer: restrictedIpcRenderer }
++}
+diff --git a/apps/stage-tamagotchi/src/preload/index.ts b/apps/stage-tamagotchi/src/preload/index.ts
+index ebaf1578..93f1d3aa 100644
+--- a/apps/stage-tamagotchi/src/preload/index.ts
++++ b/apps/stage-tamagotchi/src/preload/index.ts
+@@ -1,3 +1,50 @@
+-import { expose } from './shared'
++import type { CompanionControlApi, CompanionControlEvent, CompanionWindowMode } from '../shared/companion-control'
+ 
+-expose()
++import process from 'node:process'
++
++import { ipcRenderer } from 'electron'
++
++import {
++  COMPANION_CONTROL_IPC_EVENT,
++  COMPANION_CONTROL_IPC_REQUEST,
++  COMPANION_CONTROL_IPC_WINDOW_MODE,
++} from '../shared/companion-control'
++import { createCompanionEventaElectronApi } from './companion-eventa'
++import { expose, exposeCustomAPI, exposeRestrictedElectronAPI } from './shared'
++
++function invoke<T>(method: string, params: Record<string, unknown> = {}): Promise<T> {
++  return ipcRenderer.invoke(COMPANION_CONTROL_IPC_REQUEST, { method, params })
++}
++
++const companionEnabled = process.env.COMPANION_CONTROL_PRELOAD_ENABLED === '1'
++delete process.env.COMPANION_CONTROL_PRELOAD_ENABLED
++
++const companion: CompanionControlApi = {
++  enabled: companionEnabled,
++  runtimeSnapshot: () => invoke<Record<string, unknown>>('runtime.snapshot'),
++  runtimeRetry: () => invoke<{ accepted: boolean }>('runtime.retry'),
++  listSessions: params => invoke<Record<string, unknown>>('conversation.sessions.list', params),
++  history: params => invoke<Record<string, unknown>>('conversation.history', params),
++  send: params => invoke<{ turn_id: string }>('conversation.send', params),
++  cancel: params => invoke<{ cancelled: boolean }>('conversation.cancel', params),
++  startVoice: () => invoke<{ started: boolean }>('voice.start'),
++  stopVoice: () => invoke<{ stopped: boolean }>('voice.stop'),
++  setCredential: params => invoke<Record<string, unknown>>('credential.set', params),
++  quit: () => invoke<{ accepted: boolean }>('application.quit'),
++  setWindowMode: async (mode: CompanionWindowMode) => {
++    ipcRenderer.send(COMPANION_CONTROL_IPC_WINDOW_MODE, mode)
++  },
++  subscribe(listener: (event: CompanionControlEvent) => void) {
++    const handler = (_event: Electron.IpcRendererEvent, payload: CompanionControlEvent) => listener(payload)
++    ipcRenderer.on(COMPANION_CONTROL_IPC_EVENT, handler)
++    return () => ipcRenderer.removeListener(COMPANION_CONTROL_IPC_EVENT, handler)
++  },
++}
++
++if (companionEnabled) {
++  exposeRestrictedElectronAPI(createCompanionEventaElectronApi(ipcRenderer))
++  exposeCustomAPI(companion)
++}
++else {
++  expose()
++}
+diff --git a/apps/stage-tamagotchi/src/preload/shared.ts b/apps/stage-tamagotchi/src/preload/shared.ts
+index 8150b9f9..42939c7c 100644
+--- a/apps/stage-tamagotchi/src/preload/shared.ts
++++ b/apps/stage-tamagotchi/src/preload/shared.ts
+@@ -29,12 +29,7 @@ export function expose() {
+   }
+ }
+ 
+-export function exposeWithCustomAPI<CustomAPI>(customAPI: CustomAPI) {
+-  expose()
+-
+-  // Use `contextBridge` APIs to expose Electron APIs to
+-  // renderer only if context isolation is enabled, otherwise
+-  // just add to the DOM global.
++export function exposeCustomAPI<CustomAPI>(customAPI: CustomAPI) {
+   if (contextIsolated) {
+     try {
+       contextBridge.exposeInMainWorld('api', customAPI)
+@@ -47,3 +42,17 @@ export function exposeWithCustomAPI<CustomAPI>(customAPI: CustomAPI) {
+     (window as ElectronWindow<CustomAPI>).api = customAPI
+   }
+ }
++
++export function exposeRestrictedElectronAPI<RestrictedAPI>(electron: RestrictedAPI) {
++  if (contextIsolated) {
++    try {
++      contextBridge.exposeInMainWorld('electron', electron)
++    }
++    catch (error) {
++      console.error(error)
++    }
++  }
++  else {
++    Object.assign(window, { electron })
++  }
++}
+diff --git a/apps/stage-tamagotchi/src/renderer/CompanionApp.vue b/apps/stage-tamagotchi/src/renderer/CompanionApp.vue
+new file mode 100644
+index 00000000..ccd147de
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/renderer/CompanionApp.vue
+@@ -0,0 +1,97 @@
++<script setup lang="ts">
++import type { CompanionControlApi } from '../shared/companion-control'
++
++import { defineInvokeHandler } from '@moeru/eventa'
++import { useElectronEventaContext, useElectronEventaInvoke } from '@proj-airi/electron-vueuse'
++import { DisplayModelFormat, useDisplayModelsStore } from '@proj-airi/stage-ui/stores/display-models'
++import { useSettings } from '@proj-airi/stage-ui/stores/settings'
++import { onMounted, onUnmounted, ref } from 'vue'
++
++import CompanionDesktopStage from './components/companion-desktop/CompanionDesktopStage.vue'
++
++import { AvatarRendererRuntime } from '../shared/avatar-bridge/renderer-runtime'
++import { avatarManagedModelGet, avatarRendererInvoke } from '../shared/eventa'
++
++const companionControl = (window as unknown as { api: CompanionControlApi }).api
++if (!companionControl?.enabled)
++  throw new Error('Companion Desktop renderer requires its dedicated preload capability')
++
++const displayModelsStore = useDisplayModelsStore()
++const settingsStore = useSettings()
++const eventaContext = useElectronEventaContext()
++const getManagedAvatar = useElectronEventaInvoke(avatarManagedModelGet)
++
++const stage = ref<InstanceType<typeof CompanionDesktopStage>>()
++
++const avatarRendererRuntime = new AvatarRendererRuntime({
++  async listModels() {
++    return displayModelsStore.displayModels.map(model => ({
++      id: model.id,
++      name: model.name,
++      renderer: model.format === DisplayModelFormat.Live2dZip || model.format === DisplayModelFormat.Live2dDirectory
++        ? 'live2d'
++        : model.format === DisplayModelFormat.VRM ? 'vrm' : 'unsupported',
++    }))
++  },
++  async selectModel(modelId) {
++    settingsStore.stageModelSelected = modelId
++    await settingsStore.updateStageModel()
++  },
++  async applyState(state) {
++    if (!stage.value)
++      throw new Error('avatar stage is unavailable')
++    await stage.value.applyAvatarState(state)
++  },
++  async applyExpression(expressionId, intensity, durationMs) {
++    if (!stage.value)
++      throw new Error('avatar stage is unavailable')
++    await stage.value.applyAvatarExpression(expressionId, intensity, durationMs)
++  },
++  async applyGesture(gestureId, intensity) {
++    if (!stage.value)
++      throw new Error('avatar stage is unavailable')
++    await stage.value.applyAvatarGesture(gestureId, intensity)
++  },
++  async applyProactiveLevel(level) {
++    if (!stage.value)
++      throw new Error('avatar stage is unavailable')
++    await stage.value.applyAvatarProactiveLevel(level)
++  },
++  isWindowVisible: () => document.visibilityState === 'visible',
++})
++
++const cleanupAvatarRendererHandler = defineInvokeHandler(
++  eventaContext.value,
++  avatarRendererInvoke,
++  request => avatarRendererRuntime.handle(request),
++)
++
++onMounted(async () => {
++  // Companion Desktop owns only the managed avatar stage. It deliberately skips
++  // AIRI chat, auth, analytics, plugins, MCP, Godot, server channel and onboarding.
++  const managedAvatar = await getManagedAvatar()
++  if (!managedAvatar)
++    throw new Error('Companion Desktop managed avatar is unavailable')
++
++  displayModelsStore.registerManagedDisplayModel({
++    id: managedAvatar.id,
++    format: DisplayModelFormat.VRM,
++    type: 'url',
++    url: managedAvatar.url,
++    name: managedAvatar.name,
++    importedAt: Number.MAX_SAFE_INTEGER,
++  })
++  settingsStore.stageModelSelected = managedAvatar.id
++  await settingsStore.initializeStageModel()
++})
++
++onUnmounted(() => cleanupAvatarRendererHandler())
++</script>
++
++<template>
++  <CompanionDesktopStage
++    ref="stage"
++    :api="companionControl"
++    :runtime="avatarRendererRuntime"
++  />
++</template>
+diff --git a/apps/stage-tamagotchi/src/renderer/companion.html b/apps/stage-tamagotchi/src/renderer/companion.html
+new file mode 100644
+index 00000000..5c58ea48
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/renderer/companion.html
+@@ -0,0 +1,11 @@
++<!doctype html>
++<html>
++  <head>
++    <meta charset="UTF-8">
++    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=0, viewport-fit=cover">
++  </head>
++  <body class="font-sans">
++    <div id="app"></div>
++    <script type="module" src="/companion.main.ts"></script>
++  </body>
++</html>
+diff --git a/apps/stage-tamagotchi/src/renderer/companion.main.ts b/apps/stage-tamagotchi/src/renderer/companion.main.ts
+new file mode 100644
+index 00000000..c3b3f53b
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/renderer/companion.main.ts
+@@ -0,0 +1,18 @@
++import Tres from '@tresjs/core'
++
++import { createPinia } from 'pinia'
++import { createApp } from 'vue'
++
++import CompanionApp from './CompanionApp.vue'
++
++import '@unocss/reset/tailwind.css'
++import 'vue-sonner/style.css'
++import './styles/main.css'
++import 'uno.css'
++import '@fontsource-variable/dm-sans/index.css'
++import '@fontsource/dm-mono/index.css'
++
++createApp(CompanionApp)
++  .use(createPinia())
++  .use(Tres)
++  .mount('#app')
+diff --git a/apps/stage-tamagotchi/src/renderer/components/companion-desktop/CompanionDesktopClient.vue b/apps/stage-tamagotchi/src/renderer/components/companion-desktop/CompanionDesktopClient.vue
+new file mode 100644
+index 00000000..143d9a5c
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/renderer/components/companion-desktop/CompanionDesktopClient.vue
+@@ -0,0 +1,864 @@
++<script setup lang="ts">
++import type {
++  CompanionControlApi,
++  CompanionControlEvent,
++  CompanionCredentialKind,
++  CompanionWindowMode,
++} from '../../../shared/companion-control'
++
++import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
++
++interface RuntimeSnapshot {
++  phase?: string
++  capabilities?: Record<string, boolean>
++  providers?: Record<string, string>
++  credentials?: Record<CompanionCredentialKind, string>
++  voice?: { enabled?: boolean, state?: string, device?: string }
++  emotion?: { dominant?: string, valence?: number, arousal?: number, energy?: number }
++  identity?: { name?: string }
++  session_id?: string
++  active_turn?: { turn_id?: string } | null
++  error?: { code?: string, message?: string, retryable?: boolean } | null
++}
++
++interface TurnView {
++  turn_id: string
++  user_text: string
++  companion_text: string
++  status: 'streaming' | 'completed' | 'failed'
++  error?: string
++}
++
++interface SessionView {
++  session_id: string
++  title: string
++  updated_at: string
++  turn_count: number
++  preview: string
++}
++
++const props = defineProps<{
++  api: CompanionControlApi
++  loading: boolean
++}>()
++const emit = defineEmits<{
++  (event: 'windowModeChanged', mode: CompanionWindowMode): void
++}>()
++const loading = computed(() => props.loading)
++
++const view = ref<'conversation' | 'history' | 'settings'>('conversation')
++const mode = ref<CompanionWindowMode>('standard')
++const compactOverlay = ref<'history' | 'settings' | null>(null)
++const snapshot = ref<RuntimeSnapshot>({ phase: 'starting' })
++const connected = ref(false)
++const loadingSnapshot = ref(true)
++const turns = ref<TurnView[]>([])
++const sessions = ref<SessionView[]>([])
++const selectedSession = ref<SessionView | null>(null)
++const historyTurns = ref<TurnView[]>([])
++const historyLoading = ref(false)
++const text = ref('')
++const speakText = ref(false)
++const busy = ref(false)
++const credentialKind = ref<CompanionCredentialKind | null>(null)
++const credentialValue = ref('')
++const credentialOverwrite = ref(false)
++const credentialSaving = ref(false)
++const credentialError = ref('')
++const actionError = ref('')
++const panelError = ref('')
++const theme = ref<'system' | 'dark' | 'light'>('system')
++const systemThemeQuery = window.matchMedia('(prefers-color-scheme: dark)')
++const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
++const systemDark = ref(systemThemeQuery.matches)
++const listEnd = ref<HTMLElement>()
++const credentialDialog = ref<HTMLElement>()
++const credentialInput = ref<HTMLInputElement>()
++const compactOverlayDialog = ref<HTMLElement>()
++const compactOverlayClose = ref<HTMLButtonElement>()
++const credentialTrigger = ref<HTMLElement | null>(null)
++const compactOverlayTrigger = ref<HTMLElement | null>(null)
++let unsubscribe: (() => void) | undefined
++
++const identityName = computed(() => snapshot.value.identity?.name || '虚拟伙伴')
++const activeTurnId = computed(() => snapshot.value.active_turn?.turn_id || '')
++const canSend = computed(() => snapshot.value.capabilities?.text_chat && !activeTurnId.value && !busy.value && text.value.trim().length > 0)
++const microphoneOn = computed(() => snapshot.value.voice?.enabled === true)
++const voiceInputAvailable = computed(() => snapshot.value.capabilities?.voice_input === true)
++const microphoneDisabled = computed(() => !voiceInputAvailable.value || (Boolean(activeTurnId.value) && !microphoneOn.value))
++const microphoneLabel = computed(() => microphoneOn.value ? '停止连续语音' : '开启连续语音')
++const emotionLabel = computed(() => ({
++  neutral: '平静',
++  calm: '平静',
++  happy: '开心',
++  joy: '愉悦',
++  excited: '兴奋',
++  sad: '低落',
++  angry: '生气',
++  fear: '紧张',
++  surprise: '惊讶',
++  disgust: '不适',
++  thinking: '思考中',
++}[snapshot.value.emotion?.dominant?.toLowerCase() || 'neutral'] || '状态稳定'))
++const voiceStateLabel = computed(() => {
++  if (!microphoneOn.value)
++    return '麦克风关闭'
++  return ({
++    listening: '正在聆听',
++    capturing: '正在收音',
++    recording: '正在收音',
++    processing: '正在识别',
++    transcribing: '正在识别',
++    speaking: '正在播放',
++    playback: '正在播放',
++    error: '语音异常',
++  }[snapshot.value.voice?.state?.toLowerCase() || ''] || '正在聆听')
++})
++const resolvedTheme = computed<'dark' | 'light'>(() => theme.value === 'system'
++  ? (systemDark.value ? 'dark' : 'light')
++  : theme.value)
++const phaseLabel = computed(() => ({
++  starting: '正在连接',
++  checking: '检查服务',
++  setup_required: '需要设置',
++  degraded: '文字可用',
++  ready: '已连接',
++  error: '连接异常',
++  stopping: '正在退出',
++}[snapshot.value.phase || 'starting'] || '正在连接'))
++const phaseTone = computed(() => snapshot.value.phase === 'ready'
++  ? 'ready'
++  : snapshot.value.phase === 'degraded' || snapshot.value.phase === 'setup_required'
++    ? 'warning'
++    : snapshot.value.phase === 'error' ? 'error' : 'neutral')
++
++async function refreshSnapshot(): Promise<void> {
++  try {
++    snapshot.value = await props.api.runtimeSnapshot() as RuntimeSnapshot
++    connected.value = true
++  }
++  catch {
++    connected.value = false
++    snapshot.value = {
++      phase: 'error',
++      error: { message: '桌面宿主连接已断开。', retryable: true },
++    }
++  }
++  finally {
++    loadingSnapshot.value = false
++  }
++}
++
++function turnById(turnId: string): TurnView | undefined {
++  return turns.value.find(turn => turn.turn_id === turnId)
++}
++
++function handleEvent(event: CompanionControlEvent): void {
++  const payload = event.payload
++  if (event.event === 'runtime.snapshot') {
++    snapshot.value = payload as RuntimeSnapshot
++    connected.value = snapshot.value.error?.code !== 'control_disconnected'
++    return
++  }
++  if (event.event === 'voice.state.changed') {
++    snapshot.value = { ...snapshot.value, voice: payload as RuntimeSnapshot['voice'] }
++    return
++  }
++  if (event.event === 'emotion.changed') {
++    snapshot.value = { ...snapshot.value, emotion: payload as RuntimeSnapshot['emotion'] }
++    return
++  }
++  const turnId = typeof payload.turn_id === 'string' ? payload.turn_id : ''
++  if (!turnId)
++    return
++  if (event.event === 'conversation.turn.started') {
++    snapshot.value = { ...snapshot.value, active_turn: { turn_id: turnId } }
++    if (!turnById(turnId)) {
++      turns.value.push({
++        turn_id: turnId,
++        user_text: typeof payload.user_text === 'string' ? payload.user_text : '',
++        companion_text: '',
++        status: 'streaming',
++      })
++    }
++  }
++  else if (event.event === 'conversation.response.delta') {
++    const turn = turnById(turnId)
++    if (turn && typeof payload.text === 'string')
++      turn.companion_text += payload.text
++  }
++  else if (event.event === 'conversation.turn.completed') {
++    const turn = turnById(turnId)
++    if (turn) {
++      if (typeof payload.user_text === 'string')
++        turn.user_text = payload.user_text
++      turn.companion_text = typeof payload.companion_text === 'string' ? payload.companion_text : ''
++      turn.status = 'completed'
++    }
++    if (activeTurnId.value === turnId)
++      snapshot.value = { ...snapshot.value, active_turn: null }
++  }
++  else if (event.event === 'conversation.turn.failed') {
++    const turn = turnById(turnId)
++    if (turn) {
++      turn.companion_text = ''
++      turn.status = 'failed'
++      turn.error = payload.error_type === 'cancelled' ? '已取消' : '回复失败，请重试'
++    }
++    if (activeTurnId.value === turnId)
++      snapshot.value = { ...snapshot.value, active_turn: null }
++  }
++  void nextTick(() => listEnd.value?.scrollIntoView({ behavior: motionQuery.matches ? 'auto' : 'smooth', block: 'end' }))
++}
++
++async function send(): Promise<void> {
++  const value = text.value.trim()
++  if (!canSend.value || value.length > 8000)
++    return
++  actionError.value = ''
++  busy.value = true
++  try {
++    await props.api.send({ text: value, speak: speakText.value })
++    text.value = ''
++  }
++  catch {
++    actionError.value = '消息未发送，请检查运行时状态后重试。'
++  }
++  finally {
++    busy.value = false
++  }
++}
++
++async function cancelActive(): Promise<void> {
++  if (!activeTurnId.value)
++    return
++  actionError.value = ''
++  try {
++    await props.api.cancel({ turn_id: activeTurnId.value })
++  }
++  catch {
++    actionError.value = '当前回复未能取消，请稍后重试。'
++  }
++}
++
++async function toggleVoice(): Promise<void> {
++  if (!voiceInputAvailable.value)
++    return
++  actionError.value = ''
++  try {
++    if (microphoneOn.value)
++      await props.api.stopVoice()
++    else
++      await props.api.startVoice()
++  }
++  catch {
++    actionError.value = microphoneOn.value
++      ? '麦克风未能停止，请从托盘退出以确保设备释放。'
++      : '默认麦克风或语音服务暂时不可用。'
++  }
++}
++
++async function loadSessions(): Promise<void> {
++  panelError.value = ''
++  try {
++    const result = await props.api.listSessions({ limit: 20 }) as { sessions?: SessionView[] }
++    sessions.value = result.sessions || []
++  }
++  catch {
++    sessions.value = []
++    panelError.value = '最近会话暂时无法读取。'
++  }
++}
++
++async function openSession(session: SessionView): Promise<void> {
++  historyLoading.value = true
++  selectedSession.value = session
++  panelError.value = ''
++  try {
++    const result = await props.api.history({ session_id: session.session_id, limit: 100 }) as { turns?: TurnView[] }
++    historyTurns.value = (result.turns || []).map(turn => ({ ...turn, status: 'completed' }))
++  }
++  catch {
++    historyTurns.value = []
++    panelError.value = '该会话暂时无法读取。'
++  }
++  finally {
++    historyLoading.value = false
++  }
++}
++
++async function setView(next: typeof view.value): Promise<void> {
++  view.value = next
++  selectedSession.value = null
++  panelError.value = ''
++  if (next === 'history')
++    await loadSessions()
++}
++
++const tabViews = ['conversation', 'history', 'settings'] as const
++
++function handleTabKeydown(event: KeyboardEvent): void {
++  const tabs = Array.from(
++    (event.currentTarget as HTMLElement).querySelectorAll<HTMLButtonElement>('[role="tab"]'),
++  )
++  const currentIndex = tabs.indexOf(document.activeElement as HTMLButtonElement)
++  if (currentIndex < 0)
++    return
++  let nextIndex = currentIndex
++  if (event.key === 'ArrowRight')
++    nextIndex = (currentIndex + 1) % tabs.length
++  else if (event.key === 'ArrowLeft')
++    nextIndex = (currentIndex - 1 + tabs.length) % tabs.length
++  else if (event.key === 'Home')
++    nextIndex = 0
++  else if (event.key === 'End')
++    nextIndex = tabs.length - 1
++  else
++    return
++  event.preventDefault()
++  void setView(tabViews[nextIndex])
++  tabs[nextIndex]?.focus()
++}
++
++async function retryRuntime(): Promise<void> {
++  panelError.value = ''
++  try {
++    await props.api.runtimeRetry()
++  }
++  catch {
++    panelError.value = connected.value
++      ? '运行时重试未能启动，请稍后再试。'
++      : '桌面宿主连接已断开，请从托盘退出后重新启动。'
++  }
++}
++
++function getEventTrigger(event?: Event): HTMLElement | null {
++  if (event?.currentTarget instanceof HTMLElement)
++    return event.currentTarget
++  return document.activeElement instanceof HTMLElement ? document.activeElement : null
++}
++
++const focusableSelector = [
++  'a[href]',
++  'button:not([disabled])',
++  'input:not([disabled])',
++  'select:not([disabled])',
++  'textarea:not([disabled])',
++  '[tabindex]:not([tabindex="-1"])',
++].join(',')
++
++function trapDialogFocus(event: KeyboardEvent, container?: HTMLElement): void {
++  if (event.key !== 'Tab' || !container)
++    return
++  const focusable = Array.from(container.querySelectorAll<HTMLElement>(focusableSelector))
++  if (focusable.length === 0) {
++    event.preventDefault()
++    container.focus()
++    return
++  }
++  const activeIndex = document.activeElement instanceof HTMLElement
++    ? focusable.indexOf(document.activeElement)
++    : -1
++  if (event.shiftKey && activeIndex <= 0) {
++    event.preventDefault()
++    focusable.at(-1)?.focus()
++  }
++  else if (!event.shiftKey && (activeIndex === -1 || activeIndex === focusable.length - 1)) {
++    event.preventDefault()
++    focusable[0]?.focus()
++  }
++}
++
++function handleBackgroundFocus(event: FocusEvent): void {
++  if (!(event.target instanceof Node))
++    return
++  if (credentialKind.value && !credentialDialog.value?.contains(event.target)) {
++    event.stopPropagation()
++    credentialInput.value?.focus()
++    return
++  }
++  if (compactOverlay.value && !compactOverlayDialog.value?.contains(event.target)) {
++    event.stopPropagation()
++    compactOverlayClose.value?.focus()
++  }
++}
++
++async function openCredential(kind: CompanionCredentialKind, event?: Event): Promise<void> {
++  credentialTrigger.value = getEventTrigger(event)
++  credentialKind.value = kind
++  credentialValue.value = ''
++  credentialError.value = ''
++  credentialOverwrite.value = snapshot.value.credentials?.[kind] === 'windows_credential'
++  await nextTick()
++  credentialInput.value?.focus()
++}
++
++async function closeCredential(): Promise<void> {
++  const trigger = credentialTrigger.value
++  credentialKind.value = null
++  credentialValue.value = ''
++  credentialError.value = ''
++  credentialOverwrite.value = false
++  credentialTrigger.value = null
++  await nextTick()
++  if (trigger?.isConnected)
++    trigger.focus()
++}
++
++function handleCredentialKeydown(event: KeyboardEvent): void {
++  if (event.key === 'Escape') {
++    event.preventDefault()
++    event.stopPropagation()
++    void closeCredential()
++    return
++  }
++  trapDialogFocus(event, credentialDialog.value)
++}
++
++async function saveCredential(): Promise<void> {
++  if (!credentialKind.value || !credentialValue.value.trim())
++    return
++  credentialError.value = ''
++  credentialSaving.value = true
++  try {
++    await props.api.setCredential({
++      kind: credentialKind.value,
++      value: credentialValue.value,
++      overwrite: credentialOverwrite.value,
++    })
++    snapshot.value = {
++      ...snapshot.value,
++      credentials: {
++        llm: snapshot.value.credentials?.llm || 'missing',
++        tts: snapshot.value.credentials?.tts || 'missing',
++        [credentialKind.value]: 'windows_credential',
++      },
++    }
++    await closeCredential()
++  }
++  catch {
++    credentialError.value = '凭据未写入。请确认是否需要明确覆盖，然后重试。'
++  }
++  finally {
++    credentialSaving.value = false
++  }
++}
++
++async function setMode(next: CompanionWindowMode): Promise<void> {
++  mode.value = next
++  emit('windowModeChanged', next)
++  if (next === 'standard') {
++    compactOverlay.value = null
++    compactOverlayTrigger.value = null
++  }
++  await props.api.setWindowMode(next)
++}
++
++async function openCompactOverlay(next: 'history' | 'settings', event?: Event): Promise<void> {
++  compactOverlayTrigger.value = getEventTrigger(event)
++  compactOverlay.value = next
++  selectedSession.value = null
++  panelError.value = ''
++  await nextTick()
++  compactOverlayClose.value?.focus()
++  if (next === 'history')
++    await loadSessions()
++}
++
++async function closeCompactOverlay(): Promise<void> {
++  const trigger = compactOverlayTrigger.value
++  compactOverlay.value = null
++  compactOverlayTrigger.value = null
++  await nextTick()
++  if (trigger?.isConnected)
++    trigger.focus()
++}
++
++function handleCompactOverlayKeydown(event: KeyboardEvent): void {
++  if (event.key === 'Escape') {
++    event.preventDefault()
++    event.stopPropagation()
++    void closeCompactOverlay()
++    return
++  }
++  trapDialogFocus(event, compactOverlayDialog.value)
++}
++
++function hideToTray(): void {
++  window.close()
++}
++
++function syncSystemTheme(event: MediaQueryListEvent): void {
++  systemDark.value = event.matches
++}
++
++watch(resolvedTheme, (value) => {
++  document.documentElement.classList.toggle('dark', value === 'dark')
++  document.documentElement.style.colorScheme = value
++}, { immediate: true })
++
++onMounted(async () => {
++  systemThemeQuery.addEventListener('change', syncSystemTheme)
++  document.addEventListener('focusin', handleBackgroundFocus)
++  unsubscribe = props.api.subscribe(handleEvent)
++  await refreshSnapshot()
++})
++
++onUnmounted(() => {
++  systemThemeQuery.removeEventListener('change', syncSystemTheme)
++  document.removeEventListener('focusin', handleBackgroundFocus)
++  credentialValue.value = ''
++  credentialTrigger.value = null
++  compactOverlayTrigger.value = null
++  unsubscribe?.()
++})
++</script>
++
++<template>
++  <main class="companion-shell" :class="[`mode-${mode}`, `theme-${resolvedTheme}`]">
++    <section class="character-stage">
++      <div class="stage-topbar drag-region">
++        <div class="brand-lockup">
++          <span class="brand-mark">VC</span>
++          <div>
++            <strong>{{ identityName }}</strong>
++            <span :data-tone="phaseTone" class="connection-state">{{ phaseLabel }}</span>
++          </div>
++        </div>
++        <div class="window-actions no-drag">
++          <button v-if="mode === 'standard'" class="icon-button" title="隐藏到托盘" aria-label="隐藏到托盘" @click="hideToTray">
++            <span class="i-ph:minus" />
++          </button>
++          <button class="icon-button" :title="mode === 'compact' ? '展开' : '紧凑模式'" :aria-label="mode === 'compact' ? '展开为标准模式' : '切换到紧凑模式'" @click="setMode(mode === 'compact' ? 'standard' : 'compact')">
++            <span :class="mode === 'compact' ? 'i-ph:arrows-out-simple' : 'i-ph:corners-in'" />
++          </button>
++        </div>
++      </div>
++      <div class="avatar-frame">
++        <slot />
++      </div>
++      <div class="stage-status">
++        <span class="emotion-readout"><i />{{ emotionLabel }}</span>
++        <span class="mono">{{ voiceStateLabel }}</span>
++      </div>
++      <div v-if="mode === 'compact'" class="compact-controls">
++        <button class="icon-button" title="文字输入" aria-label="展开文字输入" @click="setMode('standard')">
++          <span class="i-ph:chat-circle-text" />
++        </button>
++        <button class="mic-button" :class="{ active: microphoneOn }" :disabled="microphoneDisabled" :title="microphoneLabel" :aria-label="microphoneLabel" :aria-pressed="microphoneOn" @click="toggleVoice">
++          <span :class="microphoneOn ? 'i-ph:microphone' : 'i-ph:microphone-slash'" />
++        </button>
++        <button class="icon-button" title="最近会话" aria-label="打开最近会话" @click="openCompactOverlay('history', $event)">
++          <span class="i-ph:clock-counter-clockwise" />
++        </button>
++        <button class="icon-button" title="核心设置" aria-label="打开核心设置" @click="openCompactOverlay('settings', $event)">
++          <span class="i-ph:sliders-horizontal" />
++        </button>
++        <button class="icon-button" title="展开" aria-label="展开为标准模式" @click="setMode('standard')">
++          <span class="i-ph:arrows-out-simple" />
++        </button>
++      </div>
++      <p v-if="mode === 'compact' && actionError && !compactOverlay" class="inline-error compact-action-error" role="alert">
++        <span class="i-ph:warning-circle" />{{ actionError }}
++      </p>
++
++      <section
++        v-if="mode === 'compact' && compactOverlay"
++        ref="compactOverlayDialog"
++        class="compact-overlay no-drag"
++        role="dialog"
++        aria-modal="true"
++        :aria-labelledby="compactOverlay === 'history' ? 'compact-history-title' : 'compact-settings-title'"
++        :aria-describedby="compactOverlay === 'history' ? 'compact-history-description' : 'compact-settings-description'"
++        tabindex="-1"
++        @keydown="handleCompactOverlayKeydown"
++      >
++        <header class="compact-overlay-header drag-region">
++          <div>
++            <p class="eyebrow">
++              {{ compactOverlay === 'history' ? '只读记录' : '本地设置' }}
++            </p>
++            <h1 :id="compactOverlay === 'history' ? 'compact-history-title' : 'compact-settings-title'">
++              {{ compactOverlay === 'history' ? (selectedSession?.title || '最近会话') : '核心设置' }}
++            </h1>
++          </div>
++          <button ref="compactOverlayClose" class="icon-button no-drag" title="关闭覆盖层" aria-label="关闭覆盖层" @click="closeCompactOverlay">
++            <span class="i-ph:x" />
++          </button>
++        </header>
++
++        <div v-if="compactOverlay === 'history'" class="compact-overlay-body">
++          <p id="compact-history-description" class="sr-only">
++            最近会话是事件账本的只读投影。
++          </p>
++          <p v-if="panelError" class="inline-error panel-error" role="alert">
++            <span class="i-ph:warning-circle" />{{ panelError }}
++          </p>
++          <button v-if="selectedSession" class="secondary-button compact-back" @click="selectedSession = null">
++            <span class="i-ph:arrow-left" />返回会话列表
++          </button>
++          <div v-if="historyLoading" class="skeleton-stack">
++            <div v-for="index in 4" :key="index" class="skeleton-line" />
++          </div>
++          <div v-else-if="selectedSession" class="history-detail">
++            <article v-for="turn in historyTurns" :key="turn.turn_id" class="history-turn">
++              <p><strong>你</strong>{{ turn.user_text }}</p><p><strong>{{ identityName }}</strong>{{ turn.companion_text }}</p>
++            </article>
++          </div>
++          <div v-else-if="sessions.length === 0" class="state-panel compact-state">
++            <span class="state-icon i-ph:archive-tray" /><h1>还没有历史会话</h1><p>完成一次对话后，这里会出现只读记录。</p>
++          </div>
++          <div v-else class="session-list">
++            <button v-for="session in sessions" :key="session.session_id" class="session-row" @click="openSession(session)">
++              <div><strong>{{ session.title }}</strong><p>{{ session.preview }}</p></div><span class="mono">{{ session.turn_count }}</span>
++            </button>
++          </div>
++        </div>
++
++        <div v-else class="compact-overlay-body compact-settings">
++          <p id="compact-settings-description" class="sr-only">
++            管理凭据状态、语音偏好、主题和运行时。
++          </p>
++          <p v-if="panelError" class="inline-error panel-error" role="alert">
++            <span class="i-ph:warning-circle" />{{ panelError }}
++          </p>
++          <section class="settings-section">
++            <h2>Provider 凭据</h2>
++            <div v-for="kind in (['llm', 'tts'] as CompanionCredentialKind[])" :key="kind" class="setting-row compact-setting-row">
++              <div><strong>{{ kind.toUpperCase() }}</strong><p>{{ snapshot.credentials?.[kind] === 'environment' ? '环境变量管理' : snapshot.credentials?.[kind] === 'windows_credential' ? '已安全存储' : '尚未配置' }}</p></div>
++              <button class="secondary-button" :disabled="snapshot.credentials?.[kind] === 'environment'" @click="openCredential(kind, $event)">
++                {{ snapshot.credentials?.[kind] === 'missing' ? '写入' : '替换' }}
++              </button>
++            </div>
++          </section>
++          <section class="settings-section">
++            <h2>声音与外观</h2>
++            <label class="setting-row interactive"><div><strong>文字回复语音</strong><p>文字输入默认静音</p></div><input v-model="speakText" type="checkbox"></label>
++            <div class="segmented compact-segmented" aria-label="颜色主题">
++              <button v-for="option in (['system', 'dark', 'light'] as const)" :key="option" :class="{ active: theme === option }" :aria-pressed="theme === option" @click="theme = option">
++                {{ option === 'system' ? '系统' : option === 'dark' ? '深色' : '浅色' }}
++              </button>
++            </div>
++          </section>
++          <button class="secondary-button" :disabled="Boolean(activeTurnId)" @click="retryRuntime">
++            <span class="i-ph:arrow-clockwise" />重试运行时
++          </button>
++        </div>
++      </section>
++    </section>
++
++    <section v-if="mode === 'standard'" class="workspace">
++      <header class="workspace-header drag-region">
++        <nav class="view-tabs no-drag" role="tablist" aria-label="桌面客户端视图" @keydown="handleTabKeydown">
++          <button id="conversation-tab" role="tab" :aria-selected="view === 'conversation'" aria-controls="conversation-panel" :tabindex="view === 'conversation' ? 0 : -1" :class="{ active: view === 'conversation' }" @click="setView('conversation')">
++            <span class="i-ph:chat-circle-dots" />当前对话
++          </button>
++          <button id="history-tab" role="tab" :aria-selected="view === 'history'" aria-controls="history-panel" :tabindex="view === 'history' ? 0 : -1" :class="{ active: view === 'history' }" @click="setView('history')">
++            <span class="i-ph:clock-counter-clockwise" />最近会话
++          </button>
++          <button id="settings-tab" role="tab" :aria-selected="view === 'settings'" aria-controls="settings-panel" :tabindex="view === 'settings' ? 0 : -1" :class="{ active: view === 'settings' }" @click="setView('settings')">
++            <span class="i-ph:sliders-horizontal" />核心设置
++          </button>
++        </nav>
++        <span class="mono runtime-label">控制协议 V1</span>
++      </header>
++
++      <div v-if="view === 'conversation'" id="conversation-panel" class="conversation-view" role="tabpanel" aria-labelledby="conversation-tab">
++        <div class="conversation-scroll">
++          <div v-if="loadingSnapshot || loading || snapshot.phase === 'starting' || snapshot.phase === 'checking'" class="skeleton-stack" role="status" aria-live="polite" aria-label="正在连接桌面宿主">
++            <span class="sr-only">{{ snapshot.phase === 'checking' ? '正在检查本地服务' : '正在连接桌面宿主' }}</span>
++            <div v-for="index in 4" :key="index" class="skeleton-line" :class="{ short: index % 2 === 0 }" />
++          </div>
++          <div v-else-if="snapshot.phase === 'setup_required'" class="state-panel setup-panel">
++            <span class="state-icon i-ph:key" />
++            <p class="eyebrow">
++              首次连接
++            </p>
++            <h1>先连接语言服务</h1>
++            <p>界面和角色已经就绪。安全写入 LLM 凭据后即可开始文字对话。</p>
++            <button class="primary-button" @click="setView('settings')">
++              前往核心设置
++            </button>
++          </div>
++          <div v-else-if="snapshot.phase === 'error' || !connected" class="state-panel error-panel">
++            <span class="state-icon i-ph:plugs-connected-x" />
++            <p class="eyebrow">
++              连接异常
++            </p>
++            <h1>桌面宿主暂时不可用</h1>
++            <p>{{ snapshot.error?.message || '请检查本地运行时后重试。' }}</p>
++            <p v-if="panelError" class="inline-error state-error" role="alert">
++              <span class="i-ph:warning-circle" />{{ panelError }}
++            </p>
++            <button class="secondary-button" @click="retryRuntime">
++              重新检查
++            </button>
++          </div>
++          <div v-else-if="turns.length === 0" class="state-panel empty-panel">
++            <span class="state-icon i-ph:waveform" />
++            <p class="eyebrow">
++              新的会话
++            </p>
++            <h1>她正在等你开口</h1>
++            <p>从一条短消息开始。旧会话只用于回看，不会伪装成当前上下文。</p>
++          </div>
++          <ol v-else class="turn-list">
++            <li v-for="turn in turns" :key="turn.turn_id" class="turn-block">
++              <p class="speaker user">
++                你
++              </p>
++              <p class="message user-message">
++                {{ turn.user_text }}
++              </p>
++              <p class="speaker companion">
++                {{ identityName }}
++              </p>
++              <p class="message companion-message" :class="{ streaming: turn.status === 'streaming' }" :aria-live="turn.status === 'streaming' ? 'polite' : undefined" :aria-atomic="turn.status === 'streaming' ? 'false' : undefined">
++                {{ turn.companion_text || (turn.status === 'streaming' ? '正在组织语言…' : '') }}
++              </p>
++              <p v-if="turn.error" class="turn-error" role="alert">
++                <span class="i-ph:warning-circle" />{{ turn.error }}
++              </p>
++            </li>
++          </ol>
++          <div ref="listEnd" />
++        </div>
++        <form class="composer" @submit.prevent="send">
++          <label class="sr-only" for="companion-message-input">消息内容</label>
++          <textarea id="companion-message-input" v-model="text" maxlength="8000" rows="2" :disabled="Boolean(activeTurnId)" placeholder="输入想说的话…" @keydown.ctrl.enter.prevent="send" />
++          <p v-if="actionError" class="inline-error composer-error" role="alert">
++            <span class="i-ph:warning-circle" />{{ actionError }}
++          </p>
++          <div class="composer-actions">
++            <label class="speech-toggle"><input v-model="speakText" type="checkbox"><span>文字回复语音</span></label>
++            <div class="action-cluster">
++              <button type="button" class="icon-button" :class="{ active: microphoneOn }" :disabled="microphoneDisabled" :title="microphoneLabel" :aria-label="microphoneLabel" :aria-pressed="microphoneOn" @click="toggleVoice">
++                <span :class="microphoneOn ? 'i-ph:microphone' : 'i-ph:microphone-slash'" />
++              </button>
++              <button v-if="activeTurnId" type="button" class="cancel-button" @click="cancelActive">
++                <span class="i-ph:stop" />取消
++              </button>
++              <button v-else type="submit" class="send-button" :disabled="!canSend || busy">
++                <span class="i-ph:arrow-up" />发送
++              </button>
++            </div>
++          </div>
++        </form>
++      </div>
++
++      <div v-else-if="view === 'history'" id="history-panel" class="panel-view history-view" role="tabpanel" aria-labelledby="history-tab">
++        <div class="panel-heading">
++          <div>
++            <p class="eyebrow">
++              事件账本
++            </p><h1>{{ selectedSession ? selectedSession.title : '最近会话' }}</h1>
++          </div><button v-if="selectedSession" class="secondary-button" @click="selectedSession = null">
++            <span class="i-ph:arrow-left" />返回
++          </button>
++        </div>
++        <p v-if="panelError" class="inline-error panel-error" role="alert">
++          <span class="i-ph:warning-circle" />{{ panelError }}
++        </p>
++        <div v-if="historyLoading" class="skeleton-stack">
++          <div v-for="index in 5" :key="index" class="skeleton-line" />
++        </div>
++        <div v-else-if="selectedSession" class="history-detail">
++          <article v-for="turn in historyTurns" :key="turn.turn_id" class="history-turn">
++            <p><strong>你</strong>{{ turn.user_text }}</p><p><strong>{{ identityName }}</strong>{{ turn.companion_text }}</p>
++          </article>
++        </div>
++        <div v-else-if="sessions.length === 0" class="state-panel compact-state">
++          <span class="state-icon i-ph:archive-tray" /><h1>还没有历史会话</h1><p>完成一次对话后，这里会出现只读记录。</p>
++        </div>
++        <div v-else class="session-list">
++          <button v-for="session in sessions" :key="session.session_id" class="session-row" @click="openSession(session)">
++            <div><strong>{{ session.title }}</strong><p>{{ session.preview }}</p></div><span class="mono">{{ session.turn_count }} 轮</span>
++          </button>
++        </div>
++      </div>
++
++      <div v-else id="settings-panel" class="panel-view settings-view" role="tabpanel" aria-labelledby="settings-tab">
++        <div class="panel-heading">
++          <div>
++            <p class="eyebrow">
++              本地安全边界
++            </p><h1>核心设置</h1>
++          </div><button class="secondary-button" :disabled="Boolean(activeTurnId)" @click="retryRuntime">
++            <span class="i-ph:arrow-clockwise" />重试运行时
++          </button>
++        </div>
++        <p v-if="panelError" class="inline-error panel-error" role="alert">
++          <span class="i-ph:warning-circle" />{{ panelError }}
++        </p>
++        <section class="settings-section">
++          <h2>Provider 凭据</h2><div v-for="kind in (['llm', 'tts'] as CompanionCredentialKind[])" :key="kind" class="setting-row">
++            <div><strong>{{ kind.toUpperCase() }}</strong><p>{{ snapshot.credentials?.[kind] === 'environment' ? '由环境变量管理，界面不可覆盖' : snapshot.credentials?.[kind] === 'windows_credential' ? '已存入 Windows Credential Manager' : '尚未配置' }}</p></div><button class="secondary-button" :disabled="snapshot.credentials?.[kind] === 'environment'" @click="openCredential(kind, $event)">
++              {{ snapshot.credentials?.[kind] === 'missing' ? '安全写入' : '替换' }}
++            </button>
++          </div>
++        </section>
++        <section class="settings-section">
++          <h2>声音</h2><div class="setting-row">
++            <div><strong>默认音频设备</strong><p>{{ snapshot.voice?.device || '系统默认设备' }}</p></div><span class="status-chip">系统默认</span>
++          </div><label class="setting-row interactive"><div><strong>文字回复语音</strong><p>默认关闭，连续语音仍会播放 TTS</p></div><input v-model="speakText" type="checkbox"></label>
++        </section>
++        <section class="settings-section">
++          <h2>外观</h2><div class="segmented" aria-label="颜色主题">
++            <button v-for="option in (['system', 'dark', 'light'] as const)" :key="option" :class="{ active: theme === option }" :aria-pressed="theme === option" @click="theme = option">
++              {{ option === 'system' ? '跟随系统' : option === 'dark' ? '深色' : '浅色' }}
++            </button>
++          </div><label class="setting-row interactive"><div><strong>紧凑模式</strong><p>450 × 600，透明且置顶</p></div><input :checked="false" type="checkbox" @change="setMode('compact')"></label>
++        </section>
++      </div>
++    </section>
++
++    <div v-if="credentialKind" class="modal-backdrop" @click.self="closeCredential">
++      <form ref="credentialDialog" class="credential-dialog" role="dialog" aria-modal="true" aria-labelledby="credential-dialog-title" aria-describedby="credential-dialog-description" tabindex="-1" @keydown="handleCredentialKeydown" @submit.prevent="saveCredential">
++        <p class="eyebrow">
++          Windows Credential Manager
++        </p><h2 id="credential-dialog-title">
++          写入 {{ credentialKind.toUpperCase() }} 凭据
++        </h2><p id="credential-dialog-description">
++          值只发送给 Python 桌面宿主，不保存在浏览器状态、配置或日志中。
++        </p><label class="credential-field"><span>API 凭据</span><input ref="credentialInput" v-model="credentialValue" type="password" autocomplete="off" placeholder="输入凭据"></label><p v-if="credentialError" class="inline-error credential-error" role="alert">
++          <span class="i-ph:warning-circle" />{{ credentialError }}
++        </p><label class="overwrite-check"><input v-model="credentialOverwrite" type="checkbox">明确覆盖已有凭据</label><div class="dialog-actions">
++          <button type="button" class="secondary-button" @click="closeCredential">
++            取消
++          </button><button type="submit" class="primary-button" :disabled="!credentialValue || credentialSaving">
++            安全写入
++          </button>
++        </div>
++      </form>
++    </div>
++  </main>
++</template>
++
++<style scoped>
++.companion-shell { --bg:#101416;--panel:#171d20;--panel-2:#1d2528;--line:#2b363a;--text:#eef5f3;--muted:#8c9b9c;--accent:#45d7c5;--accent-foreground:#071311;--danger:#f07878; display:grid;grid-template-columns:44fr 56fr;grid-template-rows:minmax(0,1fr);height:100%;width:100%;overflow:hidden;background:var(--bg);color:var(--text);font-family:'DM Sans Variable',sans-serif; }
++.theme-light { --bg:#eef2f1;--panel:#f8faf9;--panel-2:#e7edeb;--line:#cdd8d5;--text:#16201f;--muted:#52615f;--accent:#087f73;--accent-foreground:#f8faf9;--danger:#a8323a; }
++.character-stage,.workspace { min-height:0; }
++.character-stage { position:relative;min-width:0;overflow:hidden;border-right:1px solid var(--line);background:radial-gradient(circle at 50% 35%,color-mix(in srgb,var(--accent) 10%,transparent),transparent 45%),var(--bg); }
++.character-stage::after { content:'';position:absolute;inset:0;pointer-events:none;background:linear-gradient(180deg,transparent 68%,color-mix(in srgb,var(--bg) 86%,transparent)); }
++.stage-topbar,.workspace-header { height:64px;display:flex;align-items:center;justify-content:space-between;padding:0 22px;position:relative;z-index:4; }.window-actions { display:flex;gap:8px;align-items:center; }
++.brand-lockup { display:flex;gap:12px;align-items:center; }.brand-mark { display:grid;place-items:center;width:34px;height:34px;border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line));border-radius:12px;color:var(--accent);font:700 11px 'DM Mono';letter-spacing:.08em; }.brand-lockup div { display:grid;gap:2px; }.brand-lockup strong { font-size:14px; }.connection-state { font-size:11px;color:var(--muted); }.connection-state::before { content:'';display:inline-block;width:6px;height:6px;margin-right:6px;border-radius:50%;background:var(--muted); }.connection-state[data-tone=ready]::before { background:var(--accent); }.connection-state[data-tone=warning]::before { background:#d2a957; }.connection-state[data-tone=error]::before { background:var(--danger); }
++.avatar-frame { position:absolute;inset:62px 0 46px;z-index:1; }.stage-status { position:absolute;z-index:4;left:22px;right:22px;bottom:18px;display:flex;justify-content:space-between;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em; }.emotion-readout i { display:inline-block;width:7px;height:7px;margin-right:7px;border-radius:50%;background:var(--accent); }.mono { font-family:'DM Mono',monospace;letter-spacing:.06em; }
++input[type=checkbox] { accent-color:var(--accent); }
++.workspace { min-width:0;height:100%;overflow:hidden;display:grid;grid-template-rows:64px minmax(0,1fr);background:var(--panel); }.workspace-header { border-bottom:1px solid var(--line); }.view-tabs { display:flex;gap:4px; }.view-tabs button,.segmented button { border:0;border-radius:12px;background:transparent;color:var(--muted);padding:9px 12px;display:flex;align-items:center;gap:7px;font:600 12px inherit;transition:background 180ms,color 180ms,transform 180ms; }.view-tabs button:hover,.view-tabs button.active,.segmented button.active { background:var(--panel-2);color:var(--text); }.view-tabs button:active,button:active { transform:translateY(1px); }.runtime-label { color:var(--muted);font-size:9px; }
++.conversation-view { min-height:0;display:grid;grid-template-rows:minmax(0,1fr) auto; }.conversation-scroll,.panel-view { min-height:0;overflow:auto;padding:34px clamp(24px,5vw,52px); }.turn-list { display:grid;gap:30px;padding:0;margin:0;list-style:none; }.turn-block { display:grid;gap:7px; }.speaker { margin:0;font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase; }.speaker.user { color:var(--muted); }.speaker.companion { color:var(--accent);margin-top:10px; }.message { margin:0;max-width:68ch;font-size:15px;line-height:1.65;white-space:pre-wrap; }.user-message { color:color-mix(in srgb,var(--text) 84%,var(--muted)); }.companion-message.streaming::after { content:'';display:inline-block;width:7px;height:1em;margin-left:3px;vertical-align:-2px;background:var(--accent);animation:cursor 1s steps(1) infinite; }.turn-error { margin:2px 0 0;color:var(--danger);font-size:12px;display:flex;align-items:center;gap:6px; }
++.composer { margin:0 22px 22px;border:1px solid var(--line);border-radius:12px;background:var(--panel-2);overflow:hidden;box-shadow:0 18px 42px color-mix(in srgb,var(--bg) 45%,transparent);transition:border-color 180ms,box-shadow 180ms; }.composer:focus-within { border-color:color-mix(in srgb,var(--accent) 72%,var(--line));box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent),0 18px 42px color-mix(in srgb,var(--bg) 45%,transparent); }.composer textarea { width:100%;min-height:70px;resize:none;border:0;background:transparent;color:var(--text);padding:16px 18px;font:14px/1.5 inherit;outline:none;box-sizing:border-box; }.composer textarea::placeholder { color:var(--muted); }.composer-actions { display:flex;align-items:center;justify-content:space-between;padding:9px 10px 10px 16px;border-top:1px solid var(--line); }.speech-toggle,.overwrite-check { display:flex;gap:8px;align-items:center;color:var(--muted);font-size:11px; }.action-cluster { display:flex;gap:8px;align-items:center; }
++button { cursor:pointer; }.icon-button,.mic-button { width:38px;height:38px;border:1px solid var(--line);border-radius:12px;background:var(--panel-2);color:var(--muted);display:grid;place-items:center;font-size:18px;transition:color 180ms,border-color 180ms,background-color 180ms,transform 180ms,opacity 180ms; }.icon-button:hover,.icon-button.active,.mic-button.active { color:var(--accent);border-color:color-mix(in srgb,var(--accent) 48%,var(--line)); }.primary-button,.secondary-button,.send-button,.cancel-button { min-height:38px;border-radius:12px;padding:0 15px;display:inline-flex;align-items:center;gap:7px;font:650 12px inherit;white-space:nowrap;transition:color 180ms,border-color 180ms,background-color 180ms,transform 180ms,opacity 180ms; }.primary-button,.send-button { border:1px solid var(--accent);background:var(--accent);color:var(--accent-foreground); }.secondary-button,.cancel-button { border:1px solid var(--line);background:var(--panel-2);color:var(--text); }.cancel-button { color:var(--danger); }.primary-button:disabled,.send-button:disabled,.secondary-button:disabled,.icon-button:disabled,.mic-button:disabled { opacity:.45;cursor:not-allowed; }
++button:focus-visible,input:focus-visible,textarea:focus-visible,[tabindex]:focus-visible { outline:3px solid color-mix(in srgb,var(--accent) 72%,transparent);outline-offset:2px; }
++.state-panel { min-height:100%;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;max-width:440px; }.state-icon { width:50px;height:50px;display:grid;place-items:center;border:1px solid var(--line);border-radius:12px;color:var(--accent);font-size:24px;margin-bottom:24px; }.eyebrow { margin:0 0 8px;color:var(--accent);font:600 10px 'DM Mono';letter-spacing:.12em;text-transform:uppercase; }.state-panel h1,.panel-heading h1 { margin:0;font-size:clamp(24px,3vw,36px);line-height:1.08;letter-spacing:-.035em; }.state-panel>p:not(.eyebrow) { margin:14px 0 24px;color:var(--muted);font-size:14px;line-height:1.6; }.compact-state { min-height:360px; }.error-panel .state-icon { color:var(--danger); }
++.skeleton-stack { display:grid;gap:18px;padding-top:30px; }.skeleton-line { height:76px;border-radius:12px;background:linear-gradient(90deg,var(--panel-2),color-mix(in srgb,var(--line) 65%,var(--panel-2)),var(--panel-2));background-size:220% 100%;animation:skeleton 1.5s ease-in-out infinite; }.skeleton-line.short { width:72%; }
++.panel-view { display:block; }.panel-heading { display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:30px; }.panel-heading h1 { font-size:28px; }.session-list { display:grid; }.session-row { width:100%;display:flex;justify-content:space-between;gap:24px;text-align:left;border:0;border-top:1px solid var(--line);background:transparent;color:var(--text);padding:18px 2px; }.session-row:last-child { border-bottom:1px solid var(--line); }.session-row strong { font-size:14px; }.session-row p { margin:5px 0 0;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:42ch; }.session-row .mono { color:var(--muted);font-size:9px; }.history-detail { display:grid;gap:18px; }.history-turn { border-left:2px solid var(--line);padding:4px 0 4px 18px; }.history-turn p { margin:0 0 12px;line-height:1.55; }.history-turn strong { display:block;color:var(--accent);font-size:10px;text-transform:uppercase;letter-spacing:.1em;margin-bottom:4px; }
++.settings-section { padding:22px 0;border-top:1px solid var(--line); }.settings-section h2 { margin:0 0 12px;font-size:12px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted); }.setting-row { min-height:62px;display:flex;align-items:center;justify-content:space-between;gap:20px; }.setting-row strong { font-size:14px; }.setting-row p { margin:4px 0 0;color:var(--muted);font-size:12px; }.setting-row.interactive { cursor:pointer; }.status-chip { border:1px solid var(--line);border-radius:12px;padding:7px 10px;color:var(--muted);font-size:10px; }.segmented { width:max-content;display:flex;padding:3px;border:1px solid var(--line);border-radius:12px;background:var(--bg);margin:4px 0 12px; }
++.modal-backdrop { position:absolute;z-index:20;inset:0;display:grid;place-items:center;padding:24px;background:color-mix(in srgb,var(--bg) 82%,transparent); }.credential-dialog { width:min(420px,100%);border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:24px;box-shadow:0 28px 90px color-mix(in srgb,var(--bg) 70%,transparent); }.credential-dialog h2 { margin:0 0 8px;font-size:22px; }.credential-dialog>p:not(.eyebrow,.inline-error) { color:var(--muted);font-size:13px;line-height:1.55; }.credential-field { display:grid;gap:7px;margin:16px 0 10px;color:var(--muted);font-size:11px;font-weight:650; }.credential-field input { width:100%;box-sizing:border-box;border:1px solid var(--line);border-radius:12px;background:var(--panel-2);color:var(--text);padding:13px;outline:none;transition:border-color 180ms,box-shadow 180ms; }.credential-field input::placeholder { color:var(--muted); }.credential-field input:focus { border-color:var(--accent); }.dialog-actions { display:flex;justify-content:flex-end;gap:8px;margin-top:22px; }
++.compact-controls { position:absolute;z-index:6;left:50%;bottom:18px;transform:translateX(-50%);display:flex;gap:7px; }.compact-controls .icon-button,.compact-controls .mic-button { width:36px;height:36px; }.mode-compact { display:block;background:transparent; }.mode-compact .character-stage { width:100%;height:100%;border:0;background:transparent; }.mode-compact .stage-topbar { background:linear-gradient(180deg,color-mix(in srgb,var(--bg) 70%,transparent),transparent); }.mode-compact .stage-status { bottom:78px; }.mode-compact .avatar-frame { inset:54px 0 62px; }
++.compact-overlay { position:absolute;z-index:12;inset:0;display:grid;grid-template-rows:auto minmax(0,1fr);background:var(--panel);color:var(--text);animation:panel-in 240ms cubic-bezier(.16,1,.3,1); }.compact-overlay-header { min-height:72px;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 18px;border-bottom:1px solid var(--line); }.compact-overlay-header h1 { margin:0;font-size:22px;letter-spacing:-.025em; }.compact-overlay-body { min-height:0;overflow:auto;padding:18px; }.compact-back { margin-bottom:18px; }.compact-setting-row { align-items:flex-start;padding:8px 0; }.compact-segmented { width:100%;box-sizing:border-box; }.compact-segmented button { flex:1;justify-content:center; }
++.inline-error { display:flex;align-items:flex-start;gap:7px;margin:0;color:var(--danger);font-size:12px;line-height:1.45; }.composer-error { padding:0 18px 11px; }.panel-error { margin:-12px 0 20px; }.state-error { margin:0 0 18px!important; }.credential-error { margin:0 0 12px; }.compact-action-error { position:absolute;z-index:7;left:18px;right:18px;bottom:68px;padding:10px 12px;border:1px solid color-mix(in srgb,var(--danger) 42%,var(--line));border-radius:12px;background:color-mix(in srgb,var(--panel) 92%,transparent); }.compact-overlay-body>.panel-error { margin:0 0 16px; }
++.sr-only { position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0; }
++.drag-region { -webkit-app-region:drag; }.no-drag,.no-drag * { -webkit-app-region:no-drag; }
++@keyframes skeleton { to { background-position:-220% 0; } } @keyframes cursor { 50% { opacity:0; } } @keyframes panel-in { from { opacity:0;transform:translateY(10px); } to { opacity:1;transform:translateY(0); } }
++@media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation-duration:.01ms!important;animation-iteration-count:1!important;scroll-behavior:auto!important;transition-duration:.01ms!important; } }
++</style>
+diff --git a/apps/stage-tamagotchi/src/renderer/components/companion-desktop/CompanionDesktopStage.vue b/apps/stage-tamagotchi/src/renderer/components/companion-desktop/CompanionDesktopStage.vue
+new file mode 100644
+index 00000000..0d73782a
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/renderer/components/companion-desktop/CompanionDesktopStage.vue
+@@ -0,0 +1,102 @@
++<script setup lang="ts">
++import type { AvatarRendererRuntime, AvatarStateSnapshot } from '../../../shared/avatar-bridge/renderer-runtime'
++import type { CompanionControlApi, CompanionWindowMode } from '../../../shared/companion-control'
++
++import { useElectronRelativeMouse } from '@proj-airi/electron-vueuse'
++import { ThreeScene } from '@proj-airi/stage-ui-three'
++import { animations } from '@proj-airi/stage-ui-three/assets/vrm'
++import { useSettings } from '@proj-airi/stage-ui/stores/settings'
++import { useMediaQuery } from '@vueuse/core'
++import { storeToRefs } from 'pinia'
++import { computed, onUnmounted, ref } from 'vue'
++
++import CompanionDesktopClient from './CompanionDesktopClient.vue'
++
++const props = defineProps<{
++  api: CompanionControlApi
++  runtime: AvatarRendererRuntime
++}>()
++
++const settingsStore = useSettings()
++const { stageModelSelected, stageModelSelectedUrl } = storeToRefs(settingsStore)
++const scene = ref<InstanceType<typeof ThreeScene>>()
++const componentState = ref<'pending' | 'loading' | 'mounted'>('pending')
++const windowMode = ref<CompanionWindowMode>('standard')
++const loading = computed(() => componentState.value !== 'mounted')
++const prefersReducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)')
++const { x, y } = useElectronRelativeMouse()
++const cursorPosition = computed(() => ({ x: x.value, y: y.value }))
++
++async function applyAvatarExpression(expressionId: string, intensity: number, _durationMs: number) {
++  if (!scene.value)
++    throw new Error('avatar stage is unavailable')
++  scene.value.setExpression(expressionId, intensity)
++}
++
++async function applyAvatarGesture(gestureId: string, intensity: number) {
++  if (!scene.value)
++    throw new Error('avatar stage is unavailable')
++  await scene.value.playAvatarGesture(gestureId, intensity)
++}
++
++async function applyAvatarState(state: AvatarStateSnapshot) {
++  await applyAvatarExpression(state.expression.expression_id, state.expression.intensity, 0)
++  if (!scene.value)
++    throw new Error('avatar stage is unavailable')
++  scene.value.setExpression('aa', state.expression.mouth_open)
++  if (state.pose.gesture_id)
++    await applyAvatarGesture(state.pose.gesture_id, state.pose.gesture_intensity)
++}
++
++async function applyAvatarProactiveLevel(_level: number) {
++  if (!scene.value)
++    throw new Error('avatar stage is unavailable')
++}
++
++function notifyModelLoaded(modelSrc: string) {
++  props.runtime.notifyStageMounted('vrm')
++  props.runtime.notifyModelLoaded('vrm', stageModelSelected.value || modelSrc)
++}
++
++onUnmounted(() => props.runtime.notifyStageUnmounted())
++
++defineExpose({
++  applyAvatarState,
++  applyAvatarExpression,
++  applyAvatarGesture,
++  applyAvatarProactiveLevel,
++})
++</script>
++
++<template>
++  <CompanionDesktopClient :api="api" :loading="loading" @window-mode-changed="windowMode = $event">
++    <div class="avatar-interaction-surface" :class="{ 'compact-drag-surface': windowMode === 'compact' }">
++      <ThreeScene
++        ref="scene"
++        v-model:state="componentState"
++        h-full w-full
++        :model-src="stageModelSelectedUrl"
++        :cursor-position="cursorPosition"
++        :idle-animation="animations.idleLoop.toString()"
++        :enable-orbit-controls="windowMode === 'standard'"
++        :paused="prefersReducedMotion"
++        :environment-mode="windowMode === 'compact' ? 'off' : undefined"
++        @model-loading="runtime.notifyModelLoading('vrm', stageModelSelected)"
++        @model-loaded="notifyModelLoaded"
++        @frame-presented="runtime.notifyPresentedFrame()"
++        @error="console.error"
++      />
++    </div>
++  </CompanionDesktopClient>
++</template>
++
++<style scoped>
++.avatar-interaction-surface {
++  height: 100%;
++  width: 100%;
++}
++
++.compact-drag-surface {
++  -webkit-app-region: drag;
++}
++</style>
+diff --git a/apps/stage-tamagotchi/src/renderer/components/companion-desktop/companionDesktopClient.test.ts b/apps/stage-tamagotchi/src/renderer/components/companion-desktop/companionDesktopClient.test.ts
+new file mode 100644
+index 00000000..312f4d68
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/renderer/components/companion-desktop/companionDesktopClient.test.ts
+@@ -0,0 +1,396 @@
++// @vitest-environment jsdom
++
++import type {
++  CompanionControlApi,
++  CompanionControlEvent,
++} from '../../../shared/companion-control'
++
++import { readFileSync } from 'node:fs'
++import { resolve } from 'node:path'
++
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
++import { createApp, nextTick } from 'vue'
++
++import CompanionDesktopClient from './CompanionDesktopClient.vue'
++import componentSource from './CompanionDesktopClient.vue?raw'
++
++// Vitest 4 resolves `.css?raw` imports to an empty module and reports a virtual
++// `import.meta.url`, so the reduced-motion rule is verified straight from the
++// source file using the repository root as the stable base.
++const rendererStyles = readFileSync(
++  resolve(process.cwd(), 'apps/stage-tamagotchi/src/renderer/styles/main.css'),
++  'utf8',
++)
++
++interface RuntimeSnapshotFixture {
++  phase: string
++  capabilities: {
++    text_chat: boolean
++    voice_input: boolean
++    speech_output: boolean
++  }
++  credentials: {
++    llm: string
++    tts: string
++  }
++  voice: {
++    enabled: boolean
++    state: string
++    device: string
++  }
++  emotion: {
++    dominant: string
++  }
++  identity: {
++    name: string
++  }
++  active_turn: null
++}
++
++const readySnapshot: RuntimeSnapshotFixture = {
++  phase: 'ready',
++  capabilities: {
++    text_chat: true,
++    voice_input: true,
++    speech_output: true,
++  },
++  credentials: {
++    llm: 'windows_credential',
++    tts: 'windows_credential',
++  },
++  voice: {
++    enabled: false,
++    state: 'idle',
++    device: 'default',
++  },
++  emotion: {
++    dominant: 'neutral',
++  },
++  identity: {
++    name: '星见',
++  },
++  active_turn: null,
++}
++
++function makeApi(snapshot: RuntimeSnapshotFixture = readySnapshot): CompanionControlApi {
++  return {
++    enabled: true,
++    runtimeSnapshot: vi.fn().mockResolvedValue(structuredClone(snapshot)),
++    runtimeRetry: vi.fn().mockResolvedValue({ accepted: true }),
++    listSessions: vi.fn().mockResolvedValue({ sessions: [] }),
++    history: vi.fn().mockResolvedValue({ turns: [] }),
++    send: vi.fn().mockResolvedValue({ turn_id: 'turn-1' }),
++    cancel: vi.fn().mockResolvedValue({ cancelled: true }),
++    startVoice: vi.fn().mockResolvedValue({ started: true }),
++    stopVoice: vi.fn().mockResolvedValue({ stopped: true }),
++    setCredential: vi.fn().mockResolvedValue({}),
++    quit: vi.fn().mockResolvedValue({ accepted: true }),
++    setWindowMode: vi.fn().mockResolvedValue(undefined),
++    subscribe: vi.fn((_listener: (event: CompanionControlEvent) => void) => () => {}),
++  }
++}
++
++async function mountClient(api = makeApi(), loading = false): Promise<{
++  api: CompanionControlApi
++  element: HTMLElement
++  emittedModes: string[]
++  unmount: () => void
++}> {
++  const element = document.createElement('div')
++  document.body.append(element)
++  const emittedModes: string[] = []
++  const app = createApp(CompanionDesktopClient, {
++    api,
++    loading,
++    onWindowModeChanged: (mode: string) => emittedModes.push(mode),
++  })
++  app.mount(element)
++  await nextTick()
++  await Promise.resolve()
++  await nextTick()
++  return {
++    api,
++    element,
++    emittedModes,
++    unmount: () => {
++      app.unmount()
++      element.remove()
++    },
++  }
++}
++
++function click(element: Element): void {
++  element.dispatchEvent(new MouseEvent('click', { bubbles: true }))
++}
++
++function keydown(element: Element, key: string, shiftKey = false): KeyboardEvent {
++  const event = new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key, shiftKey })
++  element.dispatchEvent(event)
++  return event
++}
++
++const mounted: Awaited<ReturnType<typeof mountClient>>[] = []
++
++beforeEach(() => {
++  vi.stubGlobal('matchMedia', vi.fn((query: string) => ({
++    matches: false,
++    media: query,
++    onchange: null,
++    addEventListener: vi.fn(),
++    removeEventListener: vi.fn(),
++    addListener: vi.fn(),
++    removeListener: vi.fn(),
++    dispatchEvent: vi.fn(),
++  })))
++  HTMLElement.prototype.scrollIntoView = vi.fn()
++})
++
++afterEach(() => {
++  for (const client of mounted.splice(0))
++    client.unmount()
++  vi.unstubAllGlobals()
++  vi.restoreAllMocks()
++  document.body.replaceChildren()
++})
++
++describe('companion desktop client layout', () => {
++  it('keeps the standard workspace constrained so settings scroll instead of clipping', () => {
++    expect(componentSource).toMatch(/\.companion-shell\s*\{[^}]*grid-template-rows:minmax\(0,1fr\)/)
++    expect(componentSource).toMatch(/\.character-stage\s*,\s*\.workspace\s*\{[^}]*min-height:0/)
++    expect(componentSource).toMatch(/\.workspace\s*\{[^}]*height:100%;[^}]*overflow:hidden/)
++    expect(componentSource).toMatch(/\.conversation-scroll\s*,\s*\.panel-view\s*\{[^}]*min-height:0;[^}]*overflow:auto/)
++  })
++
++  it('rolls back provisional streamed text when a turn fails or is cancelled', () => {
++    expect(componentSource).toMatch(
++      /event\.event === 'conversation\.turn\.failed'[\s\S]*?turn\.companion_text = ''[\s\S]*?turn\.status = 'failed'/,
++    )
++  })
++
++  it('uses a high-contrast foreground token and reduced-motion-aware scrolling', () => {
++    expect(componentSource).toContain('--accent-foreground:#f8faf9')
++    expect(componentSource).toMatch(/behavior:\s*motionQuery\.matches \? 'auto' : 'smooth'/)
++    expect(componentSource).not.toContain('transition:all')
++    expect(rendererStyles).toMatch(/@media\s*\(prefers-reduced-motion:\s*reduce\)\s*\{[\s\S]*?html\s*\{[^}]*transition:\s*none/)
++  })
++
++  it('uses the imported variable font and the cyan accent for native checkboxes', () => {
++    expect(componentSource).toContain(`font-family:'DM Sans Variable',sans-serif`)
++    expect(componentSource).toMatch(/input\[type=checkbox\]\s*\{[^}]*accent-color:var\(--accent\)/)
++  })
++
++  it('reports window mode changes to the avatar stage', async () => {
++    const client = await mountClient()
++    mounted.push(client)
++
++    click(client.element.querySelector<HTMLButtonElement>('button[aria-label="切换到紧凑模式"]')!)
++    await nextTick()
++    expect(client.emittedModes).toEqual(['compact'])
++
++    click(client.element.querySelector<HTMLButtonElement>('button[aria-label="展开为标准模式"]')!)
++    await nextTick()
++    expect(client.emittedModes).toEqual(['compact', 'standard'])
++  })
++})
++
++describe('companion desktop client accessibility', () => {
++  it('labels the composer and exposes tabs with selected state', async () => {
++    const client = await mountClient()
++    mounted.push(client)
++
++    const textarea = client.element.querySelector<HTMLTextAreaElement>('#companion-message-input')
++    const label = client.element.querySelector<HTMLLabelElement>('label[for="companion-message-input"]')
++    expect(textarea).not.toBeNull()
++    expect(label?.textContent).toBe('消息内容')
++
++    const tabs = Array.from(client.element.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
++    expect(tabs).toHaveLength(3)
++    expect(tabs.map(tab => tab.getAttribute('aria-selected'))).toEqual(['true', 'false', 'false'])
++
++    click(tabs[2]!)
++    await nextTick()
++    expect(tabs.map(tab => tab.getAttribute('aria-selected'))).toEqual(['false', 'false', 'true'])
++  })
++
++  it('supports arrow, Home, and End navigation with roving tab focus', async () => {
++    const client = await mountClient()
++    mounted.push(client)
++
++    const tabs = Array.from(client.element.querySelectorAll<HTMLButtonElement>('[role="tab"]'))
++    tabs[0]!.focus()
++
++    const rightEvent = keydown(tabs[0]!, 'ArrowRight')
++    await nextTick()
++    expect(rightEvent.defaultPrevented).toBe(true)
++    expect(tabs.map(tab => tab.getAttribute('aria-selected'))).toEqual(['false', 'true', 'false'])
++    expect(tabs.map(tab => tab.getAttribute('tabindex'))).toEqual(['-1', '0', '-1'])
++    expect(document.activeElement).toBe(tabs[1])
++
++    keydown(tabs[1]!, 'End')
++    await nextTick()
++    expect(tabs.map(tab => tab.getAttribute('aria-selected'))).toEqual(['false', 'false', 'true'])
++    expect(document.activeElement).toBe(tabs[2])
++
++    keydown(tabs[2]!, 'Home')
++    await nextTick()
++    expect(tabs.map(tab => tab.getAttribute('aria-selected'))).toEqual(['true', 'false', 'false'])
++    expect(document.activeElement).toBe(tabs[0])
++
++    keydown(tabs[0]!, 'ArrowLeft')
++    await nextTick()
++    expect(tabs.map(tab => tab.getAttribute('aria-selected'))).toEqual(['false', 'false', 'true'])
++    expect(document.activeElement).toBe(tabs[2])
++
++    keydown(tabs[2]!, 'ArrowRight')
++    await nextTick()
++    expect(tabs.map(tab => tab.getAttribute('aria-selected'))).toEqual(['true', 'false', 'false'])
++    expect(document.activeElement).toBe(tabs[0])
++  })
++
++  it('disables microphone controls when voice input is unavailable', async () => {
++    const api = makeApi({
++      ...readySnapshot,
++      capabilities: { ...readySnapshot.capabilities, voice_input: false },
++    })
++    const client = await mountClient(api)
++    mounted.push(client)
++
++    const microphone = client.element.querySelector<HTMLButtonElement>('button[aria-label="开启连续语音"]')
++    expect(microphone?.disabled).toBe(true)
++    expect(microphone?.getAttribute('aria-pressed')).toBe('false')
++    click(microphone!)
++    expect(api.startVoice).not.toHaveBeenCalled()
++  })
++
++  it('shows starting and checking as a polite loading status instead of an empty state', async () => {
++    const client = await mountClient(makeApi({ ...readySnapshot, phase: 'checking' }))
++    mounted.push(client)
++
++    const status = client.element.querySelector<HTMLElement>('[role="status"]')
++    expect(status?.getAttribute('aria-live')).toBe('polite')
++    expect(status?.textContent).toContain('正在检查本地服务')
++    expect(client.element.textContent).not.toContain('她正在等你开口')
++  })
++
++  it('renders empty, setup, and connection-error states without conflating them', async () => {
++    const emptyClient = await mountClient()
++    mounted.push(emptyClient)
++    expect(emptyClient.element.textContent).toContain('她正在等你开口')
++
++    const setupClient = await mountClient(makeApi({ ...readySnapshot, phase: 'setup_required' }))
++    mounted.push(setupClient)
++    expect(setupClient.element.textContent).toContain('先连接语言服务')
++    expect(setupClient.element.textContent).toContain('前往核心设置')
++
++    const errorClient = await mountClient(makeApi({ ...readySnapshot, phase: 'error' }))
++    mounted.push(errorClient)
++    expect(errorClient.element.textContent).toContain('桌面宿主暂时不可用')
++    expect(errorClient.element.textContent).toContain('重新检查')
++  })
++
++  it('announces active voice and emotion states in Chinese', async () => {
++    const client = await mountClient(makeApi({
++      ...readySnapshot,
++      voice: { ...readySnapshot.voice, enabled: true, state: 'listening' },
++      emotion: { dominant: 'happy' },
++    }))
++    mounted.push(client)
++
++    const microphone = client.element.querySelector<HTMLButtonElement>('button[aria-label="停止连续语音"]')
++    expect(microphone?.getAttribute('aria-pressed')).toBe('true')
++    expect(client.element.querySelector('.stage-status')?.textContent).toContain('开心')
++    expect(client.element.querySelector('.stage-status')?.textContent).toContain('正在聆听')
++  })
++
++  it('treats credential entry as a modal, traps focus, closes on Escape, and restores focus', async () => {
++    const client = await mountClient()
++    mounted.push(client)
++
++    const settingsTab = client.element.querySelector<HTMLButtonElement>('#settings-tab')!
++    click(settingsTab)
++    await nextTick()
++    const trigger = Array.from(client.element.querySelectorAll<HTMLButtonElement>('.settings-view .secondary-button'))
++      .find(button => button.textContent?.includes('替换'))!
++    trigger.focus()
++    click(trigger)
++    await nextTick()
++
++    const dialog = client.element.querySelector<HTMLElement>('.credential-dialog')!
++    const input = dialog.querySelector<HTMLInputElement>('input[type="password"]')!
++    const cancel = Array.from(dialog.querySelectorAll<HTMLButtonElement>('button'))
++      .find(button => button.textContent?.includes('取消'))!
++    expect(dialog.getAttribute('role')).toBe('dialog')
++    expect(dialog.getAttribute('aria-modal')).toBe('true')
++    expect(document.activeElement).toBe(input)
++
++    cancel.focus()
++    keydown(dialog, 'Tab')
++    expect(document.activeElement).toBe(input)
++
++    keydown(dialog, 'Escape')
++    await nextTick()
++    expect(client.element.querySelector('.credential-dialog')).toBeNull()
++    expect(document.activeElement).toBe(trigger)
++  })
++
++  it('treats compact overlays as modals and restores their trigger on Escape', async () => {
++    const client = await mountClient()
++    mounted.push(client)
++
++    const compactButton = client.element.querySelector<HTMLButtonElement>('button[aria-label="切换到紧凑模式"]')!
++    click(compactButton)
++    await nextTick()
++    const trigger = client.element.querySelector<HTMLButtonElement>('button[aria-label="打开最近会话"]')!
++    trigger.focus()
++    click(trigger)
++    await nextTick()
++
++    const dialog = client.element.querySelector<HTMLElement>('.compact-overlay')!
++    expect(dialog.getAttribute('role')).toBe('dialog')
++    expect(dialog.getAttribute('aria-modal')).toBe('true')
++    expect(document.activeElement?.getAttribute('aria-label')).toBe('关闭覆盖层')
++
++    keydown(dialog, 'Escape')
++    await nextTick()
++    expect(client.element.querySelector('.compact-overlay')).toBeNull()
++    expect(document.activeElement).toBe(trigger)
++  })
++
++  it('uses instant scrolling when reduced motion is requested', async () => {
++    vi.stubGlobal('matchMedia', vi.fn((query: string) => ({
++      matches: query.includes('prefers-reduced-motion'),
++      media: query,
++      onchange: null,
++      addEventListener: vi.fn(),
++      removeEventListener: vi.fn(),
++      addListener: vi.fn(),
++      removeListener: vi.fn(),
++      dispatchEvent: vi.fn(),
++    })))
++    const api = makeApi()
++    let listener: ((event: CompanionControlEvent) => void) | undefined
++    vi.mocked(api.subscribe).mockImplementation((next) => {
++      listener = next
++      return () => {}
++    })
++    const client = await mountClient(api)
++    mounted.push(client)
++
++    listener?.({
++      event: 'conversation.turn.started',
++      sequence: 1,
++      payload: { turn_id: 'turn-1', user_text: '你好' },
++    })
++    await nextTick()
++    expect(HTMLElement.prototype.scrollIntoView).toHaveBeenCalledWith({ behavior: 'auto', block: 'end' })
++  })
++
++  it('hides the standard window through window.close', async () => {
++    const close = vi.spyOn(window, 'close').mockImplementation(() => {})
++    const client = await mountClient()
++    mounted.push(client)
++
++    click(client.element.querySelector<HTMLButtonElement>('button[aria-label="隐藏到托盘"]')!)
++    expect(close).toHaveBeenCalledOnce()
++  })
++})
+diff --git a/apps/stage-tamagotchi/src/renderer/components/companion-desktop/companionDesktopStage.test.ts b/apps/stage-tamagotchi/src/renderer/components/companion-desktop/companionDesktopStage.test.ts
+new file mode 100644
+index 00000000..5622eb4b
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/renderer/components/companion-desktop/companionDesktopStage.test.ts
+@@ -0,0 +1,28 @@
++import { describe, expect, it } from 'vitest'
++
++import threeSceneSource from '../../../../../../packages/stage-ui-three/src/components/ThreeScene.vue?raw'
++import stageSource from './CompanionDesktopStage.vue?raw'
++
++describe('companion desktop avatar interaction surface', () => {
++  it('reserves compact avatar gestures for native window dragging', () => {
++    expect(stageSource).toContain('const windowMode = ref<CompanionWindowMode>(\'standard\')')
++    expect(stageSource).toContain('@window-mode-changed=\"windowMode = $event\"')
++    expect(stageSource).toContain(':enable-orbit-controls=\"windowMode === \'standard\'\"')
++    expect(stageSource).toContain('\'compact-drag-surface\': windowMode === \'compact\'')
++    expect(stageSource).toMatch(/\.compact-drag-surface\s*\{\s*-webkit-app-region:\s*drag;/)
++  })
++
++  it('pauses the avatar when reduced motion is requested', () => {
++    expect(stageSource).toContain(`useMediaQuery('(prefers-reduced-motion: reduce)')`)
++    expect(stageSource).toContain(':paused="prefersReducedMotion"')
++  })
++
++  it('temporarily disables the persisted sky box while compact', () => {
++    expect(stageSource).toContain(`:environment-mode="windowMode === 'compact' ? 'off' : undefined"`)
++    expect(stageSource).not.toContain('envSelect.value =')
++    expect(threeSceneSource).toContain(`environmentMode?: 'off' | 'hemisphere' | 'skyBox'`)
++    expect(threeSceneSource).toContain('const resolvedEnvSelect = computed(() => props.environmentMode ?? envSelect.value)')
++    expect(threeSceneSource).toContain(`v-if="resolvedEnvSelect === 'skyBox'"`)
++    expect(threeSceneSource).toContain(':env-select="resolvedEnvSelect"')
++  })
++})
+diff --git a/apps/stage-tamagotchi/src/renderer/pages/index.companion-boundary.test.ts b/apps/stage-tamagotchi/src/renderer/pages/index.companion-boundary.test.ts
+new file mode 100644
+index 00000000..9302471e
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/renderer/pages/index.companion-boundary.test.ts
+@@ -0,0 +1,12 @@
++import { readFileSync } from 'node:fs'
++
++import { describe, expect, it } from 'vitest'
++
++const source = readFileSync(new URL('./index.vue', import.meta.url), 'utf8')
++
++describe('main stage onboarding boundary', () => {
++  it('keeps ordinary AIRI onboarding while excluding Companion Desktop', () => {
++    expect(source).toMatch(/if \(!companionDesktopEnabled && onboardingStore\.needsOnboarding\)/)
++    expect(source).toContain('openOnboarding()')
++  })
++})
+diff --git a/apps/stage-tamagotchi/src/renderer/pages/index.vue b/apps/stage-tamagotchi/src/renderer/pages/index.vue
+index 15517d67..44fba60f 100644
+--- a/apps/stage-tamagotchi/src/renderer/pages/index.vue
++++ b/apps/stage-tamagotchi/src/renderer/pages/index.vue
+@@ -1,6 +1,7 @@
+ <script setup lang="ts">
+ import type { ModelSettingsRuntimeSnapshot } from '@proj-airi/stage-ui/components/scenarios/settings/model-settings/runtime'
+ 
++import type { CompanionControlApi } from '../../shared/companion-control'
+ import type { ModelSettingsRuntimeChannelEvent } from '../../shared/model-settings-runtime'
+ 
+ import { defineInvokeHandler } from '@moeru/eventa'
+@@ -35,6 +36,7 @@ import { storeToRefs } from 'pinia'
+ import { computed, onMounted, onUnmounted, ref, shallowRef, toRef, watch } from 'vue'
+ import { toast } from 'vue-sonner'
+ 
++import CompanionDesktopClient from '../components/companion-desktop/CompanionDesktopClient.vue'
+ import ControlsIsland from '../components/stage-islands/controls-island/index.vue'
+ import ResourceStatusIsland from '../components/stage-islands/resource-status-island/index.vue'
+ import StatusIsland from '../components/stage-islands/status-island/index.vue'
+@@ -54,6 +56,8 @@ import {
+ } from '../utils/voice-input-suppression'
+ 
+ const controlsIslandRef = ref<InstanceType<typeof ControlsIsland>>()
++const companionControl = (window as unknown as { api: CompanionControlApi }).api
++const companionDesktopEnabled = companionControl?.enabled === true
+ const statusIslandRef = ref<InstanceType<typeof StatusIsland>>()
+ const widgetStageRef = ref<InstanceType<typeof WidgetStage>>()
+ const stageCanvas = toRef(() => widgetStageRef.value?.canvasElement())
+@@ -650,7 +654,7 @@ watch(nowSpeaking, async (speaking) => {
+ })
+ 
+ onMounted(() => {
+-  if (onboardingStore.needsOnboarding) {
++  if (!companionDesktopEnabled && onboardingStore.needsOnboarding) {
+     openOnboarding()
+   }
+ })
+@@ -693,7 +697,26 @@ onUnmounted(() => cleanupAvatarRendererHandler())
+ </script>
+ 
+ <template>
++  <CompanionDesktopClient
++    v-if="companionDesktopEnabled"
++    :api="companionControl"
++    :loading="isLoading"
++  >
++    <WidgetStage
++      ref="widgetStageRef"
++      v-model:state="componentStateStage"
++      h-full w-full
++      :cursor-position="cursorPosition"
++      :paused="stagePaused"
++      @avatar-stage-mounted="renderer => avatarRendererRuntime.notifyStageMounted(renderer)"
++      @avatar-stage-unmounted="avatarRendererRuntime.notifyStageUnmounted()"
++      @avatar-model-loading="(renderer, modelId) => avatarRendererRuntime.notifyModelLoading(renderer, modelId)"
++      @avatar-model-loaded="(renderer, modelId) => avatarRendererRuntime.notifyModelLoaded(renderer, modelId)"
++      @avatar-frame-presented="avatarRendererRuntime.notifyPresentedFrame()"
++    />
++  </CompanionDesktopClient>
+   <div
++    v-else
+     max-h="[100vh]"
+     max-w="[100vw]"
+     flex="~ col"
+@@ -762,6 +785,7 @@ onUnmounted(() => cleanupAvatarRendererHandler())
+     </div>
+   </div>
+   <Transition
++    v-if="!companionDesktopEnabled"
+     enter-active-class="transition-opacity duration-250"
+     enter-from-class="opacity-0"
+     enter-to-class="opacity-100"
+@@ -793,6 +817,7 @@ onUnmounted(() => cleanupAvatarRendererHandler())
+     </div>
+   </Transition>
+   <Transition
++    v-if="!companionDesktopEnabled"
+     enter-active-class="transition-opacity duration-250 ease-in-out"
+     enter-from-class="opacity-50"
+     enter-to-class="opacity-100"
+diff --git a/apps/stage-tamagotchi/src/renderer/styles/main.css b/apps/stage-tamagotchi/src/renderer/styles/main.css
+index 1bd05c60..0328b26e 100644
+--- a/apps/stage-tamagotchi/src/renderer/styles/main.css
++++ b/apps/stage-tamagotchi/src/renderer/styles/main.css
+@@ -46,3 +46,18 @@ html.dark {
+   width: 100%;
+   height: 2px;
+ }
++
++@media (prefers-reduced-motion: reduce) {
++  html {
++    transition: none;
++  }
++
++  *,
++  *::before,
++  *::after {
++    animation-duration: 0.01ms !important;
++    animation-iteration-count: 1 !important;
++    scroll-behavior: auto !important;
++    transition-duration: 0.01ms !important;
++  }
++}
+diff --git a/apps/stage-tamagotchi/src/shared/companion-control.ts b/apps/stage-tamagotchi/src/shared/companion-control.ts
+new file mode 100644
+index 00000000..f7f9854a
+--- /dev/null
++++ b/apps/stage-tamagotchi/src/shared/companion-control.ts
+@@ -0,0 +1,79 @@
++export const COMPANION_CONTROL_PROTOCOL = 'companion-control'
++export const COMPANION_CONTROL_VERSION = 1
++export const COMPANION_CONTROL_IPC_REQUEST = 'companion-control:request'
++export const COMPANION_CONTROL_IPC_EVENT = 'companion-control:event'
++export const COMPANION_CONTROL_IPC_WINDOW_MODE = 'companion-control:window-mode'
++
++export type CompanionWindowMode = 'standard' | 'compact'
++export type CompanionCredentialKind = 'llm' | 'tts'
++export type CompanionControlEventName
++  = | 'runtime.snapshot'
++    | 'conversation.turn.started'
++    | 'conversation.response.delta'
++    | 'conversation.turn.interrupted'
++    | 'conversation.turn.completed'
++    | 'conversation.turn.failed'
++    | 'voice.state.changed'
++    | 'emotion.changed'
++
++export interface CompanionControlEvent {
++  event: CompanionControlEventName
++  sequence: number
++  payload: Record<string, unknown>
++}
++
++export function createCompanionConnectionErrorEvent(): CompanionControlEvent {
++  return {
++    event: 'runtime.snapshot',
++    sequence: 0,
++    payload: {
++      phase: 'error',
++      capabilities: {
++        text_chat: false,
++        voice_input: false,
++        speech_output: false,
++        avatar: false,
++      },
++      active_turn: null,
++      error: {
++        code: 'control_disconnected',
++        message: '桌面宿主连接已断开。',
++        retryable: true,
++      },
++    },
++  }
++}
++
++export interface CompanionControlApi {
++  enabled: boolean
++  runtimeSnapshot: () => Promise<Record<string, unknown>>
++  runtimeRetry: () => Promise<{ accepted: boolean }>
++  listSessions: (params?: { cursor?: string, limit?: number }) => Promise<Record<string, unknown>>
++  history: (params: { session_id: string, cursor?: string, limit?: number }) => Promise<Record<string, unknown>>
++  send: (params: { text: string, speak: boolean }) => Promise<{ turn_id: string }>
++  cancel: (params: { turn_id: string }) => Promise<{ cancelled: boolean }>
++  startVoice: () => Promise<{ started: boolean }>
++  stopVoice: () => Promise<{ stopped: boolean }>
++  setCredential: (params: { kind: CompanionCredentialKind, value: string, overwrite: boolean }) => Promise<Record<string, unknown>>
++  quit: () => Promise<{ accepted: boolean }>
++  setWindowMode: (mode: CompanionWindowMode) => Promise<void>
++  subscribe: (listener: (event: CompanionControlEvent) => void) => () => void
++}
++
++export interface CompanionControlEnvironment {
++  [key: string]: string | undefined
++  COMPANION_CONTROL_URL?: string
++  COMPANION_CONTROL_TOKEN?: string
++}
++
++export function consumeCompanionControlEnvironment(environment: CompanionControlEnvironment): { url: string, token: string } | undefined {
++  const url = environment.COMPANION_CONTROL_URL?.trim()
++  const token = environment.COMPANION_CONTROL_TOKEN?.trim()
++  delete environment.COMPANION_CONTROL_URL
++  delete environment.COMPANION_CONTROL_TOKEN
++  if (!url && !token)
++    return undefined
++  if (!url || !token || !/^ws:\/\/127\.0\.0\.1:\d{1,5}$/.test(url))
++    throw new Error('Companion Control environment is invalid')
++  return { url, token }
++}
+diff --git a/packages/stage-ui-three/src/components/ThreeScene.vue b/packages/stage-ui-three/src/components/ThreeScene.vue
+index 94f1432a..e456d209 100644
+--- a/packages/stage-ui-three/src/components/ThreeScene.vue
++++ b/packages/stage-ui-three/src/components/ThreeScene.vue
+@@ -52,6 +52,7 @@ const props = withDefaults(defineProps<{
+   cursorPosition?: { x: number, y: number }
+   modelSrc?: string
+   skyBoxSrc?: string
++  environmentMode?: 'off' | 'hemisphere' | 'skyBox'
+   /**
+    * Enables user-driven OrbitControls camera rotation and zoom.
+    *
+@@ -145,6 +146,7 @@ const {
+   renderScale,
+   multisampling,
+ } = storeToRefs(modelStore)
++const resolvedEnvSelect = computed(() => props.environmentMode ?? envSelect.value)
+ 
+ type VrmFrameRuntimeHook = (vrm: VRM, delta: number) => void
+ 
+@@ -529,7 +531,7 @@ function onTresRender() {
+ }
+ 
+ onMounted(() => {
+-  if (envSelect.value === 'skyBox') {
++  if (resolvedEnvSelect.value === 'skyBox') {
+     skyBoxEnvRef.value?.reload(skyBoxSrc.value)
+   }
+ })
+@@ -756,7 +758,7 @@ defineExpose({
+         @orbit-controls-ready="onOrbitControlsReady"
+       />
+       <SkyBox
+-        v-if="envSelect === 'skyBox'"
++        v-if="resolvedEnvSelect === 'skyBox'"
+         ref="skyBoxEnvRef"
+         :sky-box-src="skyBoxSrc"
+         :as-background="true"
+@@ -795,7 +797,7 @@ defineExpose({
+         :model-src="props.modelSrc"
+         :idle-animation="props.idleAnimation"
+         :paused="props.paused"
+-        :env-select="envSelect"
++        :env-select="resolvedEnvSelect"
+         :sky-box-intensity="skyBoxIntensity"
+         :npr-irr-s-h="irrSHTex"
+         :model-offset="modelOffset"

@@ -156,9 +156,11 @@ class CompanionOrchestrator:
         self._session_id = f"sess_{generate_ulid()}"
         self._reset_gesture_scheduler()
 
-        # Health-check all providers and aggregate results
-        health_results: dict[str, str] = {}
-        for name, provider in [
+        # Health-check all providers and aggregate results. Local model
+        # providers (e.g. faster-whisper ASR) report DEGRADED until their model
+        # is loaded, so preload them before the health check; the preloads run
+        # concurrently with the network-backed provider checks.
+        providers = [
             ("LLM", self._llm),
             ("TTS", self._tts),
             ("ASR", self._asr),
@@ -166,15 +168,31 @@ class CompanionOrchestrator:
             ("Avatar", self._avatar),
             ("Action", self._action),
             ("Perception", self._perception),
-        ]:
-            if provider:
-                try:
-                    health = await provider.health_check()
-                    health_results[name] = str(health)
-                    logger.info("%s provider health: %s", name, health)
-                except Exception:
-                    health_results[name] = "error"
-                    logger.exception("%s provider health check failed", name)
+        ]
+
+        async def check_provider(name: str, provider: Any) -> tuple[str, str] | None:
+            if provider is None:
+                return None
+            try:
+                preload = getattr(provider, "preload", None)
+                if preload is not None:
+                    await preload()
+                health = await provider.health_check()
+                return name, str(health)
+            except Exception:
+                logger.exception("%s provider health check failed", name)
+                return name, "error"
+
+        results = await asyncio.gather(
+            *(check_provider(name, provider) for name, provider in providers)
+        )
+        health_results: dict[str, str] = {}
+        for result in results:
+            if result is not None:
+                name, health = result
+                health_results[name] = health
+        for name, health in health_results.items():
+            logger.info("%s provider health: %s", name, health)
 
         healthy_count = sum(1 for v in health_results.values() if v == "healthy")
         logger.info(

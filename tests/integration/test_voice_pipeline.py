@@ -71,7 +71,6 @@ def terminal_events(events: list[BaseEvent]) -> list[BaseEvent]:
         if event.event_type
         in {
             "conversation.turn.completed",
-            "conversation.turn.interrupted",
             "conversation.turn.failed",
         }
     ]
@@ -168,12 +167,57 @@ class TestVoicePipelineIntegration:
         result = await task
         assert result
         assert output.stop_calls == 1
-        assert pipeline.get_current_state() == "interrupted"
+        assert pipeline.get_current_state() == "idle"
 
-        event_types: list[str] = []
-        await pipeline._bus.replay(lambda event: event_types.append(event.event_type))
-        assert "conversation.turn.interrupted" in event_types
-        assert "conversation.turn.completed" not in event_types
+        events = await captured_events(pipeline._bus)
+        assert sum(event.event_type == "conversation.turn.interrupted" for event in events) == 1
+        terminal = terminal_events(events)
+        assert [event.event_type for event in terminal] == ["conversation.turn.failed"]
+        assert isinstance(terminal[0], ConversationTurnFailedEvent)
+        assert terminal[0].stage == "cancellation"
+
+    @pytest.mark.asyncio
+    async def test_interrupted_turn_rejects_new_work_until_terminal_is_published(self):
+        persisted: list[BaseEvent] = []
+        interruption_entered = asyncio.Event()
+        release_interruption = asyncio.Event()
+
+        async def persist(event: BaseEvent) -> None:
+            if event.event_type == "conversation.turn.interrupted":
+                interruption_entered.set()
+                await release_interruption.wait()
+            persisted.append(event)
+
+        output = FakeAudioOutput(blocking=True)
+        voice = VoicePipeline(
+            state=StateManager(),
+            bus=EventBus("interrupt-ordering", persistence_handler=persist),
+            policy=PolicyGate(),
+            llm=MockLLMProvider(),
+            tts=MockTTSProvider(),
+            audio_output=output,
+        )
+        first = asyncio.create_task(voice.process_text_input("first", speak=True))
+        await output.started.wait()
+        interruption = asyncio.create_task(voice.interrupt())
+        await interruption_entered.wait()
+        second = asyncio.create_task(voice.process_text_input("second"))
+        await asyncio.sleep(0)
+
+        assert not second.done()
+        assert len([e for e in persisted if e.event_type == "conversation.turn.started"]) == 1
+
+        release_interruption.set()
+        assert await interruption
+        assert await first == "mock response"
+        assert await second == "mock response"
+        events = persisted
+        starts = [e for e in events if e.event_type == "conversation.turn.started"]
+        terminals = terminal_events(events)
+        assert len(starts) == 2
+        assert len(terminals) == 2
+        assert terminals[0].event_type == "conversation.turn.failed"
+        assert terminals[1].event_type == "conversation.turn.completed"
 
     @pytest.mark.asyncio
     async def test_interrupt_commits_only_confirmed_played_text_to_runtime_history(self):
@@ -226,16 +270,22 @@ class TestVoicePipelineIntegration:
         await task
         await asyncio.sleep(0)
         history = runtime.get_conversation_history().get_recent_turns()
+        events = await captured_events(bus)
         interrupted = next(
             event
-            for event in await captured_events(bus)
+            for event in events
             if event.event_type == "conversation.turn.interrupted"
+        )
+        completed = next(
+            event for event in events if isinstance(event, ConversationTurnCompletedEvent)
         )
 
         assert len(history) == 1
         assert history[0].user_text == "hello"
         assert history[0].companion_text == "第一句。"
         assert interrupted.interrupted_at_audio_ms >= 0
+        assert completed.companion_text == "第一句。"
+        assert completed.was_interrupted is True
 
     @pytest.mark.asyncio
     async def test_cancelled_interrupt_call_still_persists_interrupted_terminal(self):
@@ -271,7 +321,7 @@ class TestVoicePipelineIntegration:
         assert await response_task == "mock response"
         terminal = terminal_events(persisted)
 
-        assert [event.event_type for event in terminal] == ["conversation.turn.interrupted"]
+        assert [event.event_type for event in terminal] == ["conversation.turn.failed"]
 
     @pytest.mark.asyncio
     async def test_interruption_persistence_failure_records_failed_terminal(self):
@@ -330,7 +380,7 @@ class TestVoicePipelineIntegration:
         assert await response_task == "mock response"
         terminal = terminal_events(await captured_events(bus))
 
-        assert [event.event_type for event in terminal] == ["conversation.turn.interrupted"]
+        assert [event.event_type for event in terminal] == ["conversation.turn.failed"]
 
     @pytest.mark.asyncio
     async def test_cancellation_ignoring_provider_cannot_block_interrupt(self):
@@ -396,7 +446,7 @@ class TestVoicePipelineIntegration:
             await turn_task
         terminal = terminal_events(await captured_events(bus))
 
-        assert [event.event_type for event in terminal] == ["conversation.turn.interrupted"]
+        assert [event.event_type for event in terminal] == ["conversation.turn.failed"]
         with pytest.raises(RuntimeError, match="shut down"):
             await voice.process_text_input("after shutdown")
         await voice.shutdown()
@@ -1035,7 +1085,7 @@ class TestVoicePipelineIntegration:
 
         assert asr.cancel_calls == 1
         assert llm.calls == 0
-        assert [event.event_type for event in terminal] == ["conversation.turn.interrupted"]
+        assert [event.event_type for event in terminal] == ["conversation.turn.failed"]
 
     @pytest.mark.asyncio
     async def test_interrupt_while_llm_event_commits_cannot_resume_playback(self):
@@ -1069,7 +1119,9 @@ class TestVoicePipelineIntegration:
         terminal = terminal_events(persisted)
 
         assert output.play_calls == 1
-        assert [event.event_type for event in terminal] == ["conversation.turn.interrupted"]
+        assert [event.event_type for event in terminal] == ["conversation.turn.completed"]
+        assert isinstance(terminal[0], ConversationTurnCompletedEvent)
+        assert terminal[0].was_interrupted is True
 
     @pytest.mark.asyncio
     async def test_interrupt_while_tts_event_commits_cannot_start_playback(self):
@@ -1103,7 +1155,7 @@ class TestVoicePipelineIntegration:
         terminal = terminal_events(persisted)
 
         assert output.play_calls == 0
-        assert [event.event_type for event in terminal] == ["conversation.turn.interrupted"]
+        assert [event.event_type for event in terminal] == ["conversation.turn.failed"]
 
     @pytest.mark.asyncio
     async def test_concurrent_turns_are_serialized(self):

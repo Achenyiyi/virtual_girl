@@ -152,6 +152,34 @@ async def test_orchestrator_does_not_start_with_unhealthy_configured_action() ->
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_preloads_asr_before_health_check() -> None:
+    preloaded = False
+
+    class RecordingASRProvider:
+        async def preload(self) -> None:
+            nonlocal preloaded
+            preloaded = True
+
+        async def health_check(self) -> ProviderHealth:
+            return ProviderHealth.HEALTHY if preloaded else ProviderHealth.DEGRADED
+
+        async def shutdown(self) -> None:
+            pass
+
+    orchestrator = CompanionOrchestrator(
+        StateManager(),
+        EventBus("test"),
+        PolicyGate(),
+        llm_provider=MockLLMProvider(),
+        asr_provider=RecordingASRProvider(),  # type: ignore[arg-type]
+    )
+
+    assert await orchestrator.startup()
+    assert preloaded
+    assert orchestrator.is_running
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_shutdown_records_success() -> None:
     orchestrator = CompanionOrchestrator(
         StateManager(),

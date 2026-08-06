@@ -75,3 +75,33 @@ async def test_health_is_unhealthy_when_optional_package_is_missing(monkeypatch)
     )
     provider = FasterWhisperASRProvider()
     assert await provider.health_check() == ProviderHealth.UNHEALTHY
+
+
+@pytest.mark.asyncio
+async def test_preload_loads_model_and_reports_healthy(monkeypatch) -> None:
+    loads: list[str] = []
+
+    def fake_whisper_model(*_args, **_kwargs):
+        loads.append("load")
+        return FakeModel()
+
+    class FakeWhisperModule:
+        WhisperModel = staticmethod(fake_whisper_model)
+
+    real_import = __import__("importlib").import_module
+
+    def fake_import(name: str):
+        return FakeWhisperModule() if name == "faster_whisper" else real_import(name)
+
+    monkeypatch.setattr(
+        "companion.providers.implementations.faster_whisper_asr.importlib.import_module",
+        fake_import,
+    )
+    provider = FasterWhisperASRProvider()
+
+    assert await provider.health_check() == ProviderHealth.DEGRADED
+    await provider.preload()
+
+    assert loads == ["load"]
+    assert provider._model is not None
+    assert await provider.health_check() == ProviderHealth.HEALTHY

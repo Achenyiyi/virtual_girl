@@ -36,6 +36,7 @@ from companion.core.expression_mapper import ExpressionMapper
 from companion.core.orchestrator import CompanionOrchestrator
 from companion.core.policy_gate import PolicyGate
 from companion.core.state_manager import StateManager
+from companion.desktop.host import DesktopHost
 from companion.diagnostics import render_diagnostic_report, run_diagnostics
 from companion.memory.memory_service import MemoryService
 from companion.providers.base import ProviderHealth
@@ -395,6 +396,98 @@ class CompanionApp:
             model = self._config.llm_config.model if self._config.llm_config else "unknown"
             print(f"{Colors.DIM}  模型: {provider}/{model}{Colors.RESET}")
         print()
+        return True
+
+    async def start_desktop_runtime(
+        self, *, control_url: str, control_token: str
+    ) -> bool:
+        """Launch AIRI first, then attempt degradable provider readiness."""
+        if self._action_audit:
+            try:
+                if not await self._action_audit.verify_chain():
+                    return False
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Desktop action audit readiness check failed"
+                )
+                return False
+        if self._avatar_stage:
+            avatar_config = self._config.avatar_config
+            token = avatar_config.get_auth_token() if avatar_config else ""
+            try:
+                await self._avatar_stage.start(
+                    token,
+                    control_url=control_url,
+                    control_token=control_token,
+                )
+                await self._avatar_stage.wait_until_bridge_ready()
+            except asyncio.CancelledError:
+                await self._cleanup_managed_avatar_after_failed_start()
+                raise
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Managed desktop AIRI startup failed"
+                )
+                await self._cleanup_managed_avatar_after_failed_start()
+                return False
+        return True
+
+    async def retry_desktop_readiness(self) -> dict[str, str]:
+        """Re-check providers without restarting either desktop process."""
+        results: dict[str, str] = {}
+        for name, provider in (
+            ("llm", self._llm),
+            ("tts", self._tts),
+            ("asr", self._asr),
+            ("memory", self._memory),
+            ("avatar", self._avatar),
+            ("action", self._action_provider),
+        ):
+            if provider is None:
+                results[name] = "unavailable"
+                continue
+            try:
+                results[name] = str(await provider.health_check())
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Desktop %s readiness check failed", name
+                )
+                results[name] = "unhealthy"
+        llm_ready = results.get("llm") == "healthy"
+        required_local_ready = results.get("memory") == "healthy"
+        avatar_ready = results.get("avatar") in {None, "healthy", "unavailable"}
+        action_ready = results.get("action") in {None, "healthy", "unavailable"}
+        if llm_ready and required_local_ready and avatar_ready and action_ready:
+            try:
+                if not self._orchestrator.is_running:
+                    orchestrator_ready = await self._orchestrator.startup()
+                    results["runtime"] = "healthy" if orchestrator_ready else "unhealthy"
+                else:
+                    results["runtime"] = "healthy"
+            except Exception:
+                logging.getLogger(__name__).exception("Desktop runtime startup failed")
+                results["runtime"] = "unhealthy"
+        else:
+            results["runtime"] = "unavailable"
+        if self._voice_pipeline.current_session_id == "":
+            await self._voice_pipeline.start_session()
+        return results
+
+    async def prepare_desktop_voice(self) -> bool:
+        """Preload desktop voice providers without emitting CLI output."""
+        if not self._asr or not self._tts:
+            return False
+        try:
+            await self._asr.preload()
+            asr_health = await self._asr.health_check()
+            tts_health = await self._tts.health_check()
+        except Exception:
+            logging.getLogger(__name__).exception("Desktop voice readiness failed")
+            return False
+        if asr_health != ProviderHealth.HEALTHY or tts_health != ProviderHealth.HEALTHY:
+            return False
+        if self._voice_pipeline.current_session_id == "":
+            await self._voice_pipeline.start_session()
         return True
 
     async def _cleanup_managed_avatar_after_failed_start(self) -> None:
@@ -862,6 +955,12 @@ async def async_main(args: argparse.Namespace) -> int:
             logging.getLogger(__name__).warning(
                 "Recovered an unclean prior runtime after full SQLite integrity validation"
             )
+        if getattr(args, "desktop", False):
+            host = DesktopHost(app, config)
+            desktop_ready = await host.run()
+            if desktop_ready and app.shutdown_clean and recovery_guard is not None:
+                recovery_guard.finish_clean()
+            return 0 if desktop_ready else 1
         if quiet_output:
             with contextlib.redirect_stdout(io.StringIO()):
                 ready = await app.start()
@@ -1113,6 +1212,11 @@ def main() -> None:
     )
     parser.add_argument("--once", "-1", type=str, default=None, help="发送一条消息后退出")
     parser.add_argument(
+        "--desktop",
+        action="store_true",
+        help="启动由 Python 托管的 AIRI Windows 桌面客户端",
+    )
+    parser.add_argument(
         "--log-level",
         type=str,
         default=None,
@@ -1262,6 +1366,15 @@ def main() -> None:
         parser.error(
             "validate-config、credential、doctor、accept-voice、accept-avatar、backup-memory、"
             "verify-memory-backup 和 restore-memory-backup 模式不能组合使用"
+        )
+    if args.desktop and (
+        args.once
+        or args.voice
+        or args.voice_input
+        or maintenance_modes
+    ):
+        parser.error(
+            "--desktop 只能与 --config 和 --log-level 组合，不能与 CLI 对话、语音或维护模式组合"
         )
     if args.accept_voice and args.accept_voice_json:
         parser.error("--accept-voice 和 --accept-voice-json 只能选择一个")

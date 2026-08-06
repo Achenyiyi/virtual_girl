@@ -66,6 +66,44 @@ def test_airi_build_script_pins_pnpm_for_builder_subprocesses() -> None:
     assert '"resources\\godot-stage\\godot-stage.exe"' in script
 
 
+def test_airi_build_script_applies_both_patches_and_rolls_back_partial_failure() -> None:
+    script = (
+        Path(__file__).resolve().parents[1] / "scripts" / "build_airi_windows.ps1"
+    ).read_text(encoding="utf-8")
+
+    avatar_patch = 'airi-v0.11.3-avatar-bridge.patch'
+    desktop_patch = 'airi-v0.11.3-desktop-client.patch'
+    assert script.index(avatar_patch) < script.index(desktop_patch)
+    assert "foreach ($patch in @($avatarPatch, $desktopPatch))" in script
+    assert "Invoke-AiriPatchRollback" in script
+    assert "for ($index = $AppliedPatches.Count - 1; $index -ge 0; $index--)" in script
+    assert "$appliedPatch = $AppliedPatches[$index]" in script
+    assert "Select-Object -Reverse" not in script
+    assert "apply --reverse --ignore-space-change --ignore-whitespace" in script
+    assert "AIRI patch validation failed" in script
+    assert "AIRI patch application failed" in script
+    assert '$globalJsonCreated = $false' in script
+    open_index = script.index('$globalJsonStream = [IO.File]::Open')
+    owned_index = script.index('$globalJsonCreated = $true', open_index)
+    write_index = script.index('$globalJsonStream.Write', open_index)
+    assert open_index < owned_index < write_index
+    assert 'if ($globalJsonCreated -and (Test-Path -LiteralPath $globalJsonPath' in script
+    assert 'Remove-Item -LiteralPath $globalJsonPath -Force' in script
+
+
+def test_airi_ci_checks_both_patches_in_order() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+
+    avatar_patch = "airi-v0.11.3-avatar-bridge.patch"
+    desktop_patch = "airi-v0.11.3-desktop-client.patch"
+    assert workflow.index(avatar_patch) < workflow.index(desktop_patch)
+    assert "foreach ($patch in $patches)" in workflow
+    assert "apply --check --ignore-space-change --ignore-whitespace" in workflow
+    assert "git -C $airiCheckout apply --ignore-space-change" in workflow
+
+
 def test_airi_workflow_pins_exact_dotnet_sdk() -> None:
     workflow = (
         Path(__file__).resolve().parents[1] / ".github" / "workflows" / "airi-windows.yml"

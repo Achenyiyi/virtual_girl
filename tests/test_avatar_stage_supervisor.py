@@ -220,6 +220,44 @@ def test_child_environment_excludes_credentials_proxy_and_debug_hooks() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("control_url", "control_token"),
+    (
+        ("ws://127.0.0.1:49152", ""),
+        ("", "control-token"),
+    ),
+)
+def test_child_environment_requires_control_url_and_token_together(
+    control_url: str, control_token: str
+) -> None:
+    with pytest.raises(AvatarStageLaunchError, match="provided together"):
+        _build_child_environment(
+            {"PATH": "C:\\Windows"},
+            "bridge-token",
+            control_url=control_url,
+            control_token=control_token,
+        )
+
+
+@pytest.mark.parametrize(
+    "control_url",
+    (
+        "ws://localhost:49152",
+        "ws://0.0.0.0:49152",
+        "wss://127.0.0.1:49152",
+        "ws://192.0.2.10:49152",
+    ),
+)
+def test_child_environment_rejects_non_loopback_control_url(control_url: str) -> None:
+    with pytest.raises(AvatarStageLaunchError, match="must use loopback"):
+        _build_child_environment(
+            {"PATH": "C:\\Windows"},
+            "bridge-token",
+            control_url=control_url,
+            control_token="control-token",
+        )
+
+
 def test_validate_installation_rejects_modified_or_non_vrm_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -284,6 +322,8 @@ async def test_start_uses_exact_process_boundary_and_job_assignment(
     await supervisor.start(
         "bridge-token",
         parent_environment={"PATH": "C:\\Windows", "DEEPSEEK_API_KEY": "secret"},
+        control_url="ws://127.0.0.1:49152",
+        control_token="control-token",
     )
 
     assert job.assigned == [process.pid]
@@ -302,6 +342,8 @@ async def test_start_uses_exact_process_boundary_and_job_assignment(
         "COMPANION_AVATAR_MODEL_SHA256": model_digest,
         "COMPANION_AVATAR_MODEL_ID": "managed-nemesia",
         "COMPANION_AVATAR_MODEL_NAME": "Nemesia pajamas",
+        "COMPANION_CONTROL_URL": "ws://127.0.0.1:49152",
+        "COMPANION_CONTROL_TOKEN": "control-token",
     }
     assert options["creationflags"] & 0x00000004
 

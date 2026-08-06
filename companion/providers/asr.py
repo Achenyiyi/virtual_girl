@@ -104,6 +104,14 @@ class ASRProvider(Provider):
     @abstractmethod
     def provider_info(self) -> ProviderInfo: ...
 
+    async def preload(self) -> None:
+        """Load heavyweight resources before readiness checks.
+
+        Local model providers override this so `health_check` can report
+        HEALTHY once the model is resident in memory. The default no-op keeps
+        cloud-backed implementations cheap.
+        """
+
     @abstractmethod
     async def health_check(self) -> ProviderHealth: ...
 

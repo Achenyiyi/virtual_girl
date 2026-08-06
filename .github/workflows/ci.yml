@@ -53,7 +53,7 @@ jobs:
       - name: Type check
         run: mypy companion scripts
 
-      - name: Verify pinned AIRI patch applies
+      - name: Verify pinned AIRI patches apply in order
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
@@ -64,7 +64,14 @@ jobs:
           git -C $airiCheckout remote add origin https://github.com/moeru-ai/airi.git
           git -C $airiCheckout fetch --depth=1 origin dbf812488829a61cc2e95909e021b215704d066c
           git -C $airiCheckout checkout --detach FETCH_HEAD
-          git -C $airiCheckout apply --check "$env:GITHUB_WORKSPACE\integrations\airi-v0.11.3\airi-v0.11.3-avatar-bridge.patch"
+          $patches = @(
+            "$env:GITHUB_WORKSPACE\integrations\airi-v0.11.3\airi-v0.11.3-avatar-bridge.patch",
+            "$env:GITHUB_WORKSPACE\integrations\airi-v0.11.3\airi-v0.11.3-desktop-client.patch"
+          )
+          foreach ($patch in $patches) {
+            git -C $airiCheckout apply --check --ignore-space-change --ignore-whitespace --whitespace=nowarn $patch
+            git -C $airiCheckout apply --ignore-space-change --ignore-whitespace --whitespace=nowarn $patch
+          }
 
       - name: Verify AIRI bridge protocol core
         working-directory: integrations/airi-v0.11.3

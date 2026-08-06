@@ -1,6 +1,7 @@
-# AIRI v0.11.3 Avatar Bridge
+# AIRI v0.11.3 Companion integrations
 
-This directory contains the pinned AIRI-side implementation of Companion Avatar Protocol v1.
+This directory contains two ordered AIRI-side patches: Companion Avatar Protocol v1 and the
+Python-owned Windows desktop client. Both target the same pinned AIRI release.
 It targets AIRI `v0.11.3` (`dbf812488829a61cc2e95909e021b215704d066c`) because AIRI's remote
 plugin bootstrap is still empty in that release. The bridge must therefore be integrated into the
 desktop Electron main/renderer boundary instead of claiming compatibility with the unfinished
@@ -31,12 +32,14 @@ callback. This concrete wiring is not equivalent to runtime acceptance: the patc
 still compile, start with an injected bridge token, pass `--accept-avatar-json`, and receive human
 visual sign-off on the target machine.
 
-Apply the pinned patch from the root of a clean AIRI v0.11.3 checkout:
+Apply both pinned patches in order from the root of a clean AIRI v0.11.3 checkout:
 
 ```powershell
 git checkout dbf812488829a61cc2e95909e021b215704d066c
 git apply --check C:\path\to\virtual_girl\integrations\airi-v0.11.3\airi-v0.11.3-avatar-bridge.patch
 git apply C:\path\to\virtual_girl\integrations\airi-v0.11.3\airi-v0.11.3-avatar-bridge.patch
+git apply --check C:\path\to\virtual_girl\integrations\airi-v0.11.3\airi-v0.11.3-desktop-client.patch
+git apply C:\path\to\virtual_girl\integrations\airi-v0.11.3\airi-v0.11.3-desktop-client.patch
 ```
 
 The bridge remains disabled unless `COMPANION_AVATAR_TOKEN` is injected into the AIRI process.
@@ -83,6 +86,15 @@ corepack pnpm exec vitest run apps/stage-tamagotchi/src/main/services/electron/a
 Runtime dependencies are pinned to the same H3/CrossWS versions used by AIRI v0.11.3. The server
 must be started only when explicitly enabled, with its token injected by the launcher rather than
 stored in AIRI configuration or logs.
+
+The desktop client patch remains dormant unless both `COMPANION_CONTROL_URL` and
+`COMPANION_CONTROL_TOKEN` are present. Electron main consumes and deletes them, owns the raw
+WebSocket, and exposes only the fixed preload API. It adds the standard and compact window
+lifecycles plus the Vue conversation, read-only history, and credential/settings surfaces. A
+normal AIRI launch continues to use the original pet interface and preload behavior.
+
+`scripts/build_airi_windows.ps1` validates and applies Avatar first, Desktop second. Any later
+failure reverses every patch applied during that invocation so the pinned checkout can be retried.
 
 The patch leaves AIRI's existing `@mediapipe/tasks-vision` patched dependency and pnpm metadata
 unchanged. With the repository-declared pnpm `10.33.0`, a frozen filtered installation of the stage

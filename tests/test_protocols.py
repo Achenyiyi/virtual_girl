@@ -34,12 +34,15 @@ class TestTurnProtocol:
     def test_terminal_states_no_transitions(self):
         for state in [
             TurnState.COMPLETED,
-            TurnState.INTERRUPTED,
             TurnState.ERROR,
             TurnState.CANCELLED,
         ]:
             for target in TurnState:
                 assert not TurnProtocol.can_transition(state, target)
+        assert TurnProtocol.can_transition(TurnState.INTERRUPTED, TurnState.COMPLETED)
+        for target in TurnState:
+            if target != TurnState.COMPLETED:
+                assert not TurnProtocol.can_transition(TurnState.INTERRUPTED, target)
 
     def test_validate_turn_id(self):
         assert TurnProtocol.validate_turn_id("turn_01HXYZ1234567890ABCDEF")
@@ -129,6 +132,14 @@ class TestTurnManager:
         assert completed.state == TurnState.ERROR
 
         interrupted = mgr.create_turn("sess_test", 1)
+        mgr.transition(interrupted.turn_id, TurnState.LLM_THINKING)
+        mgr.interrupt_turn(interrupted.turn_id)
+
+        assert not interrupted.is_active
+        assert mgr.transition(interrupted.turn_id, TurnState.COMPLETED)
+        assert interrupted.state == TurnState.COMPLETED
+
+        interrupted = mgr.create_turn("sess_test", 2)
         mgr.transition(interrupted.turn_id, TurnState.LLM_THINKING)
         mgr.interrupt_turn(interrupted.turn_id)
 
